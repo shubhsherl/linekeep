@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Linekeep</string>
+    <string name="tile_label">Linekeep settings</string>
+    <string name="status_channel_name">Linekeep sync status</string>
+    <string name="notification_syncing">Linekeep — synchronizing</string>
+    <string name="notification_status">Linekeep — sync status</string>
+    <string name="sharing_disclosure">By tapping Grant permissions, you agree to share available call history (including older calls, cached names and SIM details) and recordings from your chosen folder with authorized company administrators. Ask your manager about consent and retention.</string>
+    <string name="restricted_history_explanation">Call history may also be blocked by your APK installer\'s restricted-permission policy. If Android does not offer access, ask your manager to check the installer. %1$s cannot override this restriction; accessible recordings can still sync.</string>
+    <string name="tile_instructions">Edit Android Quick Settings tiles and add %1$s settings for a shortcut.</string>
+    <string name="recording_explanation">%1$s does not record calls. Choose only the folder where Samsung Phone saves recordings. Supported audio in that folder and its subfolders can be shared; unrelated storage is not scanned.</string>
+</resources>

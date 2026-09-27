@@ -1,0 +1,11 @@
+{
+  "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "file": {
+    "displayName": "Synthetic unmatched call.wav",
+    "contentType": "audio/wav",
+    "expectedBytes": 32044
+  },
+  "call": {
+    "matchStatus": "unmatched"
+  }
+}

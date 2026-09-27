@@ -1,0 +1,11 @@
+{
+  "invitationCode": "join_fixture_replace_with_issued_code",
+  "device": {
+    "model": "Synthetic Samsung fixture",
+    "manufacturer": "samsung",
+    "androidVersion": "16",
+    "oneUiVersion": "8.0",
+    "appVersion": "0.1.0",
+    "phoneNumbers": ["+15555550123"]
+  }
+}

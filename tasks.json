@@ -1,0 +1,605 @@
+{
+  "schemaVersion": 1,
+  "project": "linekeep",
+  "sourceOfTruth": {
+    "contract": "docs/API_CONTRACT.md",
+    "architecture": "docs/CLOUDFLARE_PLAN.md",
+    "agentBrief": "handoffs/SERVER_AGENT.md"
+  },
+  "workflow": {
+    "statuses": [
+      "blocked",
+      "ready",
+      "in_progress",
+      "review",
+      "done"
+    ],
+    "claim": "Choose a ready task whose dependencies are done. Set status to in_progress, claimedBy to your agent name, and startedAt to an RFC 3339 timestamp before editing.",
+    "finish": "Meet every acceptance criterion, record concise evidence, set status to review, and set completedAt. A reviewing agent changes review to done.",
+    "scope": "Edit only ownedPaths. Propose contract changes in handoffs/SERVER_AGENT.md; docs/API_CONTRACT.md is frozen.",
+    "verification": "Follow the repository local-check policy. Run only a specific changed test file when needed; leave broad verification to CI."
+  },
+  "tasks": [
+    {
+      "id": "BE-001",
+      "title": "Scaffold the Cloudflare Worker",
+      "status": "done",
+      "claimedBy": "codex-root",
+      "startedAt": "2026-09-24T13:31:00Z",
+      "completedAt": "2026-09-24T13:38:33Z",
+      "dependsOn": [],
+      "ownedPaths": [
+        "server/package.json",
+        "server/package-lock.json",
+        "server/tsconfig.json",
+        "server/wrangler.jsonc",
+        "server/.dev.vars.example",
+        "server/.gitignore",
+        "server/src/env.ts",
+        "server/src/app.ts",
+        "server/src/index.ts",
+        "server/migrations/0001_initial.sql",
+        "server/README.md"
+      ],
+      "summary": "Provide a pinned local Wrangler toolchain, D1/R2 bindings, initial migration, and a runnable health route.",
+      "acceptanceCriteria": [
+        "npm installs a local Wrangler binary.",
+        "The initial D1 migration applies to local state.",
+        "GET /health returns HTTP 200 with ok, environment, and requestId.",
+        "README documents local and remote resource setup without credentials."
+      ]
+    },
+    {
+      "id": "BE-002",
+      "title": "Implement persistence and cryptographic primitives",
+      "status": "done",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-24T14:56:18Z",
+      "completedAt": "2026-09-24T15:10:48Z",
+      "dependsOn": [
+        "BE-001"
+      ],
+      "ownedPaths": [
+        "server/src/data/**",
+        "server/src/security/**",
+        "server/migrations/0002_*.sql"
+      ],
+      "summary": "Create D1 repositories for employees, invitations, devices, and calls plus token generation and keyed hashing modules.",
+      "acceptanceCriteria": [
+        "Repository interfaces hide SQL and enforce UTC timestamps and opaque IDs.",
+        "Invitation redemption is atomic, expiring, and single-use.",
+        "Device secrets use cryptographically secure randomness and only keyed hashes are persisted.",
+        "Call creation is idempotent on deviceId plus fingerprint.",
+        "Tests exercise behavior through repository and security module interfaces."
+      ]
+    },
+    {
+      "id": "BE-003",
+      "title": "Implement employee, invitation, registration, and heartbeat routes",
+      "status": "done",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-24T15:53:42Z",
+      "completedAt": "2026-09-24T16:14:17Z",
+      "dependsOn": [
+        "BE-002"
+      ],
+      "ownedPaths": [
+        "server/src/modules/identity/**",
+        "server/src/data/identity.ts"
+      ],
+      "summary": "Implement admin employee/invitation endpoints and device register, authentication, revocation support, and heartbeat behavior.",
+      "ownershipNote": "BE-003 owns the identity repository producer only to publish its existing interface as a named type for typed route-level caching; persistence behavior remains unchanged.",
+      "acceptanceCriteria": [
+        "Requests and responses match the frozen contract including requestId.",
+        "Registration consumes a valid invitation once and returns the device token once.",
+        "Bearer authentication rejects missing, invalid, and revoked credentials.",
+        "Heartbeat updates diagnostic fields without turning them into enforcement.",
+        "Module tests cover invitation reuse, expiry, token isolation, and revocation."
+      ]
+    },
+    {
+      "id": "BE-004",
+      "title": "Implement the recording upload lifecycle",
+      "status": "done",
+      "claimedBy": "RecordingRoutes",
+      "startedAt": "2026-09-24T15:53:42Z",
+      "completedAt": "2026-09-24T16:16:23Z",
+      "dependsOn": [
+        "BE-002"
+      ],
+      "ownedPaths": [
+        "server/src/modules/recordings/**",
+        "server/src/data/calls.ts",
+        "server/src/data/repositories.test.mjs"
+      ],
+      "summary": "Implement prepare and complete as an idempotent lifecycle over D1 and private R2 with server-generated object keys.",
+      "ownershipNote": "BE-004 also owns the completion repository predicate and its regression to make active-device/employee authorization atomic with the completion write, addressing UploadReview's race finding.",
+      "acceptanceCriteria": [
+        "Prepare validates the media allowlist, size limit, fingerprint, and optional metadata.",
+        "Repeated prepare returns the same call and a refreshed upload capability when pending.",
+        "Upload authorization is short-lived and scoped to one generated object key.",
+        "Complete verifies R2 object existence and plausible size before changing state.",
+        "Cross-device fingerprints remain isolated and tests cover invalid transitions."
+      ]
+    },
+    {
+      "id": "BE-005",
+      "title": "Implement admin call operations",
+      "status": "done",
+      "claimedBy": "AdminCallRoutes",
+      "startedAt": "2026-09-24T15:53:42Z",
+      "completedAt": "2026-09-24T16:14:17Z",
+      "dependsOn": [
+        "BE-002"
+      ],
+      "ownedPaths": [
+        "server/src/modules/admin-calls/**"
+      ],
+      "summary": "Implement filtered cursor pagination, authorized playback/download, and idempotent deletion.",
+      "acceptanceCriteria": [
+        "List filters and the 1 to 100 result limit match the contract and sort newest first.",
+        "Cursor pagination is stable when records share a timestamp.",
+        "Playback never exposes a permanent or public object URL.",
+        "Delete removes R2 content and marks metadata deleted; repeated delete succeeds.",
+        "Tests cover filters, authorization, playback expiry, and deletion retries."
+      ]
+    },
+    {
+      "id": "BE-006",
+      "title": "Build the pilot admin page",
+      "status": "done",
+      "claimedBy": "AdminPage",
+      "startedAt": "2026-09-24T15:50:06Z",
+      "completedAt": "2026-09-24T16:16:23Z",
+      "dependsOn": [
+        "BE-001"
+      ],
+      "ownedPaths": [
+        "server/src/admin-ui/**"
+      ],
+      "summary": "Build a small responsive UI for onboarding employees and finding, playing, downloading, and deleting recordings.",
+      "acceptanceCriteria": [
+        "UI supports all filters and cursor pagination in the contract.",
+        "Pending, failed, unmatched, complete, and deleted states are clear.",
+        "Playback refreshes an expiring URL and deletion requires confirmation.",
+        "Employee creation and one-time invitation display work without embedding admin secrets.",
+        "The page is usable on desktop and mobile widths."
+      ]
+    },
+    {
+      "id": "BE-007",
+      "title": "Assemble routes and enforce admin access",
+      "status": "done",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-24T16:16:23Z",
+      "completedAt": "2026-09-25T06:28:21Z",
+      "dependsOn": [
+        "BE-003",
+        "BE-004",
+        "BE-005",
+        "BE-006"
+      ],
+      "ownedPaths": [
+        "server/src/app.ts",
+        "server/src/index.ts",
+        "server/src/http/**",
+        "server/fixtures/**",
+        "server/wrangler.jsonc",
+        "server/.dev.vars.example",
+        "server/README.md",
+        "handoffs/SERVER_AGENT.md"
+      ],
+      "summary": "Mount feature modules, standardize request IDs and errors, enforce Cloudflare Access in production, and add contract fixtures.",
+      "ownershipNote": "BE-007 also owns local integration documentation/configuration, observability redaction, and the server handoff status section. Remote environment/resource provisioning stays BE-008.",
+      "acceptanceCriteria": [
+        "Every frozen route is mounted and returns the standard error shape.",
+        "Production admin routes require a validated Cloudflare Access identity.",
+        "The local admin bypass is explicit, secret-backed, and unavailable in production.",
+        "Logs redact bearer tokens, invitation codes, signed URLs, and phone numbers.",
+        "Fixtures cover every shared integration case in docs/HANDOFF.md."
+      ]
+    },
+    {
+      "id": "BE-008",
+      "title": "Provision and document the development deployment",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-25T06:38:36Z",
+      "completedAt": "2026-09-25T08:07:36Z",
+      "dependsOn": [
+        "BE-007"
+      ],
+      "ownedPaths": [
+        "server/wrangler.jsonc",
+        "server/package.json",
+        "server/README.md",
+        "server/scripts/**",
+        "handoffs/SERVER_AGENT.md"
+      ],
+      "summary": "Create Cloudflare development resources, configure bindings and secrets, deploy, and document Access, retention, rollback, and operations.",
+      "ownershipNote": "BE-008 includes package scripts so remote commands always select the named dev environment, matching the updated environment strategy.",
+      "acceptanceCriteria": [
+        "D1 and private R2 resources exist and production IDs are configured without committing secrets.",
+        "Remote migrations apply and the deployed health route responds.",
+        "Cloudflare Access restricts admin routes to the configured administrator.",
+        "R2 retention and billing alerts are documented and the bucket is verified private.",
+        "Rollback instructions cover Worker deployment and forward-only D1 recovery."
+      ]
+    },
+    {
+      "id": "BE-009",
+      "title": "Verify the end-to-end backend vertical slice",
+      "status": "blocked",
+      "claimedBy": null,
+      "startedAt": null,
+      "completedAt": null,
+      "dependsOn": [
+        "BE-008"
+      ],
+      "ownedPaths": [
+        "server/test/**",
+        "server/fixtures/**",
+        "server/README.md",
+        "handoffs/SERVER_AGENT.md"
+      ],
+      "summary": "Prove onboarding, authenticated upload, completion, admin discovery, playback, and deletion against the development deployment.",
+      "acceptanceCriteria": [
+        "One fixture employee registers exactly one device with a single-use invitation.",
+        "One fixture recording reaches complete and appears in the filtered admin list.",
+        "An authorized administrator can play or download and then delete it.",
+        "Unauthorized device and admin requests fail without leaking sensitive data.",
+        "Evidence and remaining risks are recorded in the server handoff."
+      ]
+    },
+    {
+      "id": "BE-010",
+      "title": "Repair authenticated administrator login",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-25T09:13:19Z",
+      "completedAt": "2026-09-25T09:21:22Z",
+      "dependsOn": [
+        "BE-007"
+      ],
+      "ownedPaths": [
+        "server/src/http/**",
+        "server/README.md",
+        "handoffs/SERVER_AGENT.md"
+      ],
+      "summary": "Diagnose and fix the deployed post-Access 401 without weakening administrator authentication.",
+      "acceptanceCriteria": [
+        "The real Access session reaches the deployed administrator page and API.",
+        "Invalid, expired, wrong-issuer and wrong-audience credentials remain rejected.",
+        "A focused regression captures the observed failure and temporary diagnostics are removed."
+      ]
+    },
+    {
+      "id": "BE-011",
+      "title": "Integrate employee management and stable device enrollment",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-25T10:45:18Z",
+      "completedAt": "2026-09-25T11:21:18Z",
+      "dependsOn": [
+        "BE-007"
+      ],
+      "ownedPaths": [
+        "server/README.md",
+        "server/fixtures/**",
+        "handoffs/SERVER_AGENT.md",
+        "handoffs/ANDROID_AGENT.md"
+      ],
+      "summary": "Specify the approved additive interface, integrate backend/UI/client slices, and verify device handovers end to end.",
+      "acceptanceCriteria": [
+        "Recordings and employee management are separate views with a complete employee directory.",
+        "Stable enrollment uses per-device authentication; SIM metadata is not an authentication factor.",
+        "Device reassignment preserves historical recording attribution and requires no employee re-enrollment.",
+        "Focused runtime and browser verification prove the implemented flows; hardware-only limitations are explicit."
+      ]
+    },
+    {
+      "id": "BE-012",
+      "title": "Implement employee directory and device assignment interfaces",
+      "status": "done",
+      "claimedBy": "EnrollmentBackend",
+      "startedAt": "2026-09-25T10:57:00Z",
+      "completedAt": "2026-09-25T10:57:00Z",
+      "dependsOn": [
+        "BE-007"
+      ],
+      "ownedPaths": [
+        "server/src/data/**",
+        "server/src/modules/identity/**",
+        "server/src/modules/recordings/**",
+        "server/src/app.ts",
+        "server/migrations/0003_device_management.sql"
+      ],
+      "summary": "Add directory/editing, invitation history/revocation, device reporting/reassignment, and history-aware recording attribution.",
+      "acceptanceCriteria": [
+        "All new administrator routes remain guarded and return bounded paginated data without credential hashes.",
+        "SIM updates and reassignment retain the enrollment ID and bearer credential.",
+        "Reassignments are atomic and historical calls never silently move to the next employee.",
+        "Targeted regression cases cover authorization, reassignment and attribution boundaries."
+      ]
+    },
+    {
+      "id": "BE-013",
+      "title": "Build employee and enrollment management tab",
+      "status": "done",
+      "claimedBy": "EmployeeAdminUi",
+      "startedAt": "2026-09-25T10:50:00Z",
+      "completedAt": "2026-09-25T10:54:09Z",
+      "dependsOn": [
+        "BE-007"
+      ],
+      "ownedPaths": [
+        "server/src/admin-ui/**"
+      ],
+      "summary": "Separate recordings and employees, support directory editing, and manage enrolled device assignments without exposing credentials.",
+      "acceptanceCriteria": [
+        "Employees without recordings appear and names can be edited.",
+        "Read-only SIM numbers, stable enrollment IDs and reassignment/revocation controls are available.",
+        "Invitation history/status and one-time enrollment code generation remain clear.",
+        "Both views are responsive and existing recording playback/delete behavior is retained."
+      ]
+    },
+    {
+      "id": "BE-014",
+      "title": "Persist and expose permission-gated device call history",
+      "status": "done",
+      "claimedBy": "CallHistoryBackend",
+      "startedAt": "2026-09-25T14:58:33Z",
+      "completedAt": "2026-09-25T17:42:45Z",
+      "dependsOn": [
+        "BE-012"
+      ],
+      "ownedPaths": [
+        "server/src/data/call-history.ts",
+        "server/src/modules/call-history/**",
+        "server/src/app.ts",
+        "server/migrations/0004_call_history.sql"
+      ],
+      "acceptanceCriteria": [
+        "Authenticated bounded call-history batches are idempotent and isolated by device.",
+        "Historical employee attribution follows assignment history without moving existing entries.",
+        "Guarded administrator listing supports pagination and filters, including calls without recordings."
+      ]
+    },
+    {
+      "id": "BE-015",
+      "title": "Expose call history separately in the administrator workspace",
+      "status": "done",
+      "claimedBy": "CallHistoryUi",
+      "startedAt": "2026-09-25T14:58:33Z",
+      "completedAt": "2026-09-25T17:42:45Z",
+      "dependsOn": [
+        "BE-013"
+      ],
+      "ownedPaths": [
+        "server/src/admin-ui/**"
+      ],
+      "acceptanceCriteria": [
+        "A separate call-history tab displays calls without requiring an audio file.",
+        "Employee, type, number and date filters and cursor pagination use the approved history API.",
+        "Existing recordings and employee-management behavior remains available."
+      ]
+    },
+    {
+      "id": "BE-016",
+      "title": "Integrate Android content sync with the approved history extension",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-25T14:58:33Z",
+      "completedAt": "2026-09-25T17:42:45Z",
+      "dependsOn": [
+        "BE-012",
+        "BE-013"
+      ],
+      "ownedPaths": [
+        "server/README.md",
+        "server/fixtures/**",
+        "handoffs/SERVER_AGENT.md",
+        "handoffs/ANDROID_AGENT.md"
+      ],
+      "acceptanceCriteria": [
+        "Record the additive full-history contract without changing the frozen contract file.",
+        "Verify real Android selected-folder upload, durable replay, permission behavior and server listing.",
+        "Build an upgrade APK preserving enrollment and explicitly record physical Samsung verification limits."
+      ]
+    },
+    {
+      "id": "BE-017",
+      "title": "Unify call history, recording association and enrollment recovery",
+      "status": "done",
+      "claimedBy": "UnifiedBackend",
+      "startedAt": "2026-09-26T14:32:45Z",
+      "completedAt": "2026-09-27T03:34:22Z",
+      "dependsOn": [
+        "BE-012",
+        "BE-014"
+      ],
+      "ownedPaths": [
+        "server/src/data/**",
+        "server/src/modules/**",
+        "server/src/app.ts",
+        "server/migrations/0005_unified_calls.sql",
+        "server/src/http/*.test.mjs"
+      ],
+      "acceptanceCriteria": [
+        "Enriched history exposes caller and call-specific line metadata without invented values.",
+        "Unified keyset feed includes unambiguous associated recordings and visible unlinked recordings.",
+        "Revoked devices and invitations are hidden by default before pagination.",
+        "Invitation provenance is explicit and one-use recovery atomically rotates credentials for the same enrollment."
+      ]
+    },
+    {
+      "id": "BE-018",
+      "title": "Deliver compact unified calls and employee administration",
+      "status": "done",
+      "claimedBy": "CompactAdmin",
+      "startedAt": "2026-09-26T14:32:45Z",
+      "completedAt": "2026-09-27T03:34:22Z",
+      "dependsOn": [
+        "BE-013",
+        "BE-015"
+      ],
+      "ownedPaths": [
+        "server/src/admin-ui/**"
+      ],
+      "acceptanceCriteria": [
+        "Compact unified history shows names, numbers, line identity and inline recording actions.",
+        "Recording checkbox filters the unified feed and the separate recordings tab is removed.",
+        "Compact employee/device/invitation lists expose provenance, recovery and opt-in revoked filters."
+      ]
+    },
+    {
+      "id": "BE-019",
+      "title": "Integrate event-driven native setup and unified administration",
+      "status": "blocked",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-26T14:32:45Z",
+      "completedAt": null,
+      "dependsOn": [
+        "BE-014",
+        "BE-015"
+      ],
+      "ownedPaths": [
+        "server/README.md",
+        "server/fixtures/**",
+        "server/src/admin-ui/**",
+        "handoffs/SERVER_AGENT.md",
+        "handoffs/ANDROID_AGENT.md"
+      ],
+      "ownershipNote": "BE-018 yielded its implementation for review; BE-019 owns final browser-driven admin UI refinement and integration validation.",
+      "acceptanceCriteria": [
+        "Document additive contracts while retaining the frozen API contract.",
+        "Exercise event-driven native sync, simplified consent, upgrade and reinstall recovery.",
+        "Verify compact admin flows, deploy development and retain explicit physical-device limitations."
+      ]
+    },
+    {
+      "id": "BE-020",
+      "title": "Add independent call-log deletion and Linekeep administrator branding",
+      "status": "done",
+      "claimedBy": "DeletionBackend",
+      "startedAt": "2026-09-27T07:04:41Z",
+      "completedAt": "2026-09-27T07:31:58.366Z",
+      "dependsOn": [
+        "BE-017",
+        "BE-018"
+      ],
+      "ownedPaths": [
+        "server/src/**",
+        "server/migrations/0006_call_log_deletion.sql"
+      ],
+      "acceptanceCriteria": [
+        "Administrators can explicitly delete call logs or recordings with accurate confirmation and refreshed results.",
+        "Call-log deletion preserves audio as unlinked; recording deletion preserves history and removes audio from the unified feed.",
+        "Deleted history cannot reappear through ordinary device replay, and deletion never creates a false recording association.",
+        "Visible admin branding is Linekeep without changing resource names or authentication identifiers."
+      ]
+    },
+    {
+      "id": "BE-021",
+      "title": "Integrate Linekeep visual identity and verify administrator deletion",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-27T07:04:41Z",
+      "completedAt": "2026-09-27T07:31:58.366Z",
+      "dependsOn": [
+        "BE-017",
+        "BE-018"
+      ],
+      "ownedPaths": [
+        "README.md",
+        "android/README.md",
+        "server/README.md",
+        "handoffs/ANDROID_AGENT.md",
+        "handoffs/SERVER_AGENT.md",
+        "server/src/admin-ui/brand.ts",
+        "server/src/admin-ui/client.ts"
+      ],
+      "acceptanceCriteria": [
+        "Document the additive deletion contract while leaving the frozen API contract unchanged.",
+        "Verify real browser deletion, cancellation, source independence and replay behavior.",
+        "Verify polished Linekeep Android Home, Advanced and adaptive icon while retaining consent, visibility and upgrade identity."
+      ]
+    },
+    {
+      "id": "BE-022",
+      "title": "Repair Samsung recording association using observed source metadata",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-27T09:51:55Z",
+      "completedAt": "2026-09-27T10:03:38Z",
+      "dependsOn": [
+        "BE-017",
+        "BE-020"
+      ],
+      "ownedPaths": [
+        "server/migrations/0007_recording_association.sql",
+        "server/src/modules/call-history/call-history.test.mjs",
+        "server/README.md",
+        "handoffs/SERVER_AGENT.md"
+      ],
+      "acceptanceCriteria": [
+        "Reproduce the development Samsung timestamp mismatch using anonymized metadata.",
+        "Link only uniquely corroborated same-device and same-employee recordings using source time, duration and filename identity without upload-time guesses.",
+        "Preserve conflicting-identity, ambiguity, deletion and both-arrival-order safeguards.",
+        "Apply and verify migration backfill against development records without modifying source metadata or audio."
+      ]
+    },
+    {
+      "id": "BE-023",
+      "title": "Prepare Linekeep for safe public GitHub publication",
+      "status": "done",
+      "claimedBy": "Main",
+      "startedAt": "2026-09-27T16:54:59Z",
+      "completedAt": "2026-09-27T17:10:42.698604Z",
+      "dependsOn": [
+        "BE-020"
+      ],
+      "ownedPaths": [
+        "server/package.json",
+        "server/package-lock.json",
+        "server/.gitignore",
+        "server/wrangler.example.jsonc",
+        "server/README.md",
+        "README.md",
+        "LICENSE",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        ".github/**",
+        ".gitignore",
+        "docs/assets/**",
+        "docs/CLOUDFLARE_PLAN.md",
+        "handoffs/SERVER_AGENT.md",
+        "AGENTS.md",
+        "docs/HANDOFF.md",
+        "docs/ANDROID_APP_PLAN.md",
+        "docs/MVP_BUILD_PLAN.md",
+        "docs/EXISTING_SOLUTIONS.md",
+        "android/README.md",
+        "android/settings.gradle.kts",
+        "android/app/build.gradle.kts",
+        "android/app/src/main/java/com/microorganics/calltracker/DeviceApi.kt",
+        "handoffs/ANDROID_AGENT.md"
+      ],
+      "acceptanceCriteria": [
+        "Publish as shubhsherl/linekeep with MIT license, setup instructions, logo and contribution guidance.",
+        "Exclude live configuration, credentials, local artifacts and personal deployment details from the first commit.",
+        "Provide usable deployment templates and configurable Android backend selection without changing installed application identity.",
+        "Verify a sanitized fresh-clone setup, scan publication contents, and push main to the requested public repository."
+      ],
+      "evidence": [
+        "Public Linekeep README/logo, MIT license, contributor templates, security guidance and portable backend/Android setup complete.",
+        "Private Cloudflare configuration, local Android backend settings, credentials, build products and recordings are excluded; deployment-specific historical notes retained privately outside the repository.",
+        "Clean publication snapshot: npm ci and all seven local migrations succeeded. Actual HTTP flow covered health, anonymous-admin rejection, form sign-in with HttpOnly session, employee creation, enrollment, signed synthetic WAV upload/completion, unified feed, byte-exact playback/download, deletion and stale-capability rejection, and device revocation.",
+        "Six backend authentication/credential regressions and four Android recording-batch regressions passed; debug APK assembled from the sanitized checkout.",
+        "Six Android configuration checks passed: missing/HTTP/non-origin rejection, local fallback, environment override, and Gradle-property precedence with trailing-slash normalization.",
+        "Gitleaks 8.30.1 reported no leaks; known private deployment identifiers and broken local Markdown file links were absent from publication candidates.",
+        "Created public shubhsherl/linekeep and enabled GitHub private vulnerability reporting. Browser automation was unavailable; local sign-in was verified over HTTP, not visually rendered."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# Fill with independent random secrets of at least 32 bytes.
+# Local development only; never commit the populated .dev.vars file.
+LOCAL_ADMIN_SECRET=
+TOKEN_HASH_SECRET=
+

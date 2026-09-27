@@ -1,0 +1,49 @@
+# Dependencies and generated build/runtime state
+node_modules/
+**/build/
+.gradle/
+.kotlin/
+.wrangler/
+.DS_Store
+.idea/
+*.iml
+*.log
+coverage/
+
+# Local deployment settings and credentials
+server/wrangler.jsonc
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
+local.properties
+linekeep.local.properties
+*.jks
+*.keystore
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Databases, exports, installers and private verification artifacts
+*.db
+*.db3
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.dump
+*.apk
+*.aab
+backups/
+.private/
+
+# Never publish actual recordings. This fixture contains generated synthetic audio.
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.aac
+*.ogg
+*.3gp
+!server/fixtures/synthetic.wav

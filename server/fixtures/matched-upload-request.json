@@ -1,0 +1,15 @@
+{
+  "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "file": {
+    "displayName": "Synthetic outgoing call.wav",
+    "contentType": "audio/wav",
+    "expectedBytes": 32044,
+    "durationSeconds": 2,
+    "recordedAt": "2026-09-24T10:00:00Z"
+  },
+  "call": {
+    "remoteNumber": "+15555550123",
+    "direction": "outgoing",
+    "matchStatus": "filename"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "linekeep-api",
+  "main": "src/index.ts",
+  "preview_urls": false,
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false }
+  },
+  // Copy to wrangler.jsonc (ignored by Git). Add your account_id if needed.
+  // Top-level bindings are local only. Always select --env for remote commands.
+  "vars": { "ENVIRONMENT": "development", "MAX_RECORDING_BYTES": "104857600" },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "linekeep-local",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "r2_buckets": [{ "binding": "RECORDINGS", "bucket_name": "linekeep-recordings-local" }],
+  "env": {
+    "dev": {
+      "name": "linekeep-api-dev",
+      "vars": {
+        "ENVIRONMENT": "development",
+        "MAX_RECORDING_BYTES": "104857600",
+        "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
+        "ACCESS_AUDIENCE": "replace-with-your-access-application-audience"
+      },
+      "d1_databases": [{
+        "binding": "DB",
+        "database_name": "linekeep-dev",
+        "database_id": "00000000-0000-0000-0000-000000000000",
+        "migrations_dir": "migrations"
+      }],
+      "r2_buckets": [{ "binding": "RECORDINGS", "bucket_name": "linekeep-recordings-dev" }]
+    },
+    "production": {
+      "name": "linekeep-api-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "MAX_RECORDING_BYTES": "104857600",
+        "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
+        "ACCESS_AUDIENCE": "replace-with-your-production-access-application-audience"
+      },
+      "d1_databases": [{
+        "binding": "DB",
+        "database_name": "linekeep-production",
+        "database_id": "00000000-0000-0000-0000-000000000000",
+        "migrations_dir": "migrations"
+      }],
+      "r2_buckets": [{ "binding": "RECORDINGS", "bucket_name": "linekeep-recordings-production" }]
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "requestId": "req_fixture",
+  "items": [
+    {
+      "id": "call_fixture",
+      "employee": { "id": "emp_fixture", "name": "Synthetic employee" },
+      "deviceId": "dev_fixture",
+      "displayName": "Synthetic outgoing call.wav",
+      "remoteNumber": "+15555550123",
+      "direction": "outgoing",
+      "recordedAt": "2026-09-24T10:00:00.000Z",
+      "durationSeconds": 2,
+      "matchStatus": "filename",
+      "uploadStatus": "complete",
+      "actualBytes": 32044,
+      "uploadedAt": "2026-09-24T10:01:00.000Z"
+    }
+  ],
+  "nextCursor": null
+}

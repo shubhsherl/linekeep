@@ -1,0 +1,27 @@
+{
+  "name": "@linekeep/server",
+  "version": "0.4.1",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy --env dev",
+    "cf:whoami": "wrangler whoami",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --env dev --remote",
+    "cf:types": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "4.13.9",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260924.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.138.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

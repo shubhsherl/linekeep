@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title">
+  <title id="title">Linekeep handset and ledger</title>
+  <rect width="64" height="64" rx="18" fill="#103F3A"/>
+  <g transform="translate(8 8)">
+    <path d="M32 7H12A4 4 0 0 0 8 11V37A4 4 0 0 0 12 41H36A4 4 0 0 0 40 37V30M15 33H25" stroke="#B9E7CF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M22 12L25 17Q25.6 18.2 24.6 19.2L22.7 21.1Q25.2 25.2 29.3 27.7L31.2 25.8Q32.2 24.8 33.4 25.4L38.4 28.4Q39.5 29.1 39 30.4L38 33Q37.5 34.5 35.8 34.2C25 32.5 18 25.5 16.3 14.7Q16 13 17.5 12.5L20.1 11.5Q21.4 11 22 12Z" fill="#B9E7CF"/>
+  </g>
+</svg>
