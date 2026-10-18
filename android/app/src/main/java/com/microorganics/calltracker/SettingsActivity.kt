@@ -103,6 +103,7 @@ class SettingsActivity : ComponentActivity() {
     private var server by mutableStateOf<String?>(null)
     private var scanMessage by mutableStateOf<String?>(null)
     private var pendingConnect by mutableStateOf<PendingConnect?>(null)
+    private var confirmReset by mutableStateOf(false)
     private val permissionRequests get() = getSharedPreferences("permission-requests", MODE_PRIVATE)
 
     private fun granted(permission: String) =
@@ -213,6 +214,21 @@ class SettingsActivity : ComponentActivity() {
                 }
             }
             LinekeepTheme {
+                if (confirmReset) {
+                    AlertDialog(
+                        onDismissRequest = { confirmReset = false },
+                        title = { Text("Remove the old connection?") },
+                        text = { Text("This phone's saved connection was rejected by the server. Removing it lets you scan a new code from your manager. Calls and recordings already uploaded stay on the server. Items still waiting on this phone are sent again under the new connection.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                confirmReset = false
+                                scanMessage = null
+                                app.scope.launch { app.repository.resetRejectedConnection() }
+                            }) { Text("Remove") }
+                        },
+                        dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
+                    )
+                }
                 pendingConnect?.let { pending ->
                     AlertDialog(
                         onDismissRequest = { pendingConnect = null },
@@ -248,6 +264,7 @@ class SettingsActivity : ComponentActivity() {
                         }
                     },
                     sync = { app.scope.launch { app.repository.requestSync() } },
+                    reset = { confirmReset = true },
                     settings = ::openAppSettings,
                     addTile = if (Build.VERSION.SDK_INT >= 33) ({
                         getSystemService(StatusBarManager::class.java)?.requestAddTileService(
@@ -401,6 +418,7 @@ private fun DeviceScreen(
     enroll: (String, String?) -> Unit,
     saveServer: (String) -> Unit,
     sync: () -> Unit,
+    reset: () -> Unit,
     settings: () -> Unit,
     addTile: (() -> Unit)?,
     chooseFolder: () -> Unit,
@@ -470,7 +488,7 @@ private fun DeviceScreen(
                 }
                 Box(Modifier.widthIn(max = 640.dp).weight(1f)) {
                     when (tab) {
-                        0 -> HomeScreen(status, content, access, granting, setupFailure, grant, server, scanMessage, scan, enroll, sync)
+                        0 -> HomeScreen(status, content, access, granting, setupFailure, grant, server, scanMessage, scan, enroll, sync, reset)
                         1 -> AdvancedScreen(status, content, access, granting, server, scanMessage, scan, enroll, saveServer, settings, addTile, chooseFolder, inspectFolder)
                         2 -> CustomersTab(customers, scope, openConversation)
                         else -> ChatsTab(customers, scope, openConversation)
@@ -538,6 +556,7 @@ private fun HomeScreen(
     scan: () -> Unit,
     enroll: (String, String?) -> Unit,
     sync: () -> Unit,
+    reset: () -> Unit,
 ) {
     // Plaintext is intentionally not saved across recreation or tab changes.
     var invitation by remember { mutableStateOf("") }
@@ -591,6 +610,16 @@ private fun HomeScreen(
                     enabled = connected && !status.busy && !granting,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                 ) { Text(if (status.busy && connected) "Syncing…" else "Sync now") }
+            }
+        }
+        if (status.unauthorized) {
+            SectionCard("Connection rejected") {
+                SupportingText("The server no longer accepts this phone's saved connection. It may have been revoked, or replaced by a recovery on a reinstall. Ask your manager for a new setup or recovery code, then remove the old connection here and scan it.")
+                OutlinedButton(
+                    onClick = reset,
+                    enabled = !status.busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) { Text("Remove old connection and scan again") }
             }
         }
         if (status.loaded && status.deviceId == null && !status.storageUnavailable) {

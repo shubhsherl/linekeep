@@ -46,8 +46,8 @@ android {
         applicationId = "com.microorganics.calltracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.0.0"
+        versionCode = 11
+        versionName = "1.0.1"
         buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
         resValue("string", "app_name", appLabel)
     }

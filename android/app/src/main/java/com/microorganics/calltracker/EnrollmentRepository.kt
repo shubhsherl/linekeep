@@ -367,6 +367,31 @@ internal class EnrollmentRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Forgets a credential the server has already rejected (revoked, or replaced by a recovery) so the phone can be set
+     * up again with a new code. Allowed only after a 401: a working connection is never dropped from here.
+     */
+    suspend fun resetRejectedConnection() = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            load()
+            if (enrollment?.unauthorized != true || mutableStatus.value.storageUnavailable) return@withLock
+            try {
+                store.clear()
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                publish(mutableStatus.value.copy(message = "The old connection could not be removed. Try again."))
+                return@withLock
+            }
+            enrollment = null
+            val work = androidx.work.WorkManager.getInstance(context)
+            work.cancelUniqueWork("device-metadata-periodic")
+            work.cancelUniqueWork("device-heartbeat")
+            refreshScheduling()
+            publish(enrollmentStatus("Old connection removed. Scan a new setup or recovery code from your manager.")
+                .copy(heartbeatMessage = null))
+        }
+    }
+
     /** Called under mutex: only the current, non-revoked credentials may publish a successful result. */
     private fun isCurrent(snapshot: Enrollment): Boolean =
         canSync() && enrollment?.deviceId == snapshot.deviceId && enrollment?.token == snapshot.token

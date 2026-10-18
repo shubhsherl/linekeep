@@ -57,6 +57,11 @@ internal class EnrollmentStore(context: Context) {
         )
     }
 
+    /** Removes only the stored credential; the Keystore key is reused by a later enrollment. */
+    fun clear() {
+        file.delete()
+    }
+
     fun save(enrollment: Enrollment) {
         val payload = JSONObject().put("deviceId", enrollment.deviceId).put("token", enrollment.token)
             .put("employeeId", enrollment.employeeId).put("employeeName", enrollment.employeeName)
