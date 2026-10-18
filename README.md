@@ -119,7 +119,7 @@ Backend URL configuration precedence is:
 
 A missing URL, a non-HTTPS URL, or a URL that is not an origin fails the build. There is no default private deployment URL and no editable backend URL in the app. Build against the same backend you intend to administer.
 
-Current Android version: **0.4.1** (`versionCode` **5**). The application ID remains `com.microorganics.calltracker` for upgrade compatibility; it is not a credential. See the [Android guide](android/README.md) for installation, permissions, folder selection, and device checks.
+Current Android version: **0.5.0** (`versionCode` **6**). Call-end/folder events drive synchronization, recording discovery is bounded to five minutes, and independent hourly recovery/heartbeat handles missed work. Android may defer execution. The application ID remains `com.microorganics.calltracker` for upgrade compatibility; it is not a credential. See the [Android guide](android/README.md) for installation, permissions, folder selection, and device checks.
 
 ### 4. Enroll and sync
 

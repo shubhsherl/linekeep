@@ -12,6 +12,7 @@ import {
 } from "../../data/identity";
 import { id, nonnegativeInteger, utcTimestamp } from "../../data/values";
 import type { Env } from "../../env";
+import { enrollmentQr } from "./enrollment-qr";
 
 export type DeviceBindings = AppBindings & {
   Variables: AppBindings["Variables"] & { device: Device };
@@ -276,6 +277,7 @@ export function createAdminIdentityRoutes(
       invitationCode: invitation.invitationCode,
       invitationId: invitation.id,
       expiresAt: invitation.expiresAt,
+      ...enrollmentQr(new URL(context.req.url).origin, invitation.invitationCode),
     }, 201);
   });
   app.get("/employees/:employeeId/invitations", async (context) => {
@@ -334,6 +336,7 @@ export function createAdminIdentityRoutes(
         invitationCode: invitation.invitationCode,
         invitationId: invitation.id,
         expiresAt: invitation.expiresAt,
+        ...enrollmentQr(new URL(context.req.url).origin, invitation.invitationCode),
       },
       201,
     );

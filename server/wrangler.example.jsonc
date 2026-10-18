@@ -23,9 +23,12 @@
   "env": {
     "dev": {
       "name": "linekeep-api-dev",
+      // 6 PM IST. Sending remains disabled until secrets and opt-in are configured.
+      "triggers": { "crons": ["30 12 * * *"] },
       "vars": {
         "ENVIRONMENT": "development",
         "MAX_RECORDING_BYTES": "104857600",
+        "CALL_SUMMARY_ENABLED": "false",
         "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
         "ACCESS_AUDIENCE": "replace-with-your-access-application-audience"
       },
@@ -39,9 +42,11 @@
     },
     "production": {
       "name": "linekeep-api-production",
+      "triggers": { "crons": ["30 12 * * *"] },
       "vars": {
         "ENVIRONMENT": "production",
         "MAX_RECORDING_BYTES": "104857600",
+        "CALL_SUMMARY_ENABLED": "false",
         "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
         "ACCESS_AUDIENCE": "replace-with-your-production-access-application-audience"
       },

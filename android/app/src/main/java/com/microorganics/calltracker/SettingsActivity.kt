@@ -2,6 +2,7 @@ package com.microorganics.calltracker
 
 import android.Manifest
 import android.app.StatusBarManager
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -35,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -68,7 +71,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -76,19 +83,26 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.time.format.FormatStyle
 
+/** A scanned, not yet confirmed connection. The one-use code stays in memory only and is never saved across recreation. */
+private class PendingConnect(val server: String?, val effective: String, val code: String)
+
 private data class RequiredAccess(
     val phoneState: Boolean = false,
     val phoneNumbers: Boolean = false,
     val callHistory: Boolean = false,
     val notifications: Boolean = false,
     val needsSettings: Boolean = false,
+    val background: BackgroundStatus = BackgroundStatus(),
 ) {
-    val runtimeGranted get() = phoneState && phoneNumbers && callHistory && notifications
+    val runtimeGranted get() = phoneState && phoneNumbers && callHistory && notifications && background.unrestricted
 }
 
 class SettingsActivity : ComponentActivity() {
     private val app get() = application as CalltrackerApplication
     private var access by mutableStateOf(RequiredAccess())
+    private var server by mutableStateOf<String?>(null)
+    private var scanMessage by mutableStateOf<String?>(null)
+    private var pendingConnect by mutableStateOf<PendingConnect?>(null)
     private val permissionRequests get() = getSharedPreferences("permission-requests", MODE_PRIVATE)
 
     private fun granted(permission: String) =
@@ -106,6 +120,7 @@ class SettingsActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        server = app.repository.serverUrl()
         enableEdgeToEdge()
         setContent {
             val status by app.repository.status.collectAsStateWithLifecycle()
@@ -116,7 +131,7 @@ class SettingsActivity : ComponentActivity() {
             var setupFailure by rememberSaveable { mutableStateOf<String?>(null) }
             val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                 selectedFolder = uri?.toString()
-                permissionStep = if (uri != null) "save_folder" else "finish"
+                permissionStep = if (uri != null) "save_folder" else "background"
             }
             val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
                 permissionRequests.edit().apply {
@@ -124,6 +139,10 @@ class SettingsActivity : ComponentActivity() {
                 }.apply()
                 refreshAccess()
                 permissionStep = "folder"
+            }
+            val backgroundRequest = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+                refreshAccess()
+                permissionStep = "finish"
             }
             LaunchedEffect(permissionStep) {
                 try {
@@ -147,7 +166,7 @@ class SettingsActivity : ComponentActivity() {
                         }
                         "folder" -> {
                             app.repository.refreshContent()
-                            if (app.repository.contentStatus.value.folderAccessible) permissionStep = "finish"
+                            if (app.repository.contentStatus.value.folderAccessible) permissionStep = "background"
                             else {
                                 permissionStep = "await_folder"
                                 folderPicker.launch(null)
@@ -163,7 +182,21 @@ class SettingsActivity : ComponentActivity() {
                             if (!app.repository.contentStatus.value.folderAccessible) {
                                 setupFailure = "Folder access was not granted. Choose the recordings folder again in Advanced."
                             }
-                            permissionStep = "finish"
+                            permissionStep = "background"
+                        }
+                        "background" -> {
+                            refreshAccess()
+                            val current = BackgroundAccess.read(this@SettingsActivity)
+                            if (current.unrestricted) permissionStep = "finish"
+                            else {
+                                permissionStep = "await_background"
+                                try {
+                                    backgroundRequest.launch(BackgroundAccess.requestIntent(this@SettingsActivity, current))
+                                } catch (_: ActivityNotFoundException) {
+                                    // Some ROMs omit the direct dialog; app battery settings remain reachable.
+                                    backgroundRequest.launch(BackgroundAccess.appSettingsIntent(this@SettingsActivity))
+                                }
+                            }
                         }
                         "finish" -> {
                             app.repository.refreshContent()
@@ -180,6 +213,20 @@ class SettingsActivity : ComponentActivity() {
                 }
             }
             LinekeepTheme {
+                pendingConnect?.let { pending ->
+                    AlertDialog(
+                        onDismissRequest = { pendingConnect = null },
+                        title = { Text("Connect this phone to ${serverHost(pending.effective)}?") },
+                        text = { Text("Call history and recordings you allow will be sent to ${pending.effective}. Only continue if your manager gave you this QR code.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                pendingConnect = null
+                                enrollAt(pending.code, pending.server)
+                            }) { Text("Connect") }
+                        },
+                        dismissButton = { TextButton(onClick = { pendingConnect = null }) { Text("Cancel") } },
+                    )
+                }
                 DeviceScreen(
                     status = status,
                     content = content,
@@ -190,7 +237,16 @@ class SettingsActivity : ComponentActivity() {
                         setupFailure = null
                         permissionStep = "accept"
                     },
-                    enroll = { invitation -> app.scope.launch { app.repository.enroll(invitation) } },
+                    server = server,
+                    scanMessage = scanMessage,
+                    scan = ::scanQr,
+                    enroll = ::enrollAt,
+                    saveServer = { origin ->
+                        app.scope.launch {
+                            app.repository.setServer(origin)
+                            server = app.repository.serverUrl()
+                        }
+                    },
                     sync = { app.scope.launch { app.repository.requestSync() } },
                     settings = ::openAppSettings,
                     addTile = if (Build.VERSION.SDK_INT >= 33) ({
@@ -204,6 +260,8 @@ class SettingsActivity : ComponentActivity() {
                         permissionStep = "change_folder"
                     },
                     inspectFolder = { app.scope.launch { app.repository.inspectRecordingFolder() } },
+                    customers = app.customers,
+                    scope = app.scope,
                 )
             }
         }
@@ -211,11 +269,45 @@ class SettingsActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        server = app.repository.serverUrl()
         refreshAccess()
         app.scope.launch {
             app.repository.refreshContent()
             app.repository.refreshSim()
             refreshAccess()
+        }
+    }
+
+    private fun enrollAt(code: String, newServer: String?) {
+        scanMessage = null
+        app.scope.launch {
+            app.repository.enroll(code, newServer)
+            server = app.repository.serverUrl()
+        }
+    }
+
+    private fun scanQr() {
+        scanMessage = null
+        val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
+        GmsBarcodeScanning.getClient(this, options).startScan()
+            .addOnSuccessListener { barcode -> handleScan(barcode.rawValue) }
+            .addOnCanceledListener { scanMessage = "Scan cancelled. You can also enter the details manually in Advanced." }
+            .addOnFailureListener { scanMessage = "QR scanning is not available right now. Enter the server and code manually in Advanced." }
+    }
+
+    private fun handleScan(raw: String?) {
+        val current = app.repository.status.value
+        val parsed = raw?.let(::parseEnrollmentQr)
+        val effective = parsed?.server ?: app.repository.serverUrl()
+        scanMessage = when {
+            current.deviceId != null -> "This phone is already connected. Reset the app data to connect to another server."
+            current.storageUnavailable -> "Saved credentials could not be opened. Contact your manager."
+            parsed == null -> "This QR code is not a Linekeep setup code."
+            effective == null -> "This QR code does not name a server and none is set. Set one in Advanced."
+            else -> {
+                pendingConnect = PendingConnect(parsed.server, effective, parsed.code)
+                null
+            }
         }
     }
 
@@ -228,6 +320,7 @@ class SettingsActivity : ComponentActivity() {
             notifications = notifications,
             needsSettings = requiredPermissions().any(::needsSettings) ||
                 (!notifications && (Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS))),
+            background = BackgroundAccess.read(this),
         )
         app.repository.updateContentNotification()
     }
@@ -302,56 +395,86 @@ private fun DeviceScreen(
     granting: Boolean,
     setupFailure: String?,
     grant: () -> Unit,
-    enroll: (String) -> Unit,
+    server: String?,
+    scanMessage: String?,
+    scan: () -> Unit,
+    enroll: (String, String?) -> Unit,
+    saveServer: (String) -> Unit,
     sync: () -> Unit,
     settings: () -> Unit,
     addTile: (() -> Unit)?,
     chooseFolder: () -> Unit,
     inspectFolder: () -> Unit,
+    customers: CustomersRepository,
+    scope: CoroutineScope,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
+    // Only the id survives recreation; names and phone numbers are re-read from the in-memory repository.
+    var conversationId by rememberSaveable { mutableStateOf<String?>(null) }
+    var conversationName by remember { mutableStateOf("") }
+    var conversationPhone by remember { mutableStateOf("") }
+    val openConversation = { id: String, name: String, phone: String ->
+        conversationName = name
+        conversationPhone = phone
+        conversationId = id
+    }
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { insets ->
         Column(
             Modifier.fillMaxSize().padding(insets).imePadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(
-                Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Surface(color = Color(0xFF103F3A), shape = RoundedCornerShape(14.dp)) {
-                    Icon(
-                        painterResource(R.drawable.ic_linekeep_mark),
-                        contentDescription = null,
-                        tint = Color(0xFFB9E7CF),
-                        modifier = Modifier.padding(8.dp).size(32.dp),
-                    )
+            val open = conversationId
+            if (open != null) {
+                ConversationScreen(
+                    customers, scope, open, conversationName, conversationPhone,
+                    close = {
+                        customers.closeConversation()
+                        conversationId = null
+                    },
+                    modifier = Modifier.widthIn(max = 640.dp).weight(1f),
+                )
+            } else {
+                Row(
+                    Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Surface(color = Color(0xFF103F3A), shape = RoundedCornerShape(14.dp)) {
+                        Icon(
+                            painterResource(R.drawable.ic_linekeep_mark),
+                            contentDescription = null,
+                            tint = Color(0xFFB9E7CF),
+                            modifier = Modifier.padding(8.dp).size(32.dp),
+                        )
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            stringResource(R.string.app_name),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text("Calls, kept together", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        stringResource(R.string.app_name),
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text("Calls, kept together", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TabRow(
+                    selectedTabIndex = tab,
+                    modifier = Modifier.widthIn(max = 640.dp),
+                    containerColor = MaterialTheme.colorScheme.background,
+                    contentColor = MaterialTheme.colorScheme.primary,
+                    divider = {},
+                ) {
+                    Tab(selected = tab == 0, onClick = { tab = 0 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Home") })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Advanced") })
+                    Tab(selected = tab == 2, onClick = { tab = 2 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Customers") })
+                    Tab(selected = tab == 3, onClick = { tab = 3 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Chats") })
                 }
-            }
-            TabRow(
-                selectedTabIndex = tab,
-                modifier = Modifier.widthIn(max = 640.dp),
-                containerColor = MaterialTheme.colorScheme.background,
-                contentColor = MaterialTheme.colorScheme.primary,
-                divider = {},
-            ) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Home") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Advanced") })
-            }
-            Box(Modifier.widthIn(max = 640.dp).weight(1f)) {
-                if (tab == 0) {
-                    HomeScreen(status, content, access, granting, setupFailure, grant, enroll, sync)
-                } else {
-                    AdvancedScreen(status, content, access, granting, settings, addTile, chooseFolder, inspectFolder)
+                Box(Modifier.widthIn(max = 640.dp).weight(1f)) {
+                    when (tab) {
+                        0 -> HomeScreen(status, content, access, granting, setupFailure, grant, server, scanMessage, scan, enroll, sync)
+                        1 -> AdvancedScreen(status, content, access, granting, server, scanMessage, scan, enroll, saveServer, settings, addTile, chooseFolder, inspectFolder)
+                        2 -> CustomersTab(customers, scope, openConversation)
+                        else -> ChatsTab(customers, scope, openConversation)
+                    }
                 }
             }
         }
@@ -359,7 +482,7 @@ private fun DeviceScreen(
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
@@ -379,12 +502,12 @@ private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Un
 }
 
 @Composable
-private fun SupportingText(text: String) {
+internal fun SupportingText(text: String) {
     Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
-private fun DetailField(label: String, value: String) {
+internal fun DetailField(label: String, value: String) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         SupportingText(label)
         Text(value, style = MaterialTheme.typography.bodyMedium)
@@ -410,7 +533,10 @@ private fun HomeScreen(
     granting: Boolean,
     setupFailure: String?,
     grant: () -> Unit,
-    enroll: (String) -> Unit,
+    server: String?,
+    scanMessage: String?,
+    scan: () -> Unit,
+    enroll: (String, String?) -> Unit,
     sync: () -> Unit,
 ) {
     // Plaintext is intentionally not saved across recreation or tab changes.
@@ -469,10 +595,16 @@ private fun HomeScreen(
         }
         if (status.loaded && status.deviceId == null && !status.storageUnavailable) {
             SectionCard("Setup or recovery") {
-                SupportingText("Your manager provides the code. Recovery reconnects an existing enrollment after a reinstall.")
+                SupportingText("Scan the QR code from your manager, or enter the code by hand. Recovery reconnects an existing enrollment after a reinstall.")
+                Button(
+                    onClick = scan,
+                    enabled = !status.busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) { Text("Scan QR code") }
+                scanMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                 OutlinedTextField(
                     value = invitation,
-                    onValueChange = { if (it.length <= 512) invitation = it },
+                    onValueChange = { if (it.length <= MAX_SETUP_CODE_CHARS) invitation = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Setup or recovery code") },
                     singleLine = true,
@@ -481,14 +613,19 @@ private fun HomeScreen(
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
                 )
+                Text(
+                    if (server != null) "Server: ${serverHost(server)}" else "No server set — scan a QR code or set one in Advanced",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (server != null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                )
                 Button(
-                    enabled = invitation.isNotBlank() && !status.busy,
+                    enabled = invitation.isNotBlank() && server != null && !status.busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     onClick = {
                         val code = invitation
                         invitation = ""
                         connectionAttempted = true
-                        enroll(code)
+                        enroll(code, null)
                     },
                 ) { Text(if (status.busy) "Connecting…" else "Connect") }
                 if (connectionAttempted && !status.busy) {
@@ -503,6 +640,7 @@ private fun HomeScreen(
                 AccessRow("SIM phone numbers", access.phoneNumbers)
                 AccessRow("Call history", access.callHistory)
                 AccessRow("Status notifications", access.notifications)
+                AccessRow("Unrestricted background activity", access.background.unrestricted)
                 AccessRow("Recordings folder", content.folderAccessible)
             }
             SupportingText(stringResource(R.string.sharing_disclosure))
@@ -522,14 +660,25 @@ private fun HomeScreen(
             } else if (!content.setupAccepted || !access.runtimeGranted || !content.folderAccessible) {
                 SupportingText("Grant permissions walks through sharing consent, Android access and the recordings folder. Once sharing is accepted, sources with access can sync.")
             }
+            access.background.problem?.let {
+                Text(
+                    "$it This is required for calls and recordings to upload while the app is closed. Tap Grant permissions and choose Allow, or set Battery to Unrestricted in Android app settings.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             if (setupFailure != null) {
                 Text(setupFailure, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
         }
         SectionCard("Sync activity") {
             Text(content.detail, style = MaterialTheme.typography.bodyMedium)
+            content.recordingWaitMessage?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            status.heartbeatMessage?.let { SupportingText(it) }
             DetailField("Last scan", readableTime(content.lastScanAt))
-            SupportingText("Sync runs in the background when Android permits. Open Advanced for scan results and connection details.")
+            SupportingText("Call-end and folder changes trigger sync. Recordings are checked for up to 5 minutes; hourly recovery catches missed work. Android may delay background checks.")
         }
     }
 }
@@ -572,11 +721,21 @@ private fun AdvancedScreen(
     content: ContentSyncStatus,
     access: RequiredAccess,
     granting: Boolean,
+    server: String?,
+    scanMessage: String?,
+    scan: () -> Unit,
+    enroll: (String, String?) -> Unit,
+    saveServer: (String) -> Unit,
     settings: () -> Unit,
     addTile: (() -> Unit)?,
     chooseFolder: () -> Unit,
     inspectFolder: () -> Unit,
 ) {
+    // The server receives this phone's bearer token, so it is locked once enrolled. Plaintext codes are never saved.
+    val serverLocked = status.deviceId != null || status.storageUnavailable
+    var serverInput by remember(server) { mutableStateOf(server.orEmpty()) }
+    var serverError by remember { mutableStateOf<String?>(null) }
+    var setupCode by remember { mutableStateOf("") }
     val appName = stringResource(R.string.app_name)
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -623,10 +782,12 @@ private fun AdvancedScreen(
         SectionCard("Sync diagnostics") {
             SupportingText(if (content.setupAccepted) "Company sharing setup accepted." else "Sharing has not been accepted. Use Grant permissions on Home.")
             SupportingText(if (access.notifications) "Status notifications are enabled." else "Status notifications are not enabled. Check app and notification-channel settings.")
+            SupportingText(access.background.problem ?: "Unrestricted background activity is allowed.")
             SupportingText("New calls and readable recordings trigger sync when Android permits. Files must finish writing; network and background restrictions can delay uploads. Periodic checks provide a fallback.")
             SelectionContainer {
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     Text(content.detail, style = MaterialTheme.typography.bodyMedium)
+                    content.recordingWaitMessage?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
                     DetailField("Pending", "${content.pendingUploads} recordings · ${content.pendingCallLogs} calls")
                     DetailField("Completed", "${content.uploadedRecordings} uploaded recordings · ${content.syncedCallLogs} synced calls")
                     DetailField("Last scan", content.lastScanAt ?: "Never")
@@ -638,6 +799,82 @@ private fun AdvancedScreen(
                 }
             }
         }
+        SectionCard("Connection") {
+            OutlinedTextField(
+                value = serverInput,
+                onValueChange = {
+                    if (it.length <= 2048) {
+                        serverInput = it
+                        serverError = null
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Server URL") },
+                placeholder = { Text("https://example.com") },
+                singleLine = true,
+                enabled = !serverLocked && !status.busy,
+                isError = serverError != null,
+                supportingText = serverError?.let { message -> @Composable { Text(message) } },
+                shape = MaterialTheme.shapes.medium,
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Uri),
+            )
+            if (serverLocked) {
+                SupportingText("The server cannot be changed while this phone is connected, because it receives this phone's credential. To use another server, clear this app's data in Android Settings or reinstall, then connect with a new setup or recovery code.")
+            } else {
+                OutlinedButton(
+                    enabled = serverInput.isNotBlank() && !status.busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    onClick = {
+                        val origin = validateServerUrl(serverInput)
+                        if (origin == null) serverError = "Enter an HTTPS address such as https://example.com, without a path, query or login."
+                        else saveServer(origin)
+                    },
+                ) { Text("Save server") }
+                SupportingText("Setup QR codes from your manager include the server. Enter it here only if you were given the address and code separately.")
+                Button(
+                    onClick = scan,
+                    enabled = !status.busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) { Text("Scan QR code") }
+                OutlinedTextField(
+                    value = setupCode,
+                    onValueChange = { if (it.length <= MAX_SETUP_CODE_CHARS) setupCode = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Setup or recovery code") },
+                    singleLine = true,
+                    enabled = !status.busy,
+                    shape = MaterialTheme.shapes.medium,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password),
+                )
+                Button(
+                    enabled = setupCode.isNotBlank() && !status.busy && (serverInput.isNotBlank() || server != null),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    onClick = {
+                        val typed = serverInput.trim()
+                        val origin = if (typed.isEmpty()) null else validateServerUrl(typed)
+                        if (typed.isNotEmpty() && origin == null) {
+                            serverError = "Enter an HTTPS address such as https://example.com, without a path, query or login."
+                        } else {
+                            val code = setupCode
+                            setupCode = ""
+                            enroll(code, origin?.takeIf { it != server })
+                        }
+                    },
+                ) { Text(if (status.busy) "Connecting…" else "Connect") }
+                scanMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+            }
+        }
+        SectionCard("Upload destination") {
+            SelectionContainer {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    DetailField("Backend URL", server ?: "Not set")
+                    DetailField("Enrollment ID", status.deviceId ?: "Not enrolled")
+                    DetailField("Device credential (partially hidden)", status.credentialHint.ifEmpty { "None saved" })
+                }
+            }
+            SupportingText("Call history and recordings upload to this backend using this installation's credential. The full credential is never shown.")
+        }
         SectionCard("Enrollment") {
             SelectionContainer {
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -647,6 +884,7 @@ private fun AdvancedScreen(
                     DetailField("Employee", status.employeeName.ifBlank { "Unknown" })
                     DetailField("Employee ID", status.employeeId.ifBlank { "Unknown" })
                     DetailField("Last successful heartbeat", status.lastSync.ifEmpty { "Never" })
+                    status.heartbeatMessage?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
                     Text(status.message, style = MaterialTheme.typography.bodyMedium)
                 }
             }

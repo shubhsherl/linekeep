@@ -54,11 +54,20 @@ internal object StatusNotification {
         manager.createNotificationChannel(NotificationChannel(channelId, context.getString(R.string.status_channel_name), NotificationManager.IMPORTANCE_LOW))
         if (!status.loaded || !enabled(context)) return
         val settings = settingsIntent(context)
-        val detail = "${status.message}\nLast heartbeat: ${status.lastSync.ifEmpty { "Never" }}\nPending recordings: ${status.pendingUploads}\nLast upload: ${status.lastSuccessfulUploadAt ?: "Never"}"
+        val detail = buildString {
+            append(status.message)
+            status.heartbeatMessage?.let { append("\n").append(it) }
+            status.recordingWaitMessage?.let { append("\n").append(it) }
+            append("\nLast heartbeat: ").append(status.lastSync.ifEmpty { "Never" })
+            append("\nPending call logs: ").append(status.pendingCallLogs)
+            append("\nPending recordings: ").append(status.pendingUploads)
+            append("\nLast upload: ").append(status.lastSuccessfulUploadAt ?: "Never")
+        }
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_linekeep_mark)
             .setContentTitle(context.getString(R.string.notification_status))
-            .setContentText(status.message)
+            .setContentText(if (status.unauthorized || status.storageUnavailable) status.message
+                else status.recordingWaitMessage ?: status.message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
             .setOngoing(true)
             .setOnlyAlertOnce(true)

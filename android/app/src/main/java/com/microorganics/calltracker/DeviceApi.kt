@@ -9,11 +9,13 @@ import java.net.URL
 import java.security.MessageDigest
 import javax.net.ssl.HttpsURLConnection
 
-internal class ApiFailure(val status: Int) : IOException("HTTP $status")
+/** [code] is the server's stable error code when the response carried the standard error body. */
+internal class ApiFailure(val status: Int, val code: String? = null) : IOException("HTTP $status")
 internal class UploadFailure(val status: Int) : IOException("Audio transfer HTTP $status")
 internal class SourceChanged : IOException("Recording changed while being read; not completed")
 internal data class UploadedAudio(val bytes: Long, val etag: String?)
 internal const val MAX_AUDIO_BYTES = 100L * 1024 * 1024
+internal const val PAGE_SIZE = 50
 internal fun sha256(value: String): String = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8)).hex()
 internal fun ByteArray.hex(): String {
     val digits = "0123456789abcdef"
@@ -26,9 +28,8 @@ internal fun ByteArray.hex(): String {
     return characters.concatToString()
 }
 
-/** Called only from an IO dispatcher. No HTTP logging, redirects, or shared upload credentials. */
-internal class DeviceApi {
-    private val baseUrl = BuildConfig.API_BASE_URL
+/** Called only from an IO dispatcher. No HTTP logging, redirects, or shared upload credentials. [server] is read per request. */
+internal class DeviceApi(private val server: () -> String?) {
 
     fun register(invitation: String, numbers: List<String>): Enrollment {
         val device = JSONObject().put("model", Build.MODEL).put("manufacturer", Build.MANUFACTURER)
@@ -145,22 +146,66 @@ internal class DeviceApi {
         }
     }
 
-    private fun post(path: String, payload: JSONObject, token: String? = null): JSONObject {
-        val connection = secureConnection(baseUrl + path)
+    fun customers(enrollment: Enrollment, query: String?, cursor: String?, limit: Int = PAGE_SIZE): Page<Customer> =
+        parsePage(get("/v1/device/customers" + queryString("q" to query, "cursor" to cursor, "limit" to limit.toString()), enrollment.token), ::parseCustomer)
+
+    fun customer(enrollment: Enrollment, customerId: String): Customer? =
+        get("/v1/device/customers/${android.net.Uri.encode(customerId)}", enrollment.token).optJSONObject("customer")?.let(::parseCustomer)
+
+    fun customerMessages(enrollment: Enrollment, customerId: String, cursor: String?, limit: Int = PAGE_SIZE): Page<WhatsAppMessage> =
+        parsePage(get("/v1/device/customers/${android.net.Uri.encode(customerId)}/messages" + queryString("cursor" to cursor, "limit" to limit.toString()), enrollment.token), ::parseMessage)
+
+    fun chats(enrollment: Enrollment, query: String?, cursor: String?, limit: Int = PAGE_SIZE): Page<ChatSummary> =
+        parsePage(get("/v1/device/whatsapp/chats" + queryString("q" to query, "cursor" to cursor, "limit" to limit.toString()), enrollment.token), ::parseChat)
+
+    fun whatsAppCanSend(enrollment: Enrollment): Boolean =
+        parseCanSend(get("/v1/device/whatsapp/status", enrollment.token))
+
+    /** Throws [ApiFailure] with code [WHATSAPP_NOT_CONFIGURED] (HTTP 503) until the server has a transport; nothing is stored then. */
+    fun sendMessage(enrollment: Enrollment, customerId: String, clientMessageId: String, text: String): WhatsAppMessage? {
+        val response = post("/v1/device/customers/${android.net.Uri.encode(customerId)}/messages",
+            JSONObject().put("clientMessageId", clientMessageId).put("text", text), enrollment.token)
+        return response.optJSONObject("message")?.let(::parseMessage)
+    }
+
+    private fun queryString(vararg parameters: Pair<String, String?>): String {
+        val pairs = parameters.filter { !it.second.isNullOrEmpty() }
+        return if (pairs.isEmpty()) "" else pairs.joinToString("&", prefix = "?") { "${it.first}=${android.net.Uri.encode(it.second)}" }
+    }
+
+    private fun get(path: String, token: String): JSONObject = request("GET", path, null, token)
+
+    private fun post(path: String, payload: JSONObject, token: String? = null): JSONObject = request("POST", path, payload, token)
+
+    private fun request(method: String, path: String, payload: JSONObject?, token: String?): JSONObject {
+        val connection = secureConnection((server() ?: throw ServerNotSet()) + path)
         try {
-            connection.requestMethod = "POST"
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json")
+            connection.requestMethod = method
             connection.setRequestProperty("Accept", "application/json")
             token?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
-            val bytes = payload.toString().toByteArray(Charsets.UTF_8)
-            connection.setFixedLengthStreamingMode(bytes.size)
-            connection.outputStream.use { it.write(bytes) }
+            if (payload != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                val bytes = payload.toString().toByteArray(Charsets.UTF_8)
+                connection.setFixedLengthStreamingMode(bytes.size)
+                connection.outputStream.use { it.write(bytes) }
+            }
             val status = connection.responseCode
-            if (status !in 200..299) throw ApiFailure(status)
+            if (status !in 200..299) throw ApiFailure(status, errorCode(connection))
             return connection.inputStream.bufferedReader().use { JSONObject(it.readText()) }
         } finally {
             connection.disconnect()
         }
+    }
+
+    /** Reads at most 4 KiB of the error body for its code; the body itself is never kept or logged. */
+    private fun errorCode(connection: HttpsURLConnection): String? = try {
+        connection.errorStream?.bufferedReader()?.use { reader ->
+            val buffer = CharArray(4096)
+            val count = reader.read(buffer)
+            parseApiErrorCode(if (count > 0) String(buffer, 0, count) else null)
+        }
+    } catch (_: Exception) {
+        null
     }
 }

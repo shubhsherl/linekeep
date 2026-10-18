@@ -22,9 +22,11 @@ export const adminHtml = `<!doctype html>
     </div>
     <nav class="tabs" role="tablist" aria-label="Workspace">
       <a id="call-history-tab" role="tab" href="#call-history" aria-controls="call-history-panel" aria-selected="true">Call history</a>
+      <a id="customers-tab" role="tab" href="#customers" aria-controls="customers-panel" aria-selected="false" tabindex="-1">Customers</a>
+      <a id="whatsapp-tab" role="tab" href="#whatsapp" aria-controls="whatsapp-panel" aria-selected="false" tabindex="-1">WhatsApp</a>
       <a id="employees-tab" role="tab" href="#employees" aria-controls="employees-panel" aria-selected="false" tabindex="-1">Employees</a>
     </nav>
-    <noscript><p class="notice error">Enable JavaScript to load recordings, view call history and manage employees.</p></noscript>
+    <noscript><p class="notice error">Enable JavaScript to load recordings, view call history, manage customers and chats, and manage employees.</p></noscript>
     <div id="auth-notice" class="notice error" role="alert" hidden>Your admin session is unavailable. <a href="/admin/login">Sign in again</a>, then refresh this page. Production access is managed by Cloudflare Access.</div>
     <div class="directory-notice"><p id="directory-status" role="status" aria-live="polite"></p><p id="directory-error" class="error-text" role="alert" hidden></p><button id="refresh-directory" class="secondary" type="button">Refresh employee choices</button></div>
     <section id="player-panel" class="panel player-panel" aria-labelledby="player-title" hidden>
@@ -61,6 +63,91 @@ export const adminHtml = `<!doctype html>
         <nav class="pagination" aria-label="Call history pages"><button id="call-history-previous" class="secondary" type="button" disabled>Previous</button><span id="call-history-page">Page 1</span><button id="call-history-next" class="secondary" type="button" disabled>Next</button></nav>
       </section>
     </section>
+    <section id="customers-panel" role="tabpanel" aria-labelledby="customers-tab" hidden>
+      <div id="customers-browse">
+        <section class="panel filters" aria-labelledby="customers-heading">
+          <div class="section-heading"><div><p class="eyebrow">CUSTOMERS</p><h2 id="customers-heading" tabindex="-1">Customers</h2></div><button id="customer-add" type="button">Add customer</button></div>
+          <p class="hint">Only name and phone are required. Search matches names, phone digits and email addresses as literal text. Only the employees listed as handling a customer see it in the Linekeep app.</p>
+          <form id="customers-form">
+            <div class="filter-grid">
+              <label class="wide">Search<input name="q" type="search" placeholder="Name, phone or email" maxlength="200" autocomplete="off"></label>
+              <label>Handling employee<select id="customers-employee" name="employeeId"><option value="">All employees</option></select></label>
+              <label>State<input name="state" type="search" maxlength="120" autocomplete="off"></label>
+              <label class="checkbox-filter"><input id="customers-unassigned" name="unassigned" type="checkbox" value="true">Unassigned only</label>
+            </div>
+            <div class="form-footer"><p class="hint">Results update as you type. Choosing Unassigned only ignores the employee filter.</p>
+              <div class="actions"><button type="reset" class="secondary">Clear filters</button></div></div>
+          </form>
+        </section>
+        <section id="customers-results" aria-labelledby="customers-list-heading" aria-busy="false">
+          <div class="results-heading"><h2 id="customers-list-heading">Customer list</h2><button id="customers-refresh" class="secondary" type="button">Refresh</button></div>
+          <p id="customers-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <p id="customers-error" class="notice error" role="alert" hidden></p>
+          <p id="customers-action-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div id="customers-list" class="call-list"></div>
+          <div class="pagination"><button id="customers-more" class="secondary" type="button" hidden>Load more customers</button></div>
+        </section>
+      </div>
+      <section id="customer-detail" class="panel" aria-labelledby="customer-detail-heading" hidden>
+        <div class="section-heading"><div><p class="eyebrow">CUSTOMER</p><h2 id="customer-detail-heading" tabindex="-1"></h2></div>
+          <div class="actions"><button id="customer-detail-refresh" class="secondary" type="button">Refresh</button><button id="customer-detail-back" class="secondary" type="button">Back to customers</button></div></div>
+        <p id="customer-detail-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p id="customer-detail-error" class="error-text" role="alert" hidden></p>
+        <div class="actions"><button id="customer-detail-edit" class="secondary" type="button">Edit</button><button id="customer-detail-handlers" class="secondary" type="button">Handled by</button><button id="customer-detail-archive" class="secondary delete-button" type="button">Archive</button></div>
+        <dl id="customer-detail-facts" class="device-facts"></dl>
+        <section class="detail-section" aria-labelledby="customer-messages-heading" aria-busy="false">
+          <div class="section-heading"><h3 id="customer-messages-heading">WhatsApp messages</h3><span class="muted">Newest first</span></div>
+          <p id="customer-messages-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <p id="customer-messages-error" class="error-text" role="alert" hidden></p>
+          <div id="customer-messages-list" class="message-list"></div>
+          <div class="pagination"><button id="customer-messages-more" class="secondary" type="button" hidden>Load older messages</button></div>
+        </section>
+        <section class="detail-section" aria-labelledby="customer-calls-heading" aria-busy="false">
+          <div class="section-heading"><h3 id="customer-calls-heading">Calls</h3><span class="muted">Newest first · any employee</span></div>
+          <p class="hint">Calls are matched by the last 10 digits of the customer’s phone number. Recordings play and download here exactly as in Call history; delete them from Call history.</p>
+          <p id="customer-calls-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <p id="customer-calls-action-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <p id="customer-calls-error" class="error-text" role="alert" hidden></p>
+          <div id="customer-calls-list" class="call-list"></div>
+          <div class="pagination"><button id="customer-calls-more" class="secondary" type="button" hidden>Load more calls</button></div>
+        </section>
+      </section>
+    </section>
+    <section id="whatsapp-panel" role="tabpanel" aria-labelledby="whatsapp-tab" hidden>
+      <section class="panel filters" aria-labelledby="whatsapp-heading">
+        <div class="section-heading"><div><p class="eyebrow">WHATSAPP</p><h2 id="whatsapp-heading" tabindex="-1">WhatsApp chats</h2></div><button id="whatsapp-refresh" class="secondary" type="button">Refresh</button></div>
+        <p class="hint">Stored conversations, most recent message first. Chats are read-only here.</p>
+        <form id="whatsapp-form">
+          <div class="filter-grid chat-filters">
+            <label class="wide">Search<input name="q" type="search" placeholder="Name, phone or email" maxlength="200" autocomplete="off"></label>
+            <label>Handling employee<select id="whatsapp-employee" name="employeeId"><option value="">All employees</option></select></label>
+          </div>
+        </form>
+      </section>
+      <div id="chat-layout" class="chat-layout" data-view="list">
+        <section id="chat-list-section" aria-labelledby="chat-list-heading" aria-busy="false">
+          <div class="results-heading"><h2 id="chat-list-heading">Chats</h2></div>
+          <p id="whatsapp-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <p id="whatsapp-error" class="notice error" role="alert" hidden></p>
+          <div id="whatsapp-list" class="call-list chat-list"></div>
+          <div class="pagination"><button id="whatsapp-more" class="secondary" type="button" hidden>Load more chats</button></div>
+        </section>
+        <section id="chat-thread" class="panel chat-thread" aria-labelledby="chat-thread-heading">
+          <div class="section-heading"><div><p class="eyebrow">CONVERSATION</p><h2 id="chat-thread-heading" tabindex="-1">Select a chat</h2><p id="chat-thread-subtitle" class="muted"></p></div>
+            <div class="actions"><button id="chat-thread-back" class="secondary chat-back" type="button">Back to chats</button><a id="chat-open-customer" class="button secondary" href="#customers" hidden>Open customer</a></div></div>
+          <p id="chat-thread-empty" class="muted">Choose a chat to read its stored messages.</p>
+          <div id="chat-thread-body" hidden>
+            <p id="chat-thread-status" role="status" aria-live="polite" aria-atomic="true"></p>
+            <p id="chat-thread-error" class="error-text" role="alert" hidden></p>
+            <div id="chat-thread-scroll" class="thread-scroll" tabindex="0" role="region" aria-label="Messages, oldest first">
+              <div class="thread-older"><button id="chat-thread-older" class="secondary" type="button" hidden>Load older messages</button></div>
+              <div id="chat-thread-list" class="message-list"></div>
+            </div>
+            <p id="chat-thread-footer" class="hint thread-footer">Read-only view. Messages are sent from the Linekeep employee app, and sending is currently not configured, so no message can be sent yet.</p>
+          </div>
+        </section>
+      </div>
+    </section>
     <section id="employees-panel" role="tabpanel" aria-labelledby="employees-tab" hidden>
       <section class="panel" aria-labelledby="directory-heading">
         <div class="section-heading"><div><p class="eyebrow">EMPLOYEE DIRECTORY</p><h2 id="directory-heading" tabindex="-1">Employees</h2></div><button id="employees-refresh" class="secondary" type="button">Refresh directory</button></div>
@@ -91,6 +178,8 @@ export const adminHtml = `<!doctype html>
         <section id="invitation-result" class="invitation-result" aria-labelledby="invitation-title" hidden>
           <h3 id="invitation-title" tabindex="-1">Invitation ready — shown once</h3>
           <p>Share this code securely with the employee. It is not saved in this browser and cannot be recovered after dismissal. It becomes unusable after redemption, revocation or expiry.</p>
+          <div id="invitation-qr" class="invitation-qr" role="group" aria-label="Setup QR code"></div>
+          <p class="hint">Scan this QR code in the Linekeep app (Home → Scan QR code). It carries this server's address and the one-time code, so nothing needs to be typed. Treat it like the code itself.</p>
           <label>Single-use invitation code<input id="invitation-code" readonly autocomplete="off" spellcheck="false"></label>
           <p id="invitation-expiry"></p>
           <div class="actions"><button id="copy-invitation" type="button">Copy code</button><button id="dismiss-invitation" class="secondary" type="button">Dismiss and clear</button></div>
@@ -128,6 +217,44 @@ export const adminHtml = `<!doctype html>
     <p id="recovery-device" class="delete-name"></p>
     <p id="recovery-error" class="error-text" role="alert" hidden></p>
     <form id="recovery-form"><div class="actions"><button id="cancel-recovery" class="secondary" type="button" autofocus>Cancel</button><button id="confirm-recovery" type="submit">Generate recovery code</button></div></form>
+  </dialog>
+  <dialog id="customer-dialog" aria-labelledby="customer-dialog-title" aria-describedby="customer-dialog-description">
+    <h2 id="customer-dialog-title">Add customer</h2>
+    <p id="customer-dialog-description" class="hint">Only name and phone are required. A 10-digit phone number is saved as an Indian (+91) number; include the country code for any other country.</p>
+    <form id="customer-form"><fieldset id="customer-fields">
+      <label>Name<input name="name" required maxlength="200" autocomplete="off"></label>
+      <label>Phone<input name="phone" type="tel" inputmode="tel" required maxlength="40" autocomplete="off"></label>
+      <label>Email (optional)<input name="email" type="email" maxlength="254" autocomplete="off"></label>
+      <label>Source (optional)<input name="source" maxlength="120" autocomplete="off"></label>
+      <div class="field-row">
+        <label>District (optional)<input name="district" maxlength="120" autocomplete="off"></label>
+        <label>State (optional)<input name="state" maxlength="120" autocomplete="off"></label>
+      </div>
+      <label>Country<input name="country" maxlength="120" value="India" autocomplete="off"></label>
+      <label>Notes (optional)<textarea name="notes" rows="3" maxlength="4000"></textarea></label>
+      <fieldset id="customer-employee-fields" class="choice-group"><legend>Handled by</legend>
+        <p class="hint">Active employees only. Leave everyone unchecked to keep the customer unassigned.</p>
+        <div id="customer-employee-choices" class="choice-list"></div>
+      </fieldset>
+      <p id="customer-dialog-status" role="status" aria-live="polite"></p><p id="customer-dialog-error" class="error-text" role="alert" hidden></p>
+      <div class="actions"><button id="cancel-customer" class="secondary" type="button">Cancel</button><button id="confirm-customer" type="submit">Add customer</button></div>
+    </fieldset></form>
+  </dialog>
+  <dialog id="handlers-dialog" aria-labelledby="handlers-title" aria-describedby="handlers-description">
+    <h2 id="handlers-title">Handled by</h2>
+    <p id="handlers-description">Choose the active employees who handle this customer. Saving replaces the current set; only these employees see the customer and its chat in the Linekeep app. Unchecking everyone leaves the customer unassigned.</p>
+    <p id="handlers-customer" class="delete-name"></p>
+    <form id="handlers-form"><fieldset id="handlers-fields"><legend>Active employees</legend>
+      <div id="handlers-choices" class="choice-list"></div>
+      <p id="handlers-status" role="status" aria-live="polite"></p><p id="handlers-error" class="error-text" role="alert" hidden></p>
+      <div class="actions"><button id="cancel-handlers" class="secondary" type="button">Cancel</button><button id="confirm-handlers" type="submit">Save handling employees</button></div>
+    </fieldset></form>
+  </dialog>
+  <dialog id="archive-dialog" aria-labelledby="archive-title" aria-describedby="archive-description">
+    <h2 id="archive-title">Archive this customer?</h2>
+    <p id="archive-description">The customer leaves the customer list, cannot be edited or assigned, and disappears from employees’ apps. Stored WhatsApp messages and call history are kept, and the phone number can be used for a new customer.</p>
+    <p id="archive-name" class="delete-name"></p><p id="archive-error" class="error-text" role="alert" hidden></p>
+    <form id="archive-form"><div class="actions"><button id="cancel-archive" class="secondary" type="button" autofocus>Keep customer</button><button id="confirm-archive" class="danger" type="submit">Archive customer</button></div></form>
   </dialog>
 </body>
 </html>`;

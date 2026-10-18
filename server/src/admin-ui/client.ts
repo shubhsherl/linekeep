@@ -73,7 +73,10 @@ export const clientJavaScript = String.raw`(() => {
     if (!response.ok) {
       const detail = data && data.error && typeof data.error.message === 'string' ? data.error.message : 'The server rejected this request.';
       const requestId = data && typeof data.requestId === 'string' ? ' Request ID: ' + data.requestId : '';
-      throw new Error(detail + requestId);
+      const failure = new Error(detail + requestId);
+      failure.status = response.status;
+      failure.code = data && data.error && typeof data.error.code === 'string' ? data.error.code : '';
+      throw failure;
     }
     byId('auth-notice').hidden = true;
     return data;
@@ -86,11 +89,11 @@ export const clientJavaScript = String.raw`(() => {
     employees.set(employee.id, employee);
   }
   function updateEmployees() {
-    for (const id of ['call-history-employee', 'devices-employee', 'invitation-employee', 'assignment-employee']) {
+    for (const id of ['call-history-employee', 'devices-employee', 'customers-employee', 'whatsapp-employee', 'invitation-employee', 'assignment-employee']) {
       const select = byId(id);
       const selected = select.value;
       const choices = document.createDocumentFragment();
-      const empty = element('option', ['call-history-employee', 'devices-employee'].includes(id) ? 'All employees' : 'Select an employee');
+      const empty = element('option', ['call-history-employee', 'devices-employee', 'customers-employee', 'whatsapp-employee'].includes(id) ? 'All employees' : 'Select an employee');
       empty.value = '';
       choices.append(empty);
       for (const employee of employees.values()) {
@@ -166,7 +169,7 @@ export const clientJavaScript = String.raw`(() => {
     wrapper.append(element('dt', label), element('dd', value));
     return wrapper;
   }
-  function renderRecording(call) {
+  function renderRecording(call, options = {}) {
     if (!call || typeof call.id !== 'string' || !call.employee || typeof call.employee.name !== 'string') throw new Error('A recording could not be read. Please refresh.');
     const row = element('div', undefined, 'recording-row');
     row.dataset.recordingId = call.id;
@@ -176,14 +179,17 @@ export const clientJavaScript = String.raw`(() => {
     info.append(element('span', knownStatus ? statusNames[call.uploadStatus] : 'Unknown status', 'badge ' + (knownStatus ? call.uploadStatus : '')));
     const actions = element('div', undefined, 'actions');
     const playButton = button('Play', () => startPlayback(call, row), '');
-    const downloadButton = button('Download', () => download(call, downloadButton));
+    const downloadButton = button('Download', () => download(call, downloadButton, options.statusId || 'action-status'));
     playButton.disabled = downloadButton.disabled = call.uploadStatus !== 'complete';
     playButton.setAttribute('aria-label', 'Play ' + call.displayName);
     downloadButton.setAttribute('aria-label', 'Download ' + call.displayName);
-    const deleteButton = button('Delete recording', () => openDelete('recording', call, deleteButton), 'secondary delete-button');
-    deleteButton.disabled = call.uploadStatus === 'deleted';
-    deleteButton.setAttribute('aria-label', 'Delete recording ' + call.displayName);
-    actions.append(playButton, downloadButton, deleteButton);
+    actions.append(playButton, downloadButton);
+    if (!options.readOnly) {
+      const deleteButton = button('Delete recording', () => openDelete('recording', call, deleteButton), 'secondary delete-button');
+      deleteButton.disabled = call.uploadStatus === 'deleted';
+      deleteButton.setAttribute('aria-label', 'Delete recording ' + call.displayName);
+      actions.append(deleteButton);
+    }
     const details = element('details', undefined, 'row-details');
     details.append(element('summary', 'Recording details'));
     details.append(element('p', 'Recording ID: ' + call.id), element('p', 'Uploaded: ' + dateText(call.uploadedAt)),
@@ -203,7 +209,7 @@ export const clientJavaScript = String.raw`(() => {
   let historyLoading = false;
   let historyVersion = 0;
   let historyController;
-  function renderCallHistory(call) {
+  function renderCallHistory(call, options = {}) {
     const isCall = call && call.kind === 'call';
     if (!call || !['call', 'recording'].includes(call.kind) || typeof call.id !== 'string' || typeof call.deviceId !== 'string' ||
         !call.employee || typeof call.employee.id !== 'string' || typeof call.employee.name !== 'string' ||
@@ -237,7 +243,7 @@ export const clientJavaScript = String.raw`(() => {
     if (isCall) details.append(element('p', 'Phone account: ' + (call.phoneAccountId || 'Unknown')));
     else details.append(element('p', 'No unambiguous call match. This recording has not been assigned a call type or local line.'));
     caller.append(details);
-    if (isCall) {
+    if (isCall && !options.readOnly) {
       const deleteButton = button('Delete call log', () => openDelete('call', call, deleteButton), 'secondary delete-button history-delete');
       deleteButton.setAttribute('aria-label', 'Delete call log for ' + (call.callerName || call.remoteNumber || 'unknown caller') + ' · ' + dateText(call.startedAt));
       caller.append(deleteButton);
@@ -245,7 +251,7 @@ export const clientJavaScript = String.raw`(() => {
     row.append(caller, employee, time, type, line);
     if (call.recordings.length) {
       const recordings = element('div', undefined, 'row-recordings');
-      for (const recording of call.recordings) recordings.append(renderRecording(recording));
+      for (const recording of call.recordings) recordings.append(renderRecording(recording, options));
       row.append(recordings);
     } else {
       type.append(element('span', 'No recording', 'hint'));
@@ -444,10 +450,10 @@ export const clientJavaScript = String.raw`(() => {
   byId('retry-playback').addEventListener('click', () => { if (player) { player.retried = false; refreshPlayback(audio.currentTime); } });
   byId('close-player').addEventListener('click', () => { closePlayer(); byId('call-history-refresh').focus(); });
 
-  async function download(call, downloadButton) {
+  async function download(call, downloadButton, statusId = 'action-status') {
     downloadButton.disabled = true;
     downloadButton.textContent = 'Downloading…';
-    message('action-status', 'Preparing download for ' + call.displayName + '…');
+    message(statusId, 'Preparing download for ' + call.displayName + '…');
     try {
       const link = await playbackLink(call);
       const downloadUrl = new URL(link.url);
@@ -467,9 +473,9 @@ export const clientJavaScript = String.raw`(() => {
       anchor.click();
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
-      message('action-status', 'Download ready for ' + call.displayName + '. Check your browser downloads.');
+      message(statusId, 'Download ready for ' + call.displayName + '. Check your browser downloads.');
     } catch (error) {
-      message('action-status', 'Download failed. ' + errorMessage(error));
+      message(statusId, 'Download failed. ' + errorMessage(error));
     } finally {
       downloadButton.disabled = false;
       downloadButton.textContent = 'Download';
@@ -876,6 +882,7 @@ export const clientJavaScript = String.raw`(() => {
     shownInvitationId = null;
     shownRecoveryDeviceId = null;
     byId('invitation-code').value = '';
+    byId('invitation-qr').replaceChildren();
     byId('invitation-expiry').textContent = '';
     byId('invitation-result').hidden = true;
     updateInvitationAvailability();
@@ -908,6 +915,13 @@ export const clientJavaScript = String.raw`(() => {
       shownRecoveryDeviceId = device ? device.id : null;
       byId('invitation-title').textContent = device ? 'Recovery code ready — shown once' : 'Invitation ready — shown once';
       byId('invitation-code').value = data.invitationCode;
+      // The server renders the QR from its own address and the code; parse it as an SVG document, never as HTML.
+      const qrDocument = typeof data.qrSvg === 'string' ? new DOMParser().parseFromString(data.qrSvg, 'image/svg+xml') : null;
+      if (qrDocument && qrDocument.documentElement.localName === 'svg' && !qrDocument.querySelector('parsererror')) {
+        byId('invitation-qr').replaceChildren(document.importNode(qrDocument.documentElement, true));
+      } else {
+        byId('invitation-qr').replaceChildren();
+      }
       byId('invitation-expiry').textContent = 'Invitation ' + data.invitationId + ' · For employee ' + employeeId + (device ? ' · Enrollment ' + device.id + ' · Existing credential rotates on redemption.' : '') + ' · Expires ' + dateText(data.expiresAt);
       byId('invitation-result').hidden = false;
       message('invitation-status', 'Code generated. Copy it now; dismissing clears the code.');
@@ -977,12 +991,645 @@ export const clientJavaScript = String.raw`(() => {
   document.addEventListener('visibilitychange', () => {
     if (invitationExpiresAt && Date.now() >= invitationExpiresAt) clearInvitation('This invitation expired and its code was cleared.');
   });
+  // Customers, customer detail and stored WhatsApp chats. Every customer-supplied string is rendered with textContent.
+  const messageStatusNames = { queued: 'Queued', sent: '✓ Sent', delivered: '✓✓ Delivered', read: '✓✓ Read', failed: '✗ Failed' };
+  const customersForm = byId('customers-form');
+  const customersListNode = byId('customers-list');
+  const whatsappForm = byId('whatsapp-form');
+  let customersLoaded = false;
+  let chatsLoaded = false;
+  let customerDetail = null;
+  let selectedChat = null;
+  let customerSearchTimer;
+  let chatSearchTimer;
+
+  function plural(count, one, many) { return count === 1 ? one : many; }
+  function emptyState(title, text) {
+    const empty = element('div', undefined, 'empty-state');
+    empty.append(element('h3', title), element('p', text));
+    return empty;
+  }
+  function readCustomer(customer) {
+    if (!customer || typeof customer.id !== 'string' || typeof customer.name !== 'string' || typeof customer.phone !== 'string' || !Array.isArray(customer.employees) ||
+        customer.employees.some((employee) => !employee || typeof employee.id !== 'string' || typeof employee.name !== 'string')) {
+      throw new Error('A customer could not be read. Please refresh.');
+    }
+    return customer;
+  }
+  function handlerNames(employeeList) { return employeeList.map((employee) => employee.name).join(', '); }
+  function messageTypeLabel(type) {
+    if (typeof type !== 'string' || !type || type === 'text') return '';
+    return type.charAt(0).toUpperCase() + type.slice(1);
+  }
+  function sameSet(a, b) { return a.length === b.length && a.every((value) => b.includes(value)); }
+
+  // Cursor-paginated list that appends pages ("Load more"). With chronological: true the server's
+  // newest-first pages are shown oldest-first and older pages are prepended above the current ones.
+  function cursorList(options) {
+    const list = byId(options.listId);
+    const more = byId(options.moreId);
+    let next = null;
+    let busy = false;
+    let version = 0;
+    let controller;
+    let seen = new Set();
+    let count = 0;
+    function controls() {
+      more.hidden = !next;
+      more.disabled = busy;
+    }
+    function cancel() {
+      version++;
+      if (controller) controller.abort();
+      busy = false;
+      next = null;
+      list.setAttribute('aria-busy', 'false');
+      controls();
+    }
+    async function load(reset = true) {
+      if (!reset && (busy || !next)) return;
+      const current = ++version;
+      if (controller) controller.abort();
+      controller = new AbortController();
+      const cursor = reset ? null : next;
+      if (reset) {
+        if (options.beforeReset) options.beforeReset();
+        list.replaceChildren();
+        count = 0;
+        seen = new Set();
+        next = null;
+      }
+      const request = options.request();
+      busy = true;
+      controls();
+      list.setAttribute('aria-busy', 'true');
+      message(options.errorId, '');
+      message(options.statusId, 'Loading ' + options.noun[1] + '…');
+      try {
+        const params = new URLSearchParams(request.params);
+        params.set('limit', String(options.limit || 50));
+        if (cursor) params.set('cursor', cursor);
+        const data = readPage(await api(request.path + '?' + params, { signal: controller.signal }));
+        if (current !== version) return;
+        if (data.nextCursor && (data.nextCursor === cursor || seen.has(data.nextCursor))) throw new Error('Pagination did not advance. Refresh to restart.');
+        if (cursor) seen.add(cursor);
+        const items = options.chronological ? data.items.slice().reverse() : data.items;
+        const content = document.createDocumentFragment();
+        for (const item of items) content.append(options.render(item));
+        count += data.items.length;
+        if (!count) {
+          list.replaceChildren(options.empty(request.params.size > 0));
+        } else if (options.chronological && !reset) {
+          const scroller = options.scroller;
+          const height = scroller.scrollHeight;
+          const top = scroller.scrollTop;
+          list.prepend(content);
+          scroller.scrollTop = top + scroller.scrollHeight - height;
+        } else {
+          list.append(content);
+          if (options.chronological) options.scroller.scrollTop = options.scroller.scrollHeight;
+        }
+        next = data.nextCursor;
+        message(options.statusId, count ? count + ' ' + plural(count, options.noun[0], options.noun[1]) + ' shown' + (next ? '. More are available.' : '.') : '');
+      } catch (error) {
+        if (current !== version || error.name === 'AbortError') return;
+        message(options.statusId, 'Could not load ' + options.noun[1] + '.');
+        message(options.errorId, errorMessage(error) + (reset ? ' Use Refresh to try again.' : ' Use the load button to try again.'));
+      } finally {
+        if (current === version) {
+          busy = false;
+          list.setAttribute('aria-busy', 'false');
+          controls();
+        }
+      }
+    }
+    more.addEventListener('click', () => load(false));
+    return { load, cancel };
+  }
+
+  function renderMessage(item) {
+    if (!item || typeof item.id !== 'string' || !['in', 'out'].includes(item.direction)) throw new Error('A WhatsApp message could not be read. Please refresh.');
+    const node = element('article', undefined, 'message ' + item.direction);
+    node.dataset.messageId = item.id;
+    const meta = element('p', undefined, 'message-meta');
+    meta.append(element('span', item.direction === 'out' ? 'Out' : 'In', 'badge'), element('span', dateText(item.sentAt)));
+    if (item.sentBy && typeof item.sentBy.name === 'string') meta.append(element('span', 'Sent by ' + item.sentBy.name));
+    node.append(meta);
+    const typeLabel = messageTypeLabel(item.messageType);
+    const tags = element('p', undefined, 'message-tags');
+    if (typeLabel) tags.append(element('span', typeLabel, 'badge'));
+    if (item.templateName) tags.append(element('span', 'Template: ' + item.templateName, 'badge'));
+    if (item.mediaUrl) tags.append(element('span', 'Media attached · not shown in this view'));
+    if (tags.childElementCount) node.append(tags);
+    if (item.body) node.append(element('p', item.body, 'message-body'));
+    else if (!tags.childElementCount) node.append(element('p', 'No text', 'message-body hint'));
+    const status = Object.hasOwn(messageStatusNames, item.status) ? messageStatusNames[item.status] : 'Status unknown';
+    const stamp = item.readAt ? ' · Read ' + dateText(item.readAt) : item.deliveredAt ? ' · Delivered ' + dateText(item.deliveredAt) : '';
+    node.append(element('p', status + stamp, 'message-foot'));
+    return node;
+  }
+  function noMessages() { return emptyState('No WhatsApp messages', 'No conversation is stored for this customer yet.'); }
+
+  // ---- Customers list ----
+  function customersRequest() {
+    const form = new FormData(customersForm);
+    const params = new URLSearchParams();
+    const q = String(form.get('q') || '').trim();
+    if (q) params.set('q', q);
+    if (form.get('unassigned') === 'true') params.set('unassigned', 'true');
+    else if (form.get('employeeId')) params.set('employeeId', String(form.get('employeeId')));
+    const state = String(form.get('state') || '').trim();
+    if (state) params.set('state', state);
+    return { path: '/customers', params };
+  }
+  function renderCustomer(customer) {
+    readCustomer(customer);
+    const row = element('article', undefined, 'history-row customer-row');
+    row.dataset.customerId = customer.id;
+    const identity = element('div', undefined, 'caller-cell');
+    identity.append(element('h3', customer.name), element('p', customer.phone, 'muted'));
+    const where = [customer.source ? 'Source: ' + customer.source : '', [customer.district, customer.state, customer.country].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+    if (where) identity.append(element('p', where, 'hint'));
+    const handlers = element('div', undefined, 'employee-cell');
+    handlers.append(element('span', 'Handled by', 'cell-label'));
+    if (customer.employees.length) handlers.append(element('span', handlerNames(customer.employees)));
+    else handlers.append(element('span', 'Unassigned', 'badge pending'));
+    const messages = element('div', undefined, 'type-cell');
+    const total = Number.isInteger(customer.messageCount) ? customer.messageCount : 0;
+    messages.append(element('span', 'WhatsApp', 'cell-label'), element('span', total + ' ' + plural(total, 'message', 'messages')));
+    const time = element('div', undefined, 'time-cell');
+    time.append(element('span', 'Last message', 'cell-label'), element('span', customer.lastMessageAt ? dateText(customer.lastMessageAt) : 'None'),
+      element('span', 'Last call', 'cell-label'), element('span', customer.lastCallAt ? dateText(customer.lastCallAt) : 'None'));
+    const actions = element('div', undefined, 'actions actions-cell');
+    const detailsButton = button('Details', () => openCustomerDetail(customer, detailsButton), '');
+    detailsButton.setAttribute('aria-label', 'Details for ' + customer.name);
+    const editButton = button('Edit', () => openCustomerDialog(customer, editButton));
+    editButton.setAttribute('aria-label', 'Edit ' + customer.name);
+    const handlersButton = button('Handled by', () => openHandlers(customer, handlersButton));
+    handlersButton.setAttribute('aria-label', 'Change handling employees for ' + customer.name);
+    const archiveButton = button('Archive', () => openArchive(customer, archiveButton), 'secondary delete-button');
+    archiveButton.setAttribute('aria-label', 'Archive ' + customer.name);
+    actions.append(detailsButton, editButton, handlersButton, archiveButton);
+    row.append(identity, handlers, messages, time, actions);
+    return row;
+  }
+  const customersList = cursorList({
+    listId: 'customers-list', moreId: 'customers-more', statusId: 'customers-status', errorId: 'customers-error', noun: ['customer', 'customers'],
+    request: customersRequest,
+    render: renderCustomer,
+    empty: (filtered) => emptyState('No customers found', filtered ? 'Try a different search or clear the filters.' : 'Use Add customer to create the first customer, then choose who handles it.')
+  });
+  function applyCustomerFilters() {
+    clearTimeout(customerSearchTimer);
+    byId('customers-employee').disabled = byId('customers-unassigned').checked;
+    customersList.load(true);
+  }
+  customersForm.addEventListener('submit', (event) => { event.preventDefault(); applyCustomerFilters(); });
+  customersForm.addEventListener('input', (event) => {
+    if (event.target.type !== 'search') return;
+    clearTimeout(customerSearchTimer);
+    customerSearchTimer = setTimeout(applyCustomerFilters, 350);
+  });
+  customersForm.addEventListener('change', (event) => { if (event.target.type !== 'search') applyCustomerFilters(); });
+  customersForm.addEventListener('reset', () => { queueMicrotask(applyCustomerFilters); });
+  byId('customers-refresh').addEventListener('click', () => customersList.load(true));
+  byId('customer-add').addEventListener('click', (event) => openCustomerDialog(null, event.currentTarget));
+
+  function announceCustomer(text) {
+    message(byId('customer-detail').hidden ? 'customers-action-status' : 'customer-detail-status', text);
+  }
+  function focusCustomerSurface(opener, customerId) {
+    if (opener && opener.isConnected) { opener.focus(); return; }
+    const row = customerId ? customersListNode.querySelector('[data-customer-id="' + CSS.escape(customerId) + '"] button') : null;
+    if (row) { row.focus(); return; }
+    (byId('customer-detail').hidden ? byId('customers-heading') : byId('customer-detail-heading')).focus();
+  }
+  // Replaces the list row and the open detail view after an edit, assignment change or refresh.
+  function applyCustomerUpdate(customer) {
+    const row = customersListNode.querySelector('[data-customer-id="' + CSS.escape(customer.id) + '"]');
+    if (row) row.replaceWith(renderCustomer(customer));
+    if (customerDetail && customerDetail.customer.id === customer.id) {
+      customerDetail.customer = customer;
+      renderCustomerDetail(customer);
+    }
+  }
+
+  // ---- Customer detail ----
+  const detailMessages = cursorList({
+    listId: 'customer-messages-list', moreId: 'customer-messages-more', statusId: 'customer-messages-status', errorId: 'customer-messages-error', noun: ['message', 'messages'],
+    request: () => ({ path: '/customers/' + encodeURIComponent(customerDetail.customer.id) + '/messages', params: new URLSearchParams() }),
+    render: renderMessage,
+    empty: noMessages
+  });
+  const detailCalls = cursorList({
+    listId: 'customer-calls-list', moreId: 'customer-calls-more', statusId: 'customer-calls-status', errorId: 'customer-calls-error', noun: ['call', 'calls'],
+    request: () => ({ path: '/customers/' + encodeURIComponent(customerDetail.customer.id) + '/calls', params: new URLSearchParams() }),
+    beforeReset: closePlayer,
+    render: (call) => renderCallHistory(call, { readOnly: true, statusId: 'customer-calls-action-status' }),
+    empty: () => emptyState('No calls', 'No call log matches this phone number yet.')
+  });
+  function renderCustomerDetail(customer) {
+    readCustomer(customer);
+    byId('customer-detail-heading').textContent = customer.name;
+    const notes = fact('Notes', customer.notes || 'None');
+    notes.classList.add('fact-wide');
+    notes.querySelector('dd').classList.add('pre');
+    byId('customer-detail-facts').replaceChildren(
+      fact('Phone', customer.phone), fact('Email', customer.email || 'Not set'), fact('Source', customer.source || 'Not set'),
+      fact('District', customer.district || 'Not set'), fact('State', customer.state || 'Not set'), fact('Country', customer.country || 'Not set'),
+      fact('Handled by', customer.employees.length ? handlerNames(customer.employees) : 'Unassigned'),
+      fact('WhatsApp messages', Number.isInteger(customer.messageCount) ? customer.messageCount : 0),
+      fact('Last message', customer.lastMessageAt ? dateText(customer.lastMessageAt) : 'None'),
+      fact('Last call', customer.lastCallAt ? dateText(customer.lastCallAt) : 'None'),
+      fact('Created', dateText(customer.createdAt)), fact('Updated', dateText(customer.updatedAt)),
+      notes, fact('Customer ID', customer.id));
+  }
+  function openCustomerDetail(customer, opener) {
+    readCustomer(customer);
+    closePlayer();
+    customerDetail = { customer, opener: opener || null };
+    byId('customers-browse').hidden = true;
+    byId('customer-detail').hidden = false;
+    message('customer-detail-status', '');
+    message('customer-detail-error', '');
+    message('customer-calls-action-status', '');
+    renderCustomerDetail(customer);
+    detailMessages.load(true);
+    detailCalls.load(true);
+    byId('customer-detail-heading').focus();
+    byId('customer-detail').scrollIntoView({ block: 'start' });
+  }
+  function closeCustomerDetail(restoreFocus = true) {
+    closePlayer();
+    detailMessages.cancel();
+    detailCalls.cancel();
+    const opener = customerDetail ? customerDetail.opener : null;
+    customerDetail = null;
+    byId('customer-detail').hidden = true;
+    byId('customers-browse').hidden = false;
+    if (restoreFocus) (opener && opener.isConnected ? opener : byId('customers-heading')).focus();
+  }
+  async function openCustomerById(id) {
+    if (location.hash !== '#customers') location.hash = 'customers';
+    showTab();
+    if (customerDetail) closeCustomerDetail(false);
+    message('customers-error', '');
+    try {
+      const data = await api('/customers/' + encodeURIComponent(id));
+      openCustomerDetail(readCustomer(data && data.customer), null);
+    } catch (error) {
+      message('customers-error', errorMessage(error));
+      byId('customers-heading').focus();
+    }
+  }
+  async function refreshCustomerDetail() {
+    if (!customerDetail) return;
+    const id = customerDetail.customer.id;
+    message('customer-detail-error', '');
+    try {
+      const data = await api('/customers/' + encodeURIComponent(id));
+      if (customerDetail && customerDetail.customer.id === id) applyCustomerUpdate(readCustomer(data && data.customer));
+    } catch (error) { message('customer-detail-error', errorMessage(error)); }
+    if (customerDetail && customerDetail.customer.id === id) { detailMessages.load(true); detailCalls.load(true); }
+  }
+  byId('customer-detail-back').addEventListener('click', () => closeCustomerDetail());
+  byId('customer-detail-refresh').addEventListener('click', refreshCustomerDetail);
+  byId('customer-detail-edit').addEventListener('click', (event) => { if (customerDetail) openCustomerDialog(customerDetail.customer, event.currentTarget); });
+  byId('customer-detail-handlers').addEventListener('click', (event) => { if (customerDetail) openHandlers(customerDetail.customer, event.currentTarget); });
+  byId('customer-detail-archive').addEventListener('click', (event) => { if (customerDetail) openArchive(customerDetail.customer, event.currentTarget); });
+
+  // ---- Add / edit dialog ----
+  const customerDialog = byId('customer-dialog');
+  const customerForm = byId('customer-form');
+  const customerFieldNames = ['name', 'phone', 'email', 'source', 'district', 'state', 'country', 'notes'];
+  const clearableFields = ['email', 'notes', 'source', 'district', 'state'];
+  let customerTarget = null;
+  let customerOpener = null;
+  let customerSaving = false;
+  let customerChoicesReady = false;
+  let customerDialogVersion = 0;
+  function fillEmployeeChoices(container, selected, customer) {
+    const children = [];
+    const active = Array.from(employees.values()).filter((employee) => employee.active);
+    for (const employee of active) {
+      const label = element('label', undefined, 'checkbox-filter');
+      const input = element('input');
+      input.type = 'checkbox';
+      input.value = employee.id;
+      input.checked = selected.has(employee.id);
+      label.append(input, element('span', employee.name + ' · ' + employee.id));
+      children.push(label);
+    }
+    if (!active.length) children.push(element('p', 'No active employees exist yet. Create one in the Employees tab.', 'hint'));
+    if (customer && customer.employees.some((employee) => !employees.get(employee.id)?.active)) children.push(element('p', 'Inactive employees cannot be assigned and are removed when the handling employees change.', 'hint'));
+    container.replaceChildren(...children);
+  }
+  function selectedEmployeeIds(container) {
+    return Array.from(container.querySelectorAll('input[type=checkbox]:checked'), (input) => input.value);
+  }
+  function activeHandlerIds(customer) {
+    return customer.employees.map((employee) => employee.id).filter((id) => employees.get(id)?.active);
+  }
+  async function openCustomerDialog(customer, opener) {
+    const version = ++customerDialogVersion;
+    customerTarget = customer;
+    customerOpener = opener || null;
+    customerChoicesReady = false;
+    customerForm.reset();
+    for (const name of customerFieldNames) customerForm.elements.namedItem(name).value = (customer && customer[name]) || (name === 'country' ? 'India' : '');
+    byId('customer-dialog-title').textContent = customer ? 'Edit customer' : 'Add customer';
+    byId('confirm-customer').textContent = customer ? 'Save changes' : 'Add customer';
+    message('customer-dialog-error', '');
+    message('customer-dialog-status', '');
+    byId('customer-employee-choices').replaceChildren();
+    byId('customer-employee-fields').disabled = true;
+    customerDialog.showModal();
+    customerForm.elements.namedItem('name').focus();
+    if (!directoryReady) {
+      message('customer-dialog-status', 'Loading employee choices…');
+      await loadDirectory();
+    }
+    if (version !== customerDialogVersion || !customerDialog.open) return;
+    message('customer-dialog-status', '');
+    if (directoryReady) {
+      fillEmployeeChoices(byId('customer-employee-choices'), new Set(customer ? activeHandlerIds(customer) : []), customer);
+      byId('customer-employee-fields').disabled = false;
+      customerChoicesReady = true;
+    } else {
+      message('customer-dialog-error', 'Employee choices could not be loaded. You can still save the customer details; handling employees stay unchanged.');
+    }
+  }
+  byId('cancel-customer').addEventListener('click', () => customerDialog.close());
+  customerDialog.addEventListener('cancel', (event) => { if (customerSaving) event.preventDefault(); });
+  customerDialog.addEventListener('close', () => {
+    const opener = customerOpener;
+    const id = customerTarget ? customerTarget.id : null;
+    customerOpener = null;
+    customerTarget = null;
+    customerDialogVersion++;
+    focusCustomerSurface(opener, id);
+  });
+  customerForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (customerSaving) return;
+    const form = new FormData(customerForm);
+    const values = {};
+    for (const name of customerFieldNames) values[name] = String(form.get(name) || '').trim();
+    message('customer-dialog-error', '');
+    message('customer-dialog-status', '');
+    if (!values.name || values.name.length > 200) { message('customer-dialog-error', 'Enter a name between 1 and 200 characters.'); customerForm.elements.namedItem('name').focus(); return; }
+    if (!values.phone) { message('customer-dialog-error', 'Enter a phone number.'); customerForm.elements.namedItem('phone').focus(); return; }
+    const target = customerTarget;
+    const chosen = customerChoicesReady ? selectedEmployeeIds(byId('customer-employee-choices')) : null;
+    if (chosen && chosen.length > 50) { message('customer-dialog-error', 'Choose at most 50 handling employees.'); return; }
+    const body = {};
+    if (!target) {
+      body.name = values.name;
+      body.phone = values.phone;
+      for (const name of [...clearableFields, 'country']) if (values[name]) body[name] = values[name];
+      if (chosen && chosen.length) body.employeeIds = chosen;
+    } else {
+      if (values.name !== target.name) body.name = values.name;
+      if (values.phone !== target.phone) body.phone = values.phone;
+      for (const name of clearableFields) if (values[name] !== (target[name] || '')) body[name] = values[name] || null;
+      if (values.country && values.country !== (target.country || '')) body.country = values.country;
+    }
+    const assignmentChanged = Boolean(target && chosen && !sameSet(chosen, activeHandlerIds(target)));
+    if (target && !Object.keys(body).length && !assignmentChanged) { message('customer-dialog-status', 'No changes to save.'); return; }
+    customerSaving = true;
+    byId('customer-fields').disabled = true;
+    message('customer-dialog-status', 'Saving customer…');
+    let detailsSaved = false;
+    try {
+      let saved = target;
+      if (!target) {
+        const data = await api('/customers', { method: 'POST', body: JSON.stringify(body) });
+        saved = readCustomer(data && data.customer);
+      } else {
+        if (Object.keys(body).length) {
+          const data = await api('/customers/' + encodeURIComponent(target.id), { method: 'PATCH', body: JSON.stringify(body) });
+          saved = readCustomer(data && data.customer);
+          customerTarget = saved;
+          detailsSaved = true;
+          applyCustomerUpdate(saved);
+        }
+        if (assignmentChanged) {
+          const data = await api('/customers/' + encodeURIComponent(target.id) + '/employees', { method: 'PUT', body: JSON.stringify({ employeeIds: chosen }) });
+          saved = readCustomer(data && data.customer);
+          customerTarget = saved;
+          applyCustomerUpdate(saved);
+        }
+      }
+      customerDialog.close();
+      if (target) announceCustomer('Saved ' + saved.name + '.');
+      else { message('customers-action-status', 'Added ' + saved.name + '.'); customersList.load(true); }
+    } catch (failure) {
+      customerSaving = false;
+      byId('customer-fields').disabled = false;
+      message('customer-dialog-status', '');
+      message('customer-dialog-error', (detailsSaved ? 'The customer details were saved, but the handling employees could not be updated. ' : '') + errorMessage(failure));
+      if (failure.code === 'CUSTOMER_PHONE_EXISTS') customerForm.elements.namedItem('phone').focus();
+    } finally {
+      customerSaving = false;
+      byId('customer-fields').disabled = false;
+    }
+  });
+
+  // ---- Handled by dialog ----
+  const handlersDialog = byId('handlers-dialog');
+  let handlersTarget = null;
+  let handlersOpener = null;
+  let handlersSaving = false;
+  let handlersVersion = 0;
+  async function openHandlers(customer, opener) {
+    const version = ++handlersVersion;
+    handlersTarget = customer;
+    handlersOpener = opener || null;
+    byId('handlers-customer').textContent = customer.name + ' · ' + customer.phone;
+    message('handlers-error', '');
+    message('handlers-status', '');
+    byId('handlers-choices').replaceChildren();
+    byId('confirm-handlers').disabled = true;
+    handlersDialog.showModal();
+    byId('cancel-handlers').focus();
+    if (!directoryReady) {
+      message('handlers-status', 'Loading employee choices…');
+      await loadDirectory();
+    }
+    if (version !== handlersVersion || !handlersDialog.open) return;
+    message('handlers-status', '');
+    if (directoryReady) {
+      fillEmployeeChoices(byId('handlers-choices'), new Set(activeHandlerIds(customer)), customer);
+      byId('confirm-handlers').disabled = false;
+      const first = byId('handlers-choices').querySelector('input');
+      if (first) first.focus();
+    } else {
+      message('handlers-error', 'Employee choices could not be loaded. Cancel and reopen to retry.');
+    }
+  }
+  byId('cancel-handlers').addEventListener('click', () => handlersDialog.close());
+  handlersDialog.addEventListener('cancel', (event) => { if (handlersSaving) event.preventDefault(); });
+  handlersDialog.addEventListener('close', () => {
+    const opener = handlersOpener;
+    const id = handlersTarget ? handlersTarget.id : null;
+    handlersOpener = null;
+    handlersTarget = null;
+    handlersVersion++;
+    focusCustomerSurface(opener, id);
+  });
+  byId('handlers-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!handlersTarget || handlersSaving || byId('confirm-handlers').disabled) return;
+    const employeeIds = selectedEmployeeIds(byId('handlers-choices'));
+    message('handlers-error', '');
+    if (employeeIds.length > 50) { message('handlers-error', 'Choose at most 50 handling employees.'); return; }
+    const target = handlersTarget;
+    handlersSaving = true;
+    byId('handlers-fields').disabled = true;
+    message('handlers-status', 'Saving handling employees…');
+    try {
+      const data = await api('/customers/' + encodeURIComponent(target.id) + '/employees', { method: 'PUT', body: JSON.stringify({ employeeIds }) });
+      const saved = readCustomer(data && data.customer);
+      applyCustomerUpdate(saved);
+      handlersDialog.close();
+      announceCustomer(saved.employees.length ? 'Saved. ' + saved.name + ' is handled by ' + handlerNames(saved.employees) + '.' : 'Saved. ' + saved.name + ' is now unassigned.');
+    } catch (failure) {
+      message('handlers-status', '');
+      message('handlers-error', errorMessage(failure));
+    } finally {
+      handlersSaving = false;
+      byId('handlers-fields').disabled = false;
+    }
+  });
+
+  // ---- Archive dialog ----
+  const archiveDialog = byId('archive-dialog');
+  let archiveTarget = null;
+  let archiveOpener = null;
+  let archiving = false;
+  let archiveDone = false;
+  function openArchive(customer, opener) {
+    if (archiving) return;
+    archiveTarget = customer;
+    archiveOpener = opener || null;
+    archiveDone = false;
+    byId('archive-name').textContent = customer.name + ' · ' + customer.phone + ' · ' + customer.id;
+    message('archive-error', '');
+    archiveDialog.showModal();
+    byId('cancel-archive').focus();
+  }
+  byId('cancel-archive').addEventListener('click', () => { if (!archiving) archiveDialog.close(); });
+  archiveDialog.addEventListener('cancel', (event) => { if (archiving) event.preventDefault(); });
+  archiveDialog.addEventListener('close', () => {
+    const opener = archiveOpener;
+    archiveOpener = null;
+    archiveTarget = null;
+    if (!archiveDone) focusCustomerSurface(opener, null);
+  });
+  byId('archive-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!archiveTarget || archiving) return;
+    const target = archiveTarget;
+    archiving = true;
+    byId('confirm-archive').disabled = byId('cancel-archive').disabled = true;
+    byId('confirm-archive').textContent = 'Archiving…';
+    message('archive-error', '');
+    try {
+      await api('/customers/' + encodeURIComponent(target.id), { method: 'DELETE', body: '{}' });
+      archiveDone = true;
+      archiveDialog.close();
+      if (customerDetail && customerDetail.customer.id === target.id) closeCustomerDetail(false);
+      message('customers-action-status', 'Archived ' + target.name + '. Its WhatsApp messages are kept.');
+      await customersList.load(true);
+      byId('customers-heading').focus();
+    } catch (failure) {
+      message('archive-error', errorMessage(failure));
+    } finally {
+      archiving = false;
+      byId('confirm-archive').disabled = byId('cancel-archive').disabled = false;
+      byId('confirm-archive').textContent = 'Archive customer';
+    }
+  });
+
+  // ---- WhatsApp chats ----
+  function renderChat(chat) {
+    if (!chat || !chat.customer || typeof chat.customer.id !== 'string' || typeof chat.customer.name !== 'string' || typeof chat.customer.phone !== 'string' ||
+        !Array.isArray(chat.employees) || !chat.lastMessage || !['in', 'out'].includes(chat.lastMessage.direction)) {
+      throw new Error('A WhatsApp chat could not be read. Please refresh.');
+    }
+    const last = chat.lastMessage;
+    const item = element('button', undefined, 'chat-item');
+    item.type = 'button';
+    item.dataset.customerId = chat.customer.id;
+    item.setAttribute('aria-current', String(Boolean(selectedChat) && selectedChat.id === chat.customer.id));
+    const top = element('span', undefined, 'chat-top');
+    top.append(element('strong', chat.customer.name), element('span', dateText(last.sentAt), 'hint'));
+    const typeLabel = messageTypeLabel(last.messageType);
+    const preview = (last.direction === 'in' ? 'In: ' : 'Out: ') + (last.text || (typeLabel ? '[' + typeLabel + ']' : 'No text'));
+    const total = Number.isInteger(chat.messageCount) ? chat.messageCount : 0;
+    item.append(top,
+      element('span', chat.customer.phone + ' · ' + (chat.employees.length ? 'Handled by ' + handlerNames(chat.employees) : 'Unassigned'), 'chat-meta'),
+      element('span', preview, 'chat-preview'),
+      element('span', total + ' ' + plural(total, 'message', 'messages'), 'chat-count'));
+    item.addEventListener('click', () => openChat(chat, item));
+    return item;
+  }
+  const chatList = cursorList({
+    listId: 'whatsapp-list', moreId: 'whatsapp-more', statusId: 'whatsapp-status', errorId: 'whatsapp-error', noun: ['chat', 'chats'],
+    request: () => {
+      const params = new URLSearchParams();
+      const q = String(new FormData(whatsappForm).get('q') || '').trim();
+      if (q) params.set('q', q);
+      if (byId('whatsapp-employee').value) params.set('employeeId', byId('whatsapp-employee').value);
+      return { path: '/whatsapp/chats', params };
+    },
+    render: renderChat,
+    empty: (filtered) => emptyState('No chats found', filtered ? 'Try a different search or clear the employee filter. Customers without messages are not listed.' : 'Chats appear here once WhatsApp history has been stored for a customer.')
+  });
+  const threadList = cursorList({
+    listId: 'chat-thread-list', moreId: 'chat-thread-older', statusId: 'chat-thread-status', errorId: 'chat-thread-error', noun: ['message', 'messages'],
+    chronological: true,
+    scroller: byId('chat-thread-scroll'),
+    request: () => ({ path: '/customers/' + encodeURIComponent(selectedChat.id) + '/messages', params: new URLSearchParams() }),
+    render: renderMessage,
+    empty: noMessages
+  });
+  function openChat(chat, item) {
+    selectedChat = chat.customer;
+    for (const node of byId('whatsapp-list').children) node.setAttribute('aria-current', String(node === item));
+    byId('chat-layout').dataset.view = 'thread';
+    byId('chat-thread-heading').textContent = chat.customer.name;
+    byId('chat-thread-subtitle').textContent = chat.customer.phone + ' · ' + (chat.employees.length ? 'Handled by ' + handlerNames(chat.employees) : 'Unassigned');
+    byId('chat-open-customer').hidden = false;
+    byId('chat-thread-empty').hidden = true;
+    byId('chat-thread-body').hidden = false;
+    threadList.load(true);
+    if (window.matchMedia('(max-width: 900px)').matches) byId('chat-thread-heading').focus();
+  }
+  byId('chat-thread-back').addEventListener('click', () => {
+    byId('chat-layout').dataset.view = 'list';
+    const current = selectedChat ? byId('whatsapp-list').querySelector('[data-customer-id="' + CSS.escape(selectedChat.id) + '"]') : null;
+    (current || byId('whatsapp-heading')).focus();
+  });
+  byId('chat-open-customer').addEventListener('click', (event) => {
+    if (!selectedChat || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    openCustomerById(selectedChat.id);
+  });
+  whatsappForm.addEventListener('submit', (event) => { event.preventDefault(); clearTimeout(chatSearchTimer); chatList.load(true); });
+  whatsappForm.addEventListener('input', (event) => {
+    if (event.target.type !== 'search') return;
+    clearTimeout(chatSearchTimer);
+    chatSearchTimer = setTimeout(() => chatList.load(true), 350);
+  });
+  byId('whatsapp-employee').addEventListener('change', () => chatList.load(true));
+  byId('whatsapp-refresh').addEventListener('click', () => chatList.load(true));
   window.addEventListener('pagehide', () => { clearInvitation(); closePlayer(); cancelCallHistory(); });
   let employeesLoaded = false;
   let activeTab = null;
-  const tabNames = ['call-history', 'employees'];
-  const tabTitles = { 'call-history': 'Call history', employees: 'Employees' };
-  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', employees: 'Manage people, enrolled devices and handovers.' };
+  const tabNames = ['call-history', 'customers', 'whatsapp', 'employees'];
+  const tabTitles = { 'call-history': 'Call history', customers: 'Customers', whatsapp: 'WhatsApp chats', employees: 'Employees' };
+  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', customers: 'Customers, who handles them, and their chats and calls.', whatsapp: 'Stored WhatsApp conversations with customers.', employees: 'Manage people, enrolled devices and handovers.' };
   function showTab() {
     const selected = tabNames.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'call-history';
     if (selected !== activeTab) {
@@ -1010,6 +1657,14 @@ export const clientJavaScript = String.raw`(() => {
       employeeList.load();
       deviceList.load();
       invitationList.load();
+    }
+    if (selected === 'customers' && !customersLoaded) {
+      customersLoaded = true;
+      customersList.load(true);
+    }
+    if (selected === 'whatsapp' && !chatsLoaded) {
+      chatsLoaded = true;
+      chatList.load(true);
     }
   }
   for (const name of tabNames) {

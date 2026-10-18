@@ -3,3 +3,10 @@
 LOCAL_ADMIN_SECRET=
 TOKEN_HASH_SECRET=
 
+# Optional daily call-summary email. Keep disabled for normal local development.
+CALL_SUMMARY_ENABLED=false
+EMAIL_IDS=
+MAILGUN_API_KEY=
+MAILGUN_DOMAIN=
+# Optional: MAILGUN_FROM_EMAIL defaults to postmaster@MAILGUN_DOMAIN.
+# MAILGUN_REGION defaults to us; set eu for a European Mailgun domain.

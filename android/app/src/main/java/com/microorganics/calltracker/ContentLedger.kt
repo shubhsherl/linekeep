@@ -63,6 +63,19 @@ internal data class HistoryEntry(
 @Entity(tableName = "history_progress")
 internal data class HistoryProgress(@PrimaryKey val deviceId: String, val lastId: Long)
 
+@Entity(tableName = "recording_watches", primaryKeys = ["deviceId", "watchId"])
+internal data class RecordingWatch(
+    val deviceId: String,
+    val watchId: String,
+    val historyFingerprint: String?,
+    val endedAt: Long,
+    val deadline: Long,
+    val state: String = "waiting",
+    val checkedAt: Long = 0,
+    val deferred: Boolean = false,
+    val cursor: String = "",
+)
+
 @Dao
 internal interface ContentDao {
     @Query("SELECT * FROM recordings WHERE `key` = :key")
@@ -107,9 +120,21 @@ internal interface ContentDao {
     suspend fun failedHistoryCount(device: String): Int
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveHistoryProgress(progress: HistoryProgress)
+    @Query("SELECT * FROM history WHERE deviceId = :device AND error IS NULL AND callType IN ('incoming', 'outgoing') AND durationSeconds > 0 AND CAST(strftime('%s', startedAt) AS INTEGER) * 1000 + durationSeconds * 1000 BETWEEN :since AND :until")
+    suspend fun discoveryHistory(device: String, since: Long, until: Long): List<HistoryEntry>
+    @Query("SELECT * FROM history WHERE deviceId = :device AND callType IN ('incoming', 'outgoing') AND durationSeconds BETWEEN :minimum AND :maximum AND (CAST(strftime('%s', startedAt) AS INTEGER) BETWEEN :mediaSeconds - 30 AND :mediaSeconds OR CAST(strftime('%s', startedAt) AS INTEGER) BETWEEN :mediaSeconds - :duration - 30 AND :mediaSeconds - :duration) LIMIT 201")
+    suspend fun recordingMatchHistory(device: String, minimum: Long, maximum: Long, mediaSeconds: Long, duration: Long): List<HistoryEntry>
+    @Query("SELECT * FROM recordings WHERE deviceId = :device AND tree = :tree AND `key` > :after ORDER BY `key` LIMIT 128")
+    suspend fun discoveryRecordings(device: String, tree: String, after: String): List<RecordingEntry>
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun addRecordingWatch(watch: RecordingWatch)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveRecordingWatch(watch: RecordingWatch)
+    @Query("SELECT * FROM recording_watches WHERE deviceId = :device ORDER BY checkedAt, endedAt")
+    suspend fun recordingWatches(device: String): List<RecordingWatch>
 }
 
-@Database(entities = [RecordingEntry::class, DirectoryEntry::class, HistoryEntry::class, HistoryProgress::class], version = 2, exportSchema = false)
+@Database(entities = [RecordingEntry::class, DirectoryEntry::class, HistoryEntry::class, HistoryProgress::class, RecordingWatch::class], version = 3, exportSchema = false)
 internal abstract class ContentLedger : RoomDatabase() {
     abstract fun entries(): ContentDao
 
@@ -124,10 +149,15 @@ internal abstract class ContentLedger : RoomDatabase() {
                 db.execSQL("ALTER TABLE history ADD COLUMN phoneAccountComponent TEXT")
             }
         }
+        private val migration2To3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS recording_watches (deviceId TEXT NOT NULL, watchId TEXT NOT NULL, historyFingerprint TEXT, endedAt INTEGER NOT NULL, deadline INTEGER NOT NULL, state TEXT NOT NULL, checkedAt INTEGER NOT NULL, deferred INTEGER NOT NULL, cursor TEXT NOT NULL, PRIMARY KEY(deviceId, watchId))")
+            }
+        }
         fun get(context: Context): ContentLedger = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, ContentLedger::class.java,
                 File(context.noBackupFilesDir, "content-ledger.db").absolutePath)
-                .addMigrations(migration1To2).build().also { instance = it }
+                .addMigrations(migration1To2, migration2To3).build().also { instance = it }
         }
     }
 }

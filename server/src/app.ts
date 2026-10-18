@@ -19,6 +19,10 @@ import {
   createAdminCallHistoryRoutes,
   createDeviceCallHistoryRoutes,
 } from "./modules/call-history";
+import {
+  createAdminCustomerRoutes,
+  createDeviceCustomerRoutes,
+} from "./modules/customers";
 
 import type { Env } from "./env";
 
@@ -86,9 +90,11 @@ export function createApp() {
   app.route("/v1/device", createDeviceIdentityRoutes());
   app.route("/v1/device/uploads", createRecordingRoutes());
   app.route("/v1/device/call-logs", createDeviceCallHistoryRoutes());
+  app.route("/v1/device", createDeviceCustomerRoutes());
   app.route("/v1/admin", createAdminIdentityRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCallRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCallHistoryRoutes(requireAdmin));
+  app.route("/v1/admin", createAdminCustomerRoutes(requireAdmin));
   app.route("/", createLocalAdminRoutes());
   app.use("/admin", requireAdminPage);
   app.use("/admin/*", requireAdminPage);

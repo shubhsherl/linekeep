@@ -37,6 +37,8 @@ internal data class ContentSyncStatus(
     val lastScanAt: String? = null,
     val detail: String = "Accept sharing setup, then grant access to the resources you want to sync.",
     val recent: List<String> = emptyList(),
+    val recordingWaitMessage: String? = null,
+    val nextRecordingCheckAt: Long? = null,
 )
 
 private class ContentStopped : IOException("Sharing setup or selected access changed")
@@ -48,6 +50,8 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
     private val dao = database.entries()
     private val source = RecordingSource(app.contentResolver)
     private val history = CallHistorySource(app.contentResolver, database, SimReader(app))
+    private val discovery = RecordingDiscovery(database, source)
+    private val discoveryMutex = Mutex()
     private val mutableStatus = MutableStateFlow(ContentSyncStatus())
     val status: StateFlow<ContentSyncStatus> = mutableStatus.asStateFlow()
     private fun tree(): String? = prefs.getString("tree", null)
@@ -58,7 +62,10 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
         refreshAccess()
         val recent = runCatching { JSONArray(prefs.getString("recent", "[]")) }.getOrElse { JSONArray() }
         mutableStatus.update { it.copy(lastScanAt = prefs.getString("lastScanAt", null), recent = (0 until recent.length()).map { index -> recent.getString(index) }) }
-        prefs.getString("device", null)?.let { refreshCounts(it) }
+        prefs.getString("device", null)?.let {
+            refreshCounts(it)
+            publishDiscovery(discovery.status(it, System.currentTimeMillis()))
+        }
     }
 
     suspend fun selectFolder(uri: Uri) = withContext(Dispatchers.IO) {
@@ -128,6 +135,68 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
         }
     }
 
+    /** Local capture never waits for connectivity, a heartbeat, or an in-flight audio PUT. */
+    suspend fun discover(enrollment: Enrollment, callEndedAt: Long? = null): Long? = withContext(Dispatchers.IO) {
+        discoveryMutex.withLock {
+            check(prefs.edit().putString("device", enrollment.deviceId).commit())
+            refreshAccess()
+            if (!accepted()) return@withLock null
+            val coroutine = currentCoroutineContext()
+            val now = System.currentTimeMillis()
+            var more = false
+            if (callPermission()) {
+                try {
+                    more = history.collect(enrollment.deviceId) { coroutine.ensureActive(); checkHistoryActive() }
+                } catch (error: SecurityException) {
+                    note("Call history permission was removed. Recording access remains independent.")
+                } catch (error: IOException) {
+                    note("Call history is temporarily unavailable. Saved rows remain queued; recording checks continue.")
+                }
+            }
+            val selected = tree()
+            var state = discovery.status(enrollment.deviceId, now)
+            if (selected != null && status.value.folderAccessible) {
+                if (callPermission()) discovery.observeHistory(enrollment.deviceId, now, callEndedAt)
+                else if (callEndedAt != null) discovery.observeCallEnd(enrollment.deviceId, callEndedAt)
+                try {
+                    val incomplete = scan(enrollment.deviceId, selected) { coroutine.ensureActive(); checkRecordingActive(selected) }
+                    more = more || incomplete
+                    state = discovery.check(enrollment.deviceId, selected, System.currentTimeMillis(), !incomplete)
+                } catch (error: SecurityException) {
+                    note("Recording-folder access was removed. Call history can still sync.")
+                } catch (error: FileNotFoundException) {
+                    note("The recording folder is unavailable. Select it again.")
+                } catch (error: IOException) {
+                    note("Recording-folder checking is delayed. Existing uploads and call history remain independent.")
+                    state = discovery.check(enrollment.deviceId, selected, System.currentTimeMillis(), scanComplete = false)
+                }
+            }
+            check(prefs.edit().putString("lastScanAt", Instant.now().toString()).commit())
+            refreshAccess()
+            refreshCounts(enrollment.deviceId)
+            val next = listOfNotNull(
+                state.nextCheckAt.takeIf { status.value.folderAccessible },
+                (System.currentTimeMillis() + 5_000).takeIf { more },
+            ).minOrNull()
+            publishDiscovery(state.copy(nextCheckAt = next))
+            mutableStatus.update { it.copy(lastScanAt = prefs.getString("lastScanAt", null)) }
+            next
+        }
+    }
+
+    private fun publishDiscovery(state: RecordingDiscoveryStatus) {
+        mutableStatus.update { current ->
+            current.copy(
+                recordingWaitMessage = when {
+                    !current.setupAccepted -> null
+                    !current.folderAccessible -> "Recording-folder access needed. Granted call history can still sync."
+                    else -> state.message
+                },
+                nextRecordingCheckAt = state.nextCheckAt.takeIf { current.setupAccepted && current.folderAccessible },
+            )
+        }
+    }
+
     suspend fun synchronize(enrollment: Enrollment): ContentSyncResult = withContext(Dispatchers.IO) {
         operationMutex.withLock {
             check(prefs.edit().putString("device", enrollment.deviceId).commit())
@@ -142,7 +211,6 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
                 val active = { coroutine.ensureActive(); checkHistoryActive() }
                 var acknowledgedCount = 0
                 try {
-                    more = history.collect(enrollment.deviceId, active) || more
                     repeat(4) {
                         active()
                         val batch = (dao.recentPendingHistory(enrollment.deviceId) +
@@ -151,7 +219,9 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
                             try {
                                 val acknowledged = api.history(enrollment, batch)
                                 database.withTransaction {
-                                    batch.filter { it.fingerprint in acknowledged }.forEach { dao.saveHistory(it.copy(synced = true)) }
+                                    batch.filter { it.fingerprint in acknowledged }.forEach {
+                                        if (dao.history(it.fingerprint) == it) dao.saveHistory(it.copy(synced = true))
+                                    }
                                 }
                                 acknowledgedCount += acknowledged.size
                                 if (acknowledged.size != batch.size) retry = true
@@ -161,12 +231,18 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
                                 val first = batch.first()
                                 try {
                                     if (first.fingerprint in api.history(enrollment, listOf(first))) {
-                                        dao.saveHistory(first.copy(synced = true))
+                                        database.withTransaction {
+                                            if (dao.history(first.fingerprint) == first) dao.saveHistory(first.copy(synced = true))
+                                        }
                                         acknowledgedCount++
                                     }
                                 } catch (single: ApiFailure) {
                                     if (single.status != 400) throw single
-                                    dao.saveHistory(first.copy(error = "Server rejected this history row (HTTP 400)"))
+                                    database.withTransaction {
+                                        if (dao.history(first.fingerprint) == first) {
+                                            dao.saveHistory(first.copy(error = "Server rejected this history row (HTTP 400)"))
+                                        }
+                                    }
                                     note("One call history entry was rejected; other entries remain queued.")
                                 }
                                 retry = true
@@ -187,7 +263,6 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
             if (selected != null && status.value.folderAccessible) {
                 val active = { coroutine.ensureActive(); checkRecordingActive(selected) }
                 try {
-                    more = scan(enrollment.deviceId, selected, active) || more
                     refreshCounts(enrollment.deviceId)
                     val queue = (dao.recentPendingRecording(enrollment.deviceId, selected) +
                         dao.pendingRecordings(enrollment.deviceId, selected, 12)).distinctBy { it.key }.take(12)
@@ -220,10 +295,8 @@ internal class ContentSync(context: Context, private val api: DeviceApi) {
                     }
                 }
             }
-            check(prefs.edit().putString("lastScanAt", Instant.now().toString()).commit())
             refreshAccess()
             refreshCounts(enrollment.deviceId)
-            mutableStatus.update { it.copy(lastScanAt = prefs.getString("lastScanAt", null)) }
             val recordingBacklog = status.value.folderAccessible && selected != null && dao.actionableRecordingCount(enrollment.deviceId, selected) > 0
             val historyBacklog = callPermission() && dao.pendingHistoryCount(enrollment.deviceId) > 0
             ContentSyncResult(retry, more || recordingBacklog || historyBacklog, settling)

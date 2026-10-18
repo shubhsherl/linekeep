@@ -167,6 +167,8 @@ For a handover:
 
 Invitation history shows IDs, purpose, enrollment/recovery target and active/redeemed/expired/revoked status—not recoverable code text. Codes are random, single-use, expiring and shown once. Revoked devices and invitations are hidden unless **Show revoked** is enabled. Revoking an invitation does not revoke an already-enrolled device; use the separate device action.
 
+**Setup QR code.** Generating an enrollment or recovery invitation also shows a QR code (and returns additive `enrollmentUri` and `qrSvg` fields). It encodes `linekeep://enroll?server=<this Worker's HTTPS origin>&code=<invitation code>`; scanning it in the Android app (Home → Scan QR code) supplies both the backend address and the one-time code, so a single generic APK works for every deployment. The origin comes from the request the administrator used, so open `/admin` on the public hostname you want phones to use. The QR is as sensitive as the code: it is shown once, not stored, and cleared when dismissed or expired.
+
 After reinstall or cleared app data, select **Recover enrollment** on the existing device and issue a one-use recovery code. Enter it through normal Android setup. Issuing it supersedes outstanding recovery codes without interrupting the current installation. Redemption atomically retains the enrollment/history, rotates its bearer credential and invalidates the old installation. Original/latest invitation IDs record provenance. Permissions and folder access must be granted again. A normal enrollment invitation creates a new device instead.
 
 See the [management contract](../handoffs/SERVER_AGENT.md#approved-employee-and-enrollment-extension) and [recovery contract](../handoffs/SERVER_AGENT.md#approved-simplified-setup-and-unified-calls--2026-09-26). The heartbeat fixture needs the actual registered device ID and that device's token.
@@ -180,6 +182,52 @@ Batches contain at most 50 entries. Device-scoped fingerprints make retries idem
 The unified feed shows calls with inline audio and explicit **Unlinked recording** rows. Filters cover employee, call type, literal number text, time range and completed recording presence. Matching requires one unique same-device, same-employee incoming/outgoing call across the full candidate set, not just the filtered page. The observed Samsung filename format additionally corroborates caller identity, filename time, embedded media start/end and duration with bounded ringing/rounding differences. Other formats retain exact-second/equal-duration matching. Missing, competing or conflicting evidence stays unlinked; deleted candidates still preserve ambiguity. Upload/modification time never establishes a match. See the [Samsung rules](../handoffs/SERVER_AGENT.md#samsung-recording-association--2026-09-27).
 
 **Delete call log** keeps audio as unlinked recordings; **Delete recording** removes its R2 bytes but keeps history. Both remove the selected item from the unified feed and leave phone originals untouched. History tombstones retain matching/deduplication metadata to prevent replay restoration and false associations: this is not full data erasure. Recording deletion invalidates previous playback capabilities while preserving legacy tombstone API semantics. See the [deletion contract](../handoffs/SERVER_AGENT.md#approved-linekeep-identity-and-independent-deletion--2026-09-27).
+
+## Customers and WhatsApp conversations
+
+Migration `0008_customers.sql` adds `customers`, `customer_employees` and `whatsapp_messages`, plus two virtual columns and a partial index on `call_logs` so a customer's calls are found by phone key without scanning history. See the [customer contract](../handoffs/SERVER_AGENT.md#customers-whatsapp-chats-and-employee-assignment--2026-10-06-approved-by-project-owner). Phone numbers are normalized once (`normalizePhone` in `src/data/customers.ts`) to `+<digits>`; the last 10 digits (`phone_key`) are unique among non-archived customers and are compared with the last 10 digits of `call_logs.remote_number`. Only common separators (space, `+ - ( ) . /`) are stripped from call-log numbers; numbers containing other characters or fewer than 10 digits never match.
+
+Administrators manage customers and read chats and calls at `/v1/admin/customers*` and `/v1/admin/whatsapp/chats`. An enrolled device reads only customers assigned to its **current** employee at `/v1/device/customers*` and `/v1/device/whatsapp/*`; other customers return `404`. `message.sentAt` and all other timestamps are UTC RFC 3339 strings. Historical conversations are inserted by an operator (`whatsapp_messages.source = 'import'`); no endpoint imports them. There is no WhatsApp transport yet: `GET /v1/device/whatsapp/status` returns `{"canSend": false}` and `POST /v1/device/customers/{id}/messages` validates the request and returns `503 WHATSAPP_NOT_CONFIGURED` without storing anything. Customer phone numbers and message bodies are personal data; do not log them or copy them into fixtures.
+
+## Daily email summaries
+
+The same Worker can send a Mailgun email at **6 PM IST every day**, using Cloudflare Cron `30 12 * * *` (UTC). No GitHub Actions runner or additional public endpoint is required. Reporting is disabled by default in the public configuration template.
+
+Each email covers calls **starting from midnight up to, but not including, 6 PM IST that day**, as uploaded when the job executes. This is a **today-so-far snapshot**, not a complete-day report: calls after the cutoff and uploads arriving after generation are not carried into tomorrow's email. Delayed execution uses the scheduled event's date, not the current execution date.
+
+The HTML and plain-text report includes overall and per-employee totals, connected calls (logged duration greater than zero), calls without duration, distinct stored-number counts, total duration and all eight Android call types. Only undeleted call history is counted; audio never adds duplicate calls. Attribution uses each log's historical employee, including employees no longer assigned to the device. Unique-contact counts represent distinct stored number strings, not deduplicated people. Individual phone-number fields, raw call rows and recordings are not emailed. A no-call day still produces a zero-call report.
+
+### Configure and enable delivery
+
+Use your verified Mailgun sending domain and its matching API key. From `server/`, enter values at the prompts rather than putting credentials or recipient addresses in committed configuration:
+
+```bash
+npx wrangler secret put MAILGUN_API_KEY --env dev
+npx wrangler secret put MAILGUN_DOMAIN --env dev
+npx wrangler secret put EMAIL_IDS --env dev
+```
+
+`EMAIL_IDS` follows the reference GitHub workflow's configuration: either `admin@example.com,manager@example.com` or `["admin@example.com","manager@example.com"]`. Supply plain email addresses, at most 1,000. Invalid lists fail without sending a partial report. Recipients appear together in the email's **To** field and can see each other's addresses. GitHub cannot return an existing repository secret's value; copy it from your own configuration or set a new approved list.
+
+In your ignored `wrangler.jsonc`, set these on the intended environment only:
+
+```jsonc
+"triggers": { "crons": ["30 12 * * *"] },
+"vars": {
+  // Retain the environment's existing variables.
+  "CALL_SUMMARY_ENABLED": "true"
+}
+```
+
+The sender is `Linekeep Reports <postmaster@MAILGUN_DOMAIN>`. Optionally set `MAILGUN_FROM_EMAIL` to another authorized sender and `MAILGUN_REGION` to `eu` for an EU domain; the default region is `us`. These can also be provisioned as Worker secrets. Do not copy Cratio login credentials or an unused email provider's key into Linekeep.
+
+Deploy with `npm run deploy` for development. Configure production separately with `--env production` only when intended; enabling development does not enable production. Cron changes can take up to 15 minutes to propagate. To stop sending, set `CALL_SUMMARY_ENABLED` to `"false"` and redeploy. Set that environment's `triggers.crons` to `[]` as well if you want to remove its scheduled invocations.
+
+### Verification and delivery status
+
+Run `node --test src/reporting/call-summary.test.mjs` for isolated D1, timezone/cutoff, deletion/attribution, escaping/privacy and native Worker scheduling regressions. Email requests are intercepted; this command sends no real email. Local development remains disabled by default in `.dev.vars.example`. Enabling it with real credentials can send real messages.
+
+Cloudflare **Cron Events** shows scheduled invocation outcomes. A successful request means **Mailgun accepted** the message, not that an inbox received it; inspect Mailgun delivery/bounce events for delivery status. Provider rejection fails the invocation without logging its response body, recipients or credentials. Redirects are not followed, and email open/click tracking is disabled. There is one send request per invocation, not an exactly-once delivery guarantee; manually replaying an event can resend its report.
 
 ## Fixture workflow and focused checks
 
@@ -203,6 +251,7 @@ node --test src/modules/identity/identity.test.mjs
 node --test src/modules/recordings/capabilities.test.mjs src/modules/recordings/recordings.test.mjs
 node --test src/modules/admin-calls/admin-calls.test.mjs src/http/app.test.mjs
 node --test src/modules/call-history/call-history.test.mjs
+node --test src/reporting/call-summary.test.mjs
 ```
 
 Backend checks do not establish physical Samsung folder access, installer-granted call-log permission, dual-SIM behavior or background reliability on a particular phone. Verify those on your intended devices.

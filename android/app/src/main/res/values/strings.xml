@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Linekeep</string>
     <string name="tile_label">Linekeep settings</string>
     <string name="status_channel_name">Linekeep sync status</string>
     <string name="notification_syncing">Linekeep — synchronizing</string>

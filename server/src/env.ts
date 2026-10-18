@@ -7,4 +7,10 @@ export interface Env {
   MAX_RECORDING_BYTES: string;
   LOCAL_ADMIN_SECRET?: string;
   TOKEN_HASH_SECRET?: string;
+  CALL_SUMMARY_ENABLED?: string;
+  EMAIL_IDS?: string;
+  MAILGUN_API_KEY?: string;
+  MAILGUN_DOMAIN?: string;
+  MAILGUN_FROM_EMAIL?: string;
+  MAILGUN_REGION?: string;
 }

@@ -86,3 +86,58 @@ The user requested event-driven synchronization, a simple permission checklist w
 - Other filename conventions retain the exact-second, equal-duration rule. All candidates require the same device and historical employee, incoming/outgoing history and no conflicting known number or direction. Count the full candidate set, including deleted history; attach only one unique live candidate. Name, filename, number, direction and duration updates recompute transactionally in either stream order.
 - The migration replaces duplicated trigger predicates with one candidate view and duration-oriented indexes, then backfills existing recordings. It changes associations only, not history, audio, raw timestamps, names, upload states or employee attribution.
 - Keep duration-oriented candidate indexes so matching a recording does not require a full-history scan. Regression coverage must retain both stream orders, numeric formatting, rounding boundaries, identity/direction conflicts, calendar/offset checks, missing metadata, caller-name changes, full-set ambiguity after deletion, employee/device isolation and migration preservation of raw recording fields.
+
+### Daily call-summary email — 2026-09-28
+
+- The existing Worker also handles scheduled events. Cloudflare Cron `30 12 * * *` runs at 6 PM IST. No HTTP contract, authentication route, Android behavior or database migration changes.
+- `server/src/reporting/call-summary.ts` aggregates undeleted canonical `call_logs`, not recordings or paginated unified-feed rows. Use immutable log employee attribution rather than the device's current owner. Global unique-number counts must not sum per-employee counts.
+- The approved window is the scheduled event's IST date, midnight inclusive to 6 PM exclusive. Emails explicitly describe a today-so-far snapshot: post-cutoff calls and uploads arriving after generation are not carried into tomorrow's report. Preserve UTC/IST boundary behavior and the fixed cutoff on delayed invocations.
+- HTML and plain text contain overall/per-employee counts, duration and all call types, but no call-number fields, audio or media URLs. Escape employee names in HTML. Connected means positive logged duration, not verified audio or a separate phone-system disposition.
+- Mailgun uses `EMAIL_IDS`, `MAILGUN_API_KEY` and `MAILGUN_DOMAIN` secrets, with optional `MAILGUN_FROM_EMAIL` and `MAILGUN_REGION` (`us` default or `eu`). Recipient configuration accepts comma-separated addresses or a JSON array; recipients share the To header. Activation requires explicit `CALL_SUMMARY_ENABLED=true` per environment.
+- Keep public templates disabled and free of real recipients/provider identities. Never export GitHub secret values through workflow logs. Provider bodies and configuration errors must not leak secret values; use native Worker-compatible `redirect: "manual"` and reject non-200 responses. A successful send is provider acceptance, not confirmed delivery or an exactly-once guarantee.
+- Focused coverage: `node --test src/reporting/call-summary.test.mjs`. Native workerd verification is important: Node fetch accepts redirect modes that Workers reject.
+
+### Customers, WhatsApp chats and employee assignment — 2026-10-06 (approved by project owner)
+
+Adds customers, employee assignment and stored WhatsApp conversations. Existing endpoints, migrations 0001–0007 and `docs/API_CONTRACT.md` are unchanged. All new JSON responses carry `requestId`; errors use the existing `{requestId, error:{code,message}}` shape (`INVALID_REQUEST` 400, `NOT_FOUND` 404, `CUSTOMER_PHONE_EXISTS` 409, `WHATSAPP_NOT_CONFIGURED` 503). Pagination follows the existing opaque-cursor, `limit` 1–100 (default 50), newest-first convention. Query parsing rejects duplicates/unknown keys like the call-history routes.
+
+**Data model (migration `0008_customers.sql`, additive only).**
+- `customers`: `id` (`cus_<uuid>`), `name` (required, 1–200), `phone` (required, normalized `+<digits>`), `phone_key` (last 10 digits), `email`, `notes` (≤4000), `source` (≤120), `district`, `state` (≤120), `country` (default `India`), `created_at`, `updated_at`, `archived_at`. Only `name` and `phone` are required. `phone_key` is unique among non-archived customers; a duplicate returns `409 CUSTOMER_PHONE_EXISTS`.
+- `customer_employees`: `(customer_id, employee_id)` unique with `assigned_at`. A customer may have several handling employees. Assignment is a current set; removal deletes the row. Only active employees may be assigned.
+- `whatsapp_messages`: `id` (`wam_<uuid>`), `customer_id`, `external_id` (provider message id, unique when present), `direction` (`in`|`out`), `message_type` (text, image, document, template…), `body`, `media_url`, `template_name`, `status` (`queued`|`sent`|`delivered`|`read`|`failed`), `from_number`, `to_number`, `sent_at` (UTC ms, order key), `delivered_at`, `read_at`, `sent_by_employee_id` (null for imports/inbound), `source` (`import`|`app`|`provider`), `created_at`. Index `(customer_id, sent_at DESC, id DESC)`.
+- **Phone normalization** (one shared function, used for input, storage and matching): strip non-digits; 10 digits → `+91<digits>`; 11 digits starting `0` → `+91<last 10>`; otherwise `+<digits>` and require 8–15 digits, else `400 INVALID_REQUEST`. **Call matching** compares `phone_key` with the last 10 digits of `call_logs.remote_number` (digits only; numbers shorter than 10 digits never match). Deleted call logs (`deleted_at`) are excluded. Add whatever index/column keeps this from scanning all call history.
+
+**Shapes.**
+- `Customer`: `{id, name, phone, email?, notes?, source?, district?, state?, country, employees:[{id,name}], messageCount, lastMessageAt?, lastCallAt?, createdAt, updatedAt}` (absent optional fields are omitted, never `""`).
+- `WhatsAppMessage`: `{id, customerId, direction, messageType, body?, mediaUrl?, templateName?, status, fromNumber?, toNumber?, sentAt, deliveredAt?, readAt?, sentBy?:{id,name}}`.
+- `ChatSummary`: `{customer:{id,name,phone}, employees:[{id,name}], lastMessage:{direction, messageType, text (≤200 chars, may be empty for media), sentAt}, messageCount}`; sorted by `lastMessage.sentAt` desc; customers without messages are excluded.
+- Customer calls reuse the existing unified-feed `kind:"call"` item (employee, callType, startedAt, durationSeconds, `recordings: AdminCall[]`) so audio playback/download URLs and deletion rules are unchanged. Calls are the matched call-log rows from **any** employee/device, so an admin sees who called, when, and the recordings.
+
+**Admin endpoints** (same Access/local-admin guard as other `/v1/admin` routes):
+- `GET /v1/admin/customers?q=&employeeId=&unassigned=true&source=&state=&cursor=&limit=` → `{items: Customer[], nextCursor}`. `q` is a literal case-insensitive match on name, phone digits, email (no SQL wildcards). Archived excluded. Order: newest `updatedAt` first.
+- `POST /v1/admin/customers` body `{name, phone, email?, notes?, source?, district?, state?, country?, employeeIds?}` → `201 {customer}`.
+- `GET /v1/admin/customers/{id}` → `{customer}`.
+- `PATCH /v1/admin/customers/{id}` any subset of the writable fields; optional fields accept `null` to clear; changing `phone` re-checks uniqueness → `{customer}`.
+- `PUT /v1/admin/customers/{id}/employees` body `{employeeIds: string[]}` (0–50) replaces the set → `{customer}`.
+- `DELETE /v1/admin/customers/{id}` → `{customerId, status:"archived"}` (idempotent; keeps messages).
+- `GET /v1/admin/customers/{id}/messages?cursor=&limit=` → `{items: WhatsAppMessage[], nextCursor}` newest first.
+- `GET /v1/admin/customers/{id}/calls?cursor=&limit=` → `{items, nextCursor}` (unified call items, newest first).
+- `GET /v1/admin/whatsapp/chats?q=&employeeId=&cursor=&limit=` → `{items: ChatSummary[], nextCursor}`.
+
+**Device endpoints** (existing device bearer credential; the enrolled device's *current employee* determines access). Customers not assigned to that employee return `404 NOT_FOUND`, never `403`, and are absent from lists. Revoked devices and inactive employees get the existing `401`.
+- `GET /v1/device/customers?q=&cursor=&limit=` → `{items: Customer[], nextCursor}` (assigned, non-archived; each `employees` list contains all handlers).
+- `GET /v1/device/customers/{id}` → `{customer}`.
+- `GET /v1/device/customers/{id}/messages?cursor=&limit=` → `{items, nextCursor}`.
+- `GET /v1/device/whatsapp/chats?q=&cursor=&limit=` → `{items: ChatSummary[], nextCursor}`.
+- `GET /v1/device/whatsapp/status` → `{canSend:boolean}`. `canSend` is `false` until a WhatsApp transport is configured; there is none yet.
+- `POST /v1/device/customers/{id}/messages` body `{clientMessageId (uuid), text (1–4096)}`. Validate the body and assignment, then return `503 WHATSAPP_NOT_CONFIGURED`; store nothing and send nothing. When a transport is chosen, the same request will queue/send idempotently by `clientMessageId` and return `202 {message: WhatsAppMessage}`.
+
+**Authorization decision.** The device bearer token already identifies the enrolled device and its current employee, so no new credential is needed. Employees see only assigned customers. The app never sees other employees' private data beyond the names of co-handlers. Admin access remains Cloudflare Access only. A phone number alone never grants access.
+
+**Out of scope until a transport exists:** actually sending or receiving WhatsApp messages, delivery receipts, media download, templates and the 24-hour messaging window. Historical chats are loaded by an operator import, not by an endpoint.
+
+### Setup QR code and runtime server URL — 2026-10-07 (approved by project owner)
+
+- `POST /v1/admin/employees/{id}/invitations` and `POST /v1/admin/devices/{id}/recovery-invitations` additionally return `enrollmentUri` (`linekeep://enroll?server=<percent-encoded HTTPS origin>&code=<percent-encoded code>`) and `qrSvg` (self-contained SVG, presentation attributes only). The origin is the request's own origin. Existing fields and status codes are unchanged; no device endpoint or migration changes.
+- Android no longer bakes in the backend URL: it is saved on the device (read-only while enrolled), settable by QR or in Advanced. A scanned `server` is untrusted and the app asks for confirmation naming the host before enrolling. The invitation code is still single-use and redeemed through the unchanged `POST /v1/device/register`.
+- The admin renders `qrSvg` by parsing it as an SVG document (CSP forbids inline style/scripts) and clears it with the code on dismiss/expiry. The SVG is generated by `qrcode-generator` (MIT) in `server/src/modules/identity/enrollment-qr.ts`; the payload was verified to decode back to the exact URI.

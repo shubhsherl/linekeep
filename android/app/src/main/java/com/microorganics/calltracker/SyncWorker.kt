@@ -41,10 +41,13 @@ class CalltrackerApplication : Application() {
     internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     internal lateinit var repository: EnrollmentRepository
         private set
+    internal lateinit var customers: CustomersRepository
+        private set
 
     override fun onCreate() {
         super.onCreate()
         repository = EnrollmentRepository(this)
+        customers = CustomersRepository(repository)
         scope.launch { repository.restore() }
         scope.launch { repository.contentStatus.collect { repository.updateContentNotification() } }
     }
@@ -62,8 +65,7 @@ internal object SyncScheduler {
     private fun prefs(context: Context) = context.getSharedPreferences("sync-scheduler-v3", Context.MODE_PRIVATE)
 
     fun schedule(context: Context) {
-        val work = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
-            .setConstraints(network).setInputData(workDataOf("kind" to "recovery"))
+        val work = PeriodicWorkRequestBuilder<RecoveryWorker>(1, TimeUnit.HOURS)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
         // Keep the existing identity so an upgrade does not duplicate periodic work.
         WorkManager.getInstance(context).enqueueUniquePeriodicWork("device-metadata-periodic", ExistingPeriodicWorkPolicy.UPDATE, work)
@@ -74,7 +76,7 @@ internal object SyncScheduler {
     fun refresh(context: Context, accepted: Boolean, callLog: Boolean, tree: Uri?) {
         val app = context.applicationContext as CalltrackerApplication
         observeSubscriptions(app)
-        val completionEnabled = accepted && tree != null &&
+        val completionEnabled = accepted && (callLog || tree != null) &&
             ContextCompat.checkSelfPermission(app, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
         val componentState = if (completionEnabled) PackageManager.COMPONENT_ENABLED_STATE_ENABLED
             else PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
@@ -118,6 +120,7 @@ internal object SyncScheduler {
             }
         }
         armTrigger(app)
+        app.repository.contentStatus.value.nextRecordingCheckAt?.let { scheduleDiscovery(app, it) }
     }
 
     private fun observeSubscriptions(app: CalltrackerApplication) {
@@ -183,9 +186,78 @@ internal object SyncScheduler {
 
     @Synchronized
     fun enqueue(context: Context, manual: Boolean = false) {
+        val kind = if (manual) "manual" else "event-${prefs(context).getInt("captureSlot", 0)}"
+        val work = OneTimeWorkRequestBuilder<DiscoveryWorker>()
+            .setInputData(workDataOf("kind" to kind, "manual" to manual))
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
+        WorkManager.getInstance(context).enqueueUniqueWork("local-discovery-$kind", ExistingWorkPolicy.KEEP, work).result.get()
+    }
+
+    @Synchronized
+    fun scheduleDiscovery(context: Context, at: Long) {
+        val state = prefs(context)
+        val scheduled = state.getLong("nextDiscoveryAt", 0)
+        if (scheduled != 0L && scheduled <= at) return
+        val slot = state.getInt("discoverySlot", 0)
+        val work = OneTimeWorkRequestBuilder<DiscoveryWorker>()
+            .setInputData(workDataOf("kind" to "check-$slot", "scheduledAt" to at))
+            .setInitialDelay(maxOf(0, at - System.currentTimeMillis()), TimeUnit.MILLISECONDS).build()
+        // Only local checks are replaced. This never cancels an audio transfer.
+        WorkManager.getInstance(context).enqueueUniqueWork("local-discovery-check-$slot", ExistingWorkPolicy.REPLACE, work).result.get()
+        check(state.edit().putLong("nextDiscoveryAt", at).commit())
+    }
+
+    @Synchronized
+    fun discoveryStarted(context: Context, kind: String, scheduledAt: Long) {
+        val state = prefs(context)
+        if (kind.startsWith("event-")) {
+            check(state.edit().putInt("captureSlot", 1 - kind.substringAfter('-').toInt()).commit())
+        } else if (kind.startsWith("check-") &&
+            (state.getLong("nextDiscoveryAt", 0) == 0L || scheduledAt <= state.getLong("nextDiscoveryAt", 0))) {
+            check(state.edit().remove("nextDiscoveryAt").putInt("discoverySlot", 1 - kind.substringAfter('-').toInt()).commit())
+        }
+    }
+
+    @Synchronized
+    fun phoneState(context: Context, value: String) {
+        val state = prefs(context)
+        val previous = state.getString("phoneState", null)
+        if (previous == value) return
+        val edit = state.edit().putString("phoneState", value)
+        if (value == TelephonyManager.EXTRA_STATE_OFFHOOK) edit.putBoolean("answeredCall", true)
+        if (value == TelephonyManager.EXTRA_STATE_IDLE) {
+            if (state.getBoolean("answeredCall", false)) {
+                val pending = state.getStringSet("callEnds", emptySet()).orEmpty().toMutableSet()
+                pending.add(System.currentTimeMillis().toString())
+                edit.putStringSet("callEnds", pending)
+            }
+            edit.remove("answeredCall")
+        }
+        check(edit.commit())
+        if (value == TelephonyManager.EXTRA_STATE_IDLE) enqueue(context)
+    }
+
+    @Synchronized
+    fun pendingCallEnds(context: Context): List<Long> =
+        prefs(context).getStringSet("callEnds", emptySet()).orEmpty().mapNotNull(String::toLongOrNull).sorted()
+
+    @Synchronized
+    fun consumedCallEnd(context: Context, at: Long) {
+        val state = prefs(context)
+        val pending = state.getStringSet("callEnds", emptySet()).orEmpty().toMutableSet()
+        pending.remove(at.toString())
+        check(state.edit().putStringSet("callEnds", pending).commit())
+    }
+
+    fun enqueueTransfers(context: Context, manual: Boolean = false) {
         if (manual) queue(context, "manual", expedited = true)
         else queue(context, "event-${prefs(context).getInt("eventSlot", 0)}")
-        finalizationChecks(context)
+    }
+
+    fun enqueueHeartbeat(context: Context) {
+        val work = OneTimeWorkRequestBuilder<HeartbeatWorker>().setConstraints(network)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
+        WorkManager.getInstance(context).enqueueUniqueWork("device-heartbeat", ExistingWorkPolicy.KEEP, work)
     }
 
     @Synchronized
@@ -226,6 +298,49 @@ class ContentTriggerWorker(context: Context, parameters: WorkerParameters) : Cor
         SyncScheduler.consumeTrigger(applicationContext, inputData.getInt("slot", 0), inputData.getString("signature").orEmpty())
         return Result.success()
     }
+}
+
+/** Hourly recovery dispatches independent local, upload and device-health work. */
+class RecoveryWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result {
+        SyncScheduler.enqueue(applicationContext)
+        SyncScheduler.enqueueHeartbeat(applicationContext)
+        return Result.success()
+    }
+}
+
+class DiscoveryWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result {
+        val kind = inputData.getString("kind").orEmpty()
+        SyncScheduler.discoveryStarted(applicationContext, kind, inputData.getLong("scheduledAt", 0))
+        val repository = (applicationContext as CalltrackerApplication).repository
+        return try {
+            val ends = SyncScheduler.pendingCallEnds(applicationContext)
+            val checks = mutableListOf<Long>()
+            if (ends.isEmpty()) repository.discover()?.let(checks::add)
+            else for (endedAt in ends) {
+                repository.discover(endedAt)?.let(checks::add)
+                SyncScheduler.consumedCallEnd(applicationContext, endedAt)
+            }
+            checks.minOrNull()?.let { SyncScheduler.scheduleDiscovery(applicationContext, it) }
+            SyncScheduler.enqueueTransfers(applicationContext, inputData.getBoolean("manual", false))
+            Result.success()
+        } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            // Already captured rows may upload even if a later local provider failed.
+            SyncScheduler.enqueueTransfers(applicationContext)
+            Result.retry()
+        }
+    }
+}
+
+class HeartbeatWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result =
+        when ((applicationContext as CalltrackerApplication).repository.heartbeat()) {
+            SyncOutcome.RETRY -> Result.retry()
+            SyncOutcome.FAILED -> Result.failure()
+            else -> Result.success()
+        }
 }
 
 class SyncWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
@@ -271,14 +386,14 @@ class SyncReceiver : BroadcastReceiver() {
 class CallCompletionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED ||
-            intent.getStringExtra(TelephonyManager.EXTRA_STATE) != TelephonyManager.EXTRA_STATE_IDLE ||
+            intent.getStringExtra(TelephonyManager.EXTRA_STATE) == null ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return
         val pending = goAsync()
         val app = context.applicationContext as CalltrackerApplication
         app.scope.launch {
             // The opt-in component gate and worker's fresh access checks remain authoritative.
             // Do not wait for repository/network locks inside the broadcast lifetime.
-            try { SyncScheduler.enqueue(app) }
+            try { SyncScheduler.phoneState(app, checkNotNull(intent.getStringExtra(TelephonyManager.EXTRA_STATE))) }
             finally { pending.finish() }
         }
     }
