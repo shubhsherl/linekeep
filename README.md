@@ -65,67 +65,42 @@ npm run dev
 
 Open `http://localhost:8787/admin` and sign in with your `LOCAL_ADMIN_SECRET`. This bypass is restricted to local development and **never works on a remote deployment**.
 
-### 2. Deploy your own development backend
+### 2. Deploy your own backend (guided)
 
-Device integration requires an actual hosted **HTTPS** backend. From `server/`:
-
-```sh
-npx wrangler login
-npx wrangler d1 create linekeep-dev
-npx wrangler r2 bucket create linekeep-recordings-dev
-```
-
-Then configure your own resources:
-
-1. Set the returned D1 database ID in `env.dev.d1_databases` in private `wrangler.jsonc`. If account selection is ambiguous, add your account ID as the top-level `account_id`. Use your own resource names if the example names are unavailable. Keep the `DB` and `RECORDINGS` binding names unchanged.
-2. Configure a Cloudflare Access application and an explicit administrator allow policy for your Worker host's `/admin` and `/v1/admin` paths **and their descendants**. Set `ACCESS_TEAM_DOMAIN` and `ACCESS_AUDIENCE` in the private `dev` configuration. Do not put an Access browser challenge in front of `/v1/device`: those routes use device credentials.
-3. Keep the R2 bucket private: do not enable a public `r2.dev` URL or public bucket custom domain.
-4. Generate a separate stable remote hashing secret with `openssl rand -hex 32`, then paste it into Wrangler's secret prompt. Do not deploy `LOCAL_ADMIN_SECRET`.
+Device integration needs a hosted **HTTPS** backend. An interactive script provisions everything in your Cloudflare account (Worker, D1 database, private R2 bucket, Cloudflare Access protection, optional daily email and recording retention) from an API token:
 
 ```sh
-npx wrangler secret put TOKEN_HASH_SECRET --env dev
-npm run db:migrate:remote
-npm run deploy
+cd server
+npm ci
+npm run setup
 ```
 
-Use the Worker URL reported by deployment; `https://linekeep-api-dev.YOUR-SUBDOMAIN.workers.dev` below is a placeholder. Sign in through Access at that host's `/admin`. Verify anonymous administrator access is blocked and device endpoints are not redirected to an Access login before enrolling a phone.
-
-The template also includes a `production` environment. Provision separate production D1/R2 resources, Access configuration, and secrets; do not point production at development data. See the [backend guide](server/README.md) for configuration, fixtures, deployment, and operational details.
+Follow the **[step-by-step setup guide](docs/SETUP.md)** for prerequisites, the exact API-token permissions, what the script asks, and how to enroll your first phone. Prefer to do it by hand? The guide links the [manual steps](server/README.md#cloudflare-deployment). Use separate resources, Access applications and secrets for each environment; never point production at development data.
 
 ### 3. Build the Android app
 
 Prerequisites: **JDK 17**, **Android SDK 35**, and a configured Android SDK location (`ANDROID_HOME` or private `android/local.properties`). Android 8.0/API 26 or newer is required on the device.
 
-From the repository root, replace the placeholder with **your deployed HTTPS origin**:
+The app is **generic**: no server address is built in. The admin shows a QR code containing your server address and a one-time setup code, and the app scans it (or you can type both in **Advanced → Connection**). From the repository root:
 
 ```sh
 cd android
-./gradlew --no-daemon \
-  -Plinekeep.apiBaseUrl=https://linekeep-api-dev.YOUR-SUBDOMAIN.workers.dev \
-  :app:assembleDebug
+./gradlew --no-daemon -Plinekeep.apiBaseUrl= :app:assembleDebug
 ```
 
-The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk` relative to the repository root. With a device connected and ADB configured, install from `android/`:
+The debug APK is `android/app/build/outputs/apk/debug/app-debug.apk`. With a device connected and ADB configured, install from `android/`:
 
 ```sh
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Backend URL configuration precedence is:
-
-1. Gradle property `linekeep.apiBaseUrl`.
-2. Environment variable `LINEKEEP_API_BASE_URL`.
-3. Key `apiBaseUrl` in ignored `android/linekeep.local.properties`.
-
-A missing URL, a non-HTTPS URL, or a URL that is not an origin fails the build. There is no default private deployment URL and no editable backend URL in the app. Build against the same backend you intend to administer.
-
-Current Android version: **0.5.0** (`versionCode` **6**). Call-end/folder events drive synchronization, recording discovery is bounded to five minutes, and independent hourly recovery/heartbeat handles missed work. Android may defer execution. The application ID remains `com.microorganics.calltracker` for upgrade compatibility; it is not a credential. See the [Android guide](android/README.md) for installation, permissions, folder selection, and device checks.
+A build may optionally pre-seed a default server with `-Plinekeep.apiBaseUrl=https://...` (see the [Android guide](android/README.md)); a server saved in the app always wins. A server must be an HTTPS origin; there is no bundled shared backend. For staff devices, create a private release signing key first ([release build](android/README.md#release-build)). The application ID remains `com.microorganics.calltracker` for upgrade compatibility; it is not a credential.
 
 ### 4. Enroll and sync
 
-1. In the administrator UI, create an employee and issue a single-use enrollment code. Share it privately with the intended user.
-2. Open Linekeep on the phone and enter the code. Read the sharing disclosure and confirm the applicable consent and retention requirements.
-3. Tap **Grant permissions** and select the recordings folder through Android's folder picker. Check the granted-access indicators on Home.
+1. In the administrator UI, create an employee and generate an invitation. It shows a QR code and a single-use code; share them privately with the intended user.
+2. Open Linekeep on the phone, tap **Scan QR code** and scan it (or enter the server and code in **Advanced → Connection**). Read the sharing disclosure and confirm the applicable consent and retention requirements.
+3. Tap **Grant permissions**: phone and call-log access, notifications, the recordings folder through Android's picker, and unrestricted background activity. Check the granted-access indicators on Home.
 4. Use **Sync now**, then find the available call history and recordings in the administrator UI. Android scheduling and stable-file checks may delay uploads.
 
 `READ_CALL_LOG` is a [hard-restricted Android permission](https://developer.android.com/reference/android/Manifest.permission#READ_CALL_LOG). The installer must allowlist it before the user can grant it; manually opening an APK does not guarantee this support. Linekeep does not replace the dialer or bypass the restriction. Denied call-log access blocks history collection, not otherwise accessible recording uploads.
@@ -134,7 +109,7 @@ For a reinstall or cleared app data, use **Recover enrollment** on the existing 
 
 ## Retention and deletion
 
-Choose and operate a retention policy before uploading real data. **Linekeep does not automatically enforce a retention schedule.** R2 lifecycle rules alone do not coordinate deletion with D1 metadata.
+Choose and operate a retention policy before uploading real data. Recording audio can be deleted automatically after N days by the optional [retention job](server/README.md#recording-retention) (off by default; call logs are kept and there is no automatic schedule for them). R2 lifecycle rules alone do not coordinate deletion with D1 metadata.
 
 - **Delete call log** removes the history entry from the feed and leaves its recordings as unlinked audio.
 - **Delete recording** removes the server's audio and leaves the call log. Previous playback capabilities no longer retrieve the deleted audio.
@@ -149,6 +124,7 @@ Linekeep is the new display name of Calltracker. Existing users must keep the **
 
 ## Documentation and contributing
 
+- **[Step-by-step setup guide](docs/SETUP.md)** (prerequisites, API token, guided script)
 - [Backend setup and administration](server/README.md)
 - [Android build and device behavior](android/README.md)
 - [Frozen v1 API contract](docs/API_CONTRACT.md) and [approved additive contracts](handoffs/SERVER_AGENT.md#approved-employee-and-enrollment-extension)

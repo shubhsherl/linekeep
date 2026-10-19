@@ -23,6 +23,7 @@ import {
   createAdminCustomerRoutes,
   createDeviceCustomerRoutes,
 } from "./modules/customers";
+import { createAdminAnalyticsRoutes } from "./modules/analytics";
 
 import type { Env } from "./env";
 
@@ -95,6 +96,7 @@ export function createApp() {
   app.route("/v1/admin", createAdminCallRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCallHistoryRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCustomerRoutes(requireAdmin));
+  app.route("/v1/admin", createAdminAnalyticsRoutes(requireAdmin));
   app.route("/", createLocalAdminRoutes());
   app.use("/admin", requireAdminPage);
   app.use("/admin/*", requireAdminPage);

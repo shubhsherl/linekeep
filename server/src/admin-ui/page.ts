@@ -22,6 +22,7 @@ export const adminHtml = `<!doctype html>
     </div>
     <nav class="tabs" role="tablist" aria-label="Workspace">
       <a id="call-history-tab" role="tab" href="#call-history" aria-controls="call-history-panel" aria-selected="true">Call history</a>
+      <a id="analytics-tab" role="tab" href="#analytics" aria-controls="analytics-panel" aria-selected="false" tabindex="-1">Call analytics</a>
       <a id="customers-tab" role="tab" href="#customers" aria-controls="customers-panel" aria-selected="false" tabindex="-1">Customers</a>
       <a id="whatsapp-tab" role="tab" href="#whatsapp" aria-controls="whatsapp-panel" aria-selected="false" tabindex="-1">WhatsApp</a>
       <a id="employees-tab" role="tab" href="#employees" aria-controls="employees-panel" aria-selected="false" tabindex="-1">Employees</a>
@@ -61,6 +62,102 @@ export const adminHtml = `<!doctype html>
         <p id="action-status" role="status" aria-live="polite" aria-atomic="true"></p>
         <div id="call-history-list" class="call-list"></div>
         <nav class="pagination" aria-label="Call history pages"><button id="call-history-previous" class="secondary" type="button" disabled>Previous</button><span id="call-history-page">Page 1</span><button id="call-history-next" class="secondary" type="button" disabled>Next</button></nav>
+      </section>
+    </section>
+    <section id="analytics-panel" role="tabpanel" aria-labelledby="analytics-tab" hidden>
+      <section class="panel analytics-head" aria-labelledby="analytics-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">CALL ANALYTICS · IST</p><h2 id="analytics-title" class="analytics-title" tabindex="-1">Call analytics</h2><p id="analytics-subtitle" class="muted"></p></div>
+          <button id="analytics-refresh" class="secondary" type="button">Refresh</button>
+        </div>
+        <div id="analytics-presets" class="preset-row" role="group" aria-label="Quick date ranges">
+          <button class="secondary chip" type="button" data-preset="today" aria-pressed="false">Today</button>
+          <button class="secondary chip" type="button" data-preset="yesterday" aria-pressed="false">Yesterday</button>
+          <button class="secondary chip" type="button" data-preset="7" aria-pressed="false">Last 7 days</button>
+          <button class="secondary chip" type="button" data-preset="30" aria-pressed="false">Last 30 days</button>
+          <button class="secondary chip" type="button" data-preset="month" aria-pressed="false">This month</button>
+        </div>
+        <form id="analytics-form" novalidate>
+          <div class="analytics-filters">
+            <label>From<input id="analytics-from" name="from" type="date" required></label>
+            <label>To<input id="analytics-to" name="to" type="date" required></label>
+            <div class="multi-field"><span id="analytics-employees-caption" class="field-label">Employees</span>
+              <details id="analytics-employees" class="multi">
+                <summary aria-labelledby="analytics-employees-caption analytics-employees-label"><span id="analytics-employees-label">All employees</span></summary>
+                <div class="multi-menu"><div id="analytics-employee-choices" class="choice-list"></div>
+                  <div class="actions"><button id="analytics-employees-clear" class="secondary" type="button">Show all employees</button></div></div>
+              </details></div>
+            <div class="multi-field"><span id="analytics-types-caption" class="field-label">Call type</span>
+              <details id="analytics-types" class="multi">
+                <summary aria-labelledby="analytics-types-caption analytics-types-label"><span id="analytics-types-label">All types</span></summary>
+                <div class="multi-menu"><div id="analytics-type-choices" class="choice-list"></div>
+                  <div class="actions"><button id="analytics-types-clear" class="secondary" type="button">Show all types</button></div></div>
+              </details></div>
+            <div class="analytics-apply"><button type="submit">Apply</button></div>
+          </div>
+          <p class="hint">Days run midnight to midnight India time (IST, UTC+05:30), both dates included, up to 366 days. Leave Employees or Call type empty to include everything. The view is saved in the page address so you can bookmark or share it.</p>
+          <p id="analytics-filter-error" class="error-text" role="alert" hidden></p>
+        </form>
+      </section>
+      <section id="analytics-results" aria-label="Call analytics results" aria-busy="false">
+        <p id="analytics-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p id="analytics-error" class="notice error" role="alert" hidden></p>
+        <div id="analytics-skeleton" class="analytics-skeleton" aria-hidden="true" hidden>
+          <div class="kpi-grid"><div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div></div>
+          <div class="panel skeleton skeleton-chart"></div>
+        </div>
+        <div id="analytics-content" hidden>
+          <div id="analytics-kpis" class="kpi-grid"></div>
+          <section id="analytics-empty" class="panel empty-state" hidden>
+            <h3>No calls in this period</h3>
+            <p>No calls matched these dates and filters. Try a wider date range, or choose Show all employees and Show all types. Charts appear as soon as there is at least one call.</p>
+          </section>
+          <div id="analytics-charts" class="chart-grid">
+            <article class="panel chart-card" aria-labelledby="analytics-users-heading">
+              <div class="chart-head"><h3 id="analytics-users-heading">Total calls by user</h3><p class="hint">Stacked by call type · top 15</p></div>
+              <div id="analytics-legend-users" class="legend"></div>
+              <div id="analytics-chart-users" class="chart-body"></div>
+              <p id="analytics-summary-users" class="chart-summary"></p>
+            </article>
+            <article class="panel chart-card" aria-labelledby="analytics-types-heading">
+              <div class="chart-head"><h3 id="analytics-types-heading">Calls by type</h3><p class="hint">All eight call types</p></div>
+              <div id="analytics-chart-types" class="chart-body"></div>
+              <p id="analytics-summary-types" class="chart-summary"></p>
+            </article>
+            <article class="panel chart-card" aria-labelledby="analytics-days-heading">
+              <div class="chart-head"><h3 id="analytics-days-heading">Calls by day</h3><p class="hint">Columns: calls by type · line: connect rate</p></div>
+              <div id="analytics-legend-days" class="legend"></div>
+              <div id="analytics-chart-days" class="chart-body"></div>
+              <p id="analytics-summary-days" class="chart-summary"></p>
+            </article>
+            <article class="panel chart-card" aria-labelledby="analytics-talk-heading">
+              <div class="chart-head"><h3 id="analytics-talk-heading">Talk time by day</h3><p class="hint">Connected calls, hours and minutes</p></div>
+              <div id="analytics-legend-talk" class="legend"></div>
+              <div id="analytics-chart-talk" class="chart-body"></div>
+              <p id="analytics-summary-talk" class="chart-summary"></p>
+            </article>
+            <article class="panel chart-card chart-wide" aria-labelledby="analytics-heat-heading">
+              <div class="chart-head"><h3 id="analytics-heat-heading">When calls happen</h3><p class="hint">Weekday and hour of day, IST</p></div>
+              <div id="analytics-chart-heat" class="chart-body"></div>
+              <p id="analytics-summary-heat" class="chart-summary"></p>
+            </article>
+            <article class="panel chart-card" aria-labelledby="analytics-rate-heading">
+              <div class="chart-head"><h3 id="analytics-rate-heading">Connect rate by employee</h3><p class="hint">Connected calls ÷ all calls · top 12</p></div>
+              <div id="analytics-chart-rate" class="chart-body"></div>
+              <p id="analytics-summary-rate" class="chart-summary"></p>
+            </article>
+            <article class="panel chart-card" aria-labelledby="analytics-length-heading">
+              <div class="chart-head"><h3 id="analytics-length-heading">Call length distribution</h3><p class="hint">Connected calls only</p></div>
+              <div id="analytics-chart-length" class="chart-body"></div>
+              <p id="analytics-summary-length" class="chart-summary"></p>
+            </article>
+            <article class="panel chart-card chart-wide" aria-labelledby="analytics-leaderboard-heading">
+              <div class="chart-head"><h3 id="analytics-leaderboard-heading">Employee leaderboard</h3><p class="hint">Select a column heading to sort</p></div>
+              <div id="analytics-leaderboard" class="table-wrap" role="region" aria-labelledby="analytics-leaderboard-heading" tabindex="0"></div>
+              <p id="analytics-leaderboard-note" class="chart-summary" role="status" aria-live="polite"></p>
+            </article>
+          </div>
+        </div>
       </section>
     </section>
     <section id="customers-panel" role="tabpanel" aria-labelledby="customers-tab" hidden>
@@ -191,6 +288,16 @@ export const adminHtml = `<!doctype html>
       </section>
     </section>
     <footer class="footer">Linekeep · Private audio, controlled access.<span>Playback links expire automatically.</span></footer>
+  <svg class="svg-defs" width="0" height="0" aria-hidden="true" focusable="false"><defs>
+    <pattern id="pat-outgoing" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M-1 1L1 -1M0 8L8 0M7 9L9 7" stroke="#17352f" stroke-opacity=".5" stroke-width="1" fill="none"/></pattern>
+    <pattern id="pat-missed" width="8" height="8" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.1" fill="#17352f" fill-opacity=".55"/><circle cx="6" cy="6" r="1.1" fill="#17352f" fill-opacity=".55"/></pattern>
+    <pattern id="pat-rejected" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M-1 7L1 9M0 0L8 8M7 -1L9 1" stroke="#17352f" stroke-opacity=".5" stroke-width="1" fill="none"/></pattern>
+    <pattern id="pat-blocked" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M0 2H8M0 6H8" stroke="#17352f" stroke-opacity=".5" stroke-width="1" fill="none"/></pattern>
+    <pattern id="pat-voicemail" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M2 0V8M6 0V8" stroke="#17352f" stroke-opacity=".5" stroke-width="1" fill="none"/></pattern>
+    <pattern id="pat-answered_externally" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M0 4H8M4 0V8" stroke="#17352f" stroke-opacity=".5" stroke-width="1" fill="none"/></pattern>
+    <pattern id="pat-unknown" width="8" height="8" patternUnits="userSpaceOnUse"><rect x="1" y="1" width="2" height="2" fill="#17352f" fill-opacity=".5"/><rect x="5" y="5" width="2" height="2" fill="#17352f" fill-opacity=".5"/></pattern>
+    <pattern id="pat-other" width="8" height="8" patternUnits="userSpaceOnUse"><path d="M0 0L8 8M8 0L0 8" stroke="#17352f" stroke-opacity=".45" stroke-width="1" fill="none"/></pattern>
+  </defs></svg>
   </main>
   <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description">
     <h2 id="delete-title"></h2><p id="delete-description"></p>

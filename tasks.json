@@ -714,6 +714,58 @@
         "QR rendered in the admin under its CSP and decoded back to the exact linekeep://enroll URI with an independent decoder; identity/QR/customer/app server tests 24/24; tsc clean; dev Worker redeployed.",
         "Android unit tests pass; generic and dev 0.7.0 APKs built (generic dex has no backend URL). Camera scan and the new Compose screens are not yet run on a device."
       ]
+    },
+    {
+      "id": "BE-028",
+      "title": "Recording retention (TTL) job",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-10-18T11:00:00Z",
+      "completedAt": "2026-10-18T12:27:36.347Z",
+      "dependsOn": [
+        "BE-024"
+      ],
+      "ownedPaths": [
+        "server/src/retention/**",
+        "server/src/index.ts",
+        "server/src/env.ts",
+        "server/wrangler.example.jsonc",
+        "server/README.md"
+      ],
+      "acceptanceCriteria": [
+        "Opt-in daily job deletes recording audio older than RECORDING_RETENTION_DAYS and tombstones the call; call logs are never deleted.",
+        "Verified on a development environment before production."
+      ],
+      "evidence": [
+        "Six workerd D1/R2 regressions: disabled by default, boundary, recorded-time with receipt fallback, capped backlog drain, missing object, R2 failure retries.",
+        "On the deployed dev Worker a one-time Cron removed exactly 3 synthetic expired objects and tombstoned their rows, kept a recent one and all 311 real recordings; temporary cron and test data removed. Production not yet enabled."
+      ]
+    },
+    {
+      "id": "BE-029",
+      "title": "Call analytics dashboard",
+      "status": "review",
+      "claimedBy": "Main",
+      "startedAt": "2026-10-18T12:10:00Z",
+      "completedAt": "2026-10-18T12:27:36.347Z",
+      "dependsOn": [
+        "BE-025"
+      ],
+      "ownedPaths": [
+        "server/src/data/analytics.ts",
+        "server/src/modules/analytics/**",
+        "server/src/admin-ui/**",
+        "server/src/app.ts",
+        "server/README.md",
+        "handoffs/SERVER_AGENT.md"
+      ],
+      "acceptanceCriteria": [
+        "Admin Call analytics tab with filters, KPI cards with period deltas, SVG charts and a leaderboard from an aggregate-only IST endpoint."
+      ],
+      "evidence": [
+        "Eight endpoint regressions (IST boundaries, filters, zero-fill, previous-window math, validation, no phone numbers); 113/113 server tests; tsc clean.",
+        "Browser-checked on a seeded local database: desktop and 360px without overflow, filters match the API, label overlap fixed. Deployed to dev; production not yet updated."
+      ]
     }
   ]
 }

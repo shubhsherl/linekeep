@@ -111,6 +111,7 @@ export const clientJavaScript = String.raw`(() => {
       }
       select.value = selected;
     }
+    renderAnalyticsEmployeeChoices();
     updateInvitationAvailability();
   }
   function readPage(data) {
@@ -1624,20 +1625,952 @@ export const clientJavaScript = String.raw`(() => {
   });
   byId('whatsapp-employee').addEventListener('change', () => chatList.load(true));
   byId('whatsapp-refresh').addEventListener('click', () => chatList.load(true));
-  window.addEventListener('pagehide', () => { clearInvitation(); closePlayer(); cancelCallHistory(); });
+  // ---- Call analytics (aggregates only; every server string is rendered as text) ----
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const analyticsTypes = ['incoming', 'outgoing', 'missed', 'rejected', 'blocked', 'voicemail', 'answered_externally', 'unknown'];
+  const analyticsSegmentNames = { ...callTypeNames, other: 'Other' };
+  const userSegments = ['incoming', 'outgoing', 'missed', 'rejected', 'other'];
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const weekdayShort = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const weekdayOrder = [1, 2, 3, 4, 5, 6, 0];
+  const metricKeys = ['total', 'connected', 'notConnected', 'uniqueContacts', 'talkSeconds', 'avgConnectedSeconds', 'incoming', 'incomingSeconds', 'outgoing', 'outgoingSeconds', 'missed', 'rejected', 'other', 'withRecording'];
+  const chartNames = ['users', 'types', 'days', 'talk', 'heat', 'rate', 'length'];
+  const timeSteps = [30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 14400, 21600, 43200, 86400, 172800, 432000, 864000, 1728000, 4320000];
+  const IST_OFFSET_MS = 330 * 60000;
+  const DAY_MS = 86400000;
+  let analyticsState = null;
+  let analyticsData = null;
+  let analyticsVersion = 0;
+  let analyticsController;
+  let analyticsLoading = false;
+  let analyticsWidthKey = '';
+  let analyticsResizeTimer;
+  let analyticsAnimTimer;
+  let analyticsSort = { key: 'total', dir: 'desc' };
+
+  function wholeNumber(value) { return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0; }
+  function fmtCount(value) { return wholeNumber(value).toLocaleString(); }
+  function r1(value) { return Number.isFinite(value) ? Math.round(value * 10) / 10 : 0; }
+  function pad2(value) { return String(value).padStart(2, '0'); }
+  function talkText(seconds) {
+    const total = wholeNumber(seconds);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (hours) return hours + 'h ' + minutes + 'm ' + secs + 's';
+    if (minutes) return minutes + 'm ' + secs + 's';
+    return secs + 's';
+  }
+  function axisTime(seconds) {
+    const total = wholeNumber(seconds);
+    if (!total) return '0';
+    if (total < 60) return total + 's';
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (hours && minutes) return hours + 'h ' + minutes + 'm';
+    return hours ? hours + 'h' : minutes + 'm';
+  }
+  function percentText(part, whole) { return whole > 0 ? Math.round(part / whole * 1000) / 10 + '%' : '0%'; }
+  function rateOf(part, whole) { return whole > 0 ? part / whole * 100 : null; }
+  function rateText(rate) { return rate === null ? '–' : r1(rate) + '%'; }
+
+  // Dates are plain YYYY-MM-DD strings; arithmetic happens on UTC midnights so the browser timezone never matters.
+  function parseDay(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof value === 'string' ? value : '');
+    if (!match) return NaN;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const ms = Date.UTC(year, month - 1, day);
+    const check = new Date(ms);
+    return check.getUTCFullYear() === year && check.getUTCMonth() === month - 1 && check.getUTCDate() === day ? ms : NaN;
+  }
+  function dayString(ms) { return new Date(ms).toISOString().slice(0, 10); }
+  function shiftDay(value, days) { return dayString(parseDay(value) + days * DAY_MS); }
+  function daysBetween(from, to) { return Math.round((parseDay(to) - parseDay(from)) / DAY_MS) + 1; }
+  function istToday() { return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10); }
+  function dayParts(value) {
+    const date = new Date(parseDay(value));
+    return { day: date.getUTCDate(), month: monthNames[date.getUTCMonth()], year: date.getUTCFullYear(), weekday: date.getUTCDay() };
+  }
+  function dayFull(value) {
+    const parts = dayParts(value);
+    return weekdayShort[parts.weekday] + ' ' + parts.day + ' ' + parts.month + ' ' + parts.year;
+  }
+  function dayLabel(value, withWeekday) {
+    const parts = dayParts(value);
+    return withWeekday ? weekdayShort[parts.weekday] + ' ' + parts.day : parts.day + ' ' + parts.month;
+  }
+  function rangeText(from, to) {
+    const a = dayParts(from);
+    const b = dayParts(to);
+    if (from === to) return b.day + ' ' + b.month + ' ' + b.year;
+    if (a.year !== b.year) return a.day + ' ' + a.month + ' ' + a.year + ' to ' + b.day + ' ' + b.month + ' ' + b.year;
+    if (a.month !== b.month) return a.day + ' ' + a.month + ' to ' + b.day + ' ' + b.month + ' ' + b.year;
+    return a.day + ' to ' + b.day + ' ' + b.month + ' ' + b.year;
+  }
+  function setAnalyticsTitle(from, to) {
+    byId('analytics-title').textContent = rangeText(from, to) + ' · Total days: ' + daysBetween(from, to);
+  }
+
+  // Filter state lives in the hash query: #analytics?from=..&to=..&employeeIds=a,b&callTypes=incoming
+  function defaultAnalyticsState() {
+    const to = istToday();
+    return { from: shiftDay(to, -6), to, employeeIds: [], callTypes: [] };
+  }
+  function parseAnalyticsHash() {
+    const state = defaultAnalyticsState();
+    const mark = location.hash.indexOf('?');
+    const params = new URLSearchParams(mark >= 0 ? location.hash.slice(mark + 1) : '');
+    const from = params.get('from');
+    const to = params.get('to');
+    const fromOk = !Number.isNaN(parseDay(from));
+    const toOk = !Number.isNaN(parseDay(to));
+    let nextFrom = state.from;
+    let nextTo = state.to;
+    if (fromOk && toOk) { nextFrom = from; nextTo = to; }
+    else if (fromOk) { nextFrom = from; nextTo = shiftDay(from, 6); }
+    else if (toOk) { nextTo = to; nextFrom = shiftDay(to, -6); }
+    if (nextFrom <= nextTo && daysBetween(nextFrom, nextTo) <= 366) { state.from = nextFrom; state.to = nextTo; }
+    const ids = [];
+    for (const id of (params.get('employeeIds') || '').split(',')) {
+      if (id && id.length <= 256 && !ids.includes(id) && ids.length < 50) ids.push(id);
+    }
+    state.employeeIds = ids;
+    const types = (params.get('callTypes') || '').split(',');
+    state.callTypes = analyticsTypes.filter((type) => types.includes(type));
+    return state;
+  }
+  function analyticsParams(state) {
+    const params = new URLSearchParams({ from: state.from, to: state.to });
+    if (state.employeeIds.length) params.set('employeeIds', state.employeeIds.join(','));
+    if (state.callTypes.length) params.set('callTypes', state.callTypes.join(','));
+    return params;
+  }
+  function writeAnalyticsHash() {
+    const next = '#analytics?' + analyticsParams(analyticsState).toString().replaceAll('%2C', ',');
+    if (location.hash !== next) history.replaceState(null, '', location.pathname + location.search + next);
+  }
+  function sameAnalyticsState(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+
+  // Response validation: structure is checked, every number is clamped to a non-negative integer.
+  function badAnalytics() { return new Error('The server returned unreadable analytics. Please refresh.'); }
+  function readMetrics(raw) {
+    if (!raw || typeof raw !== 'object') throw badAnalytics();
+    const metrics = {};
+    for (const key of metricKeys) metrics[key] = wholeNumber(raw[key]);
+    return metrics;
+  }
+  function readAnalytics(raw) {
+    if (!raw || typeof raw !== 'object' || !raw.range || !Array.isArray(raw.employees) || !Array.isArray(raw.byType) || !Array.isArray(raw.byDay) ||
+        !Array.isArray(raw.byHourWeekday) || !Array.isArray(raw.durationBuckets)) throw badAnalytics();
+    const range = raw.range;
+    for (const key of ['from', 'to', 'previousFrom', 'previousTo']) if (Number.isNaN(parseDay(range[key]))) throw badAnalytics();
+    const data = {
+      range: { from: range.from, to: range.to, previousFrom: range.previousFrom, previousTo: range.previousTo, days: wholeNumber(range.days) || daysBetween(range.from, range.to) },
+      totals: readMetrics(raw.totals),
+      previous: readMetrics(raw.previous),
+      employees: [],
+      byType: [],
+      byDay: [],
+      cells: new Array(168).fill(0),
+      buckets: []
+    };
+    for (const item of raw.employees) {
+      if (!item || typeof item.id !== 'string' || typeof item.name !== 'string') throw badAnalytics();
+      data.employees.push({ id: item.id, name: item.name, ...readMetrics(item) });
+    }
+    const typeRows = new Map();
+    for (const item of raw.byType) if (item && analyticsTypes.includes(item.type)) typeRows.set(item.type, item);
+    data.byType = analyticsTypes.map((type) => ({ type, count: wholeNumber(typeRows.get(type)?.count), seconds: wholeNumber(typeRows.get(type)?.seconds) }));
+    for (const item of raw.byDay) {
+      if (!item || Number.isNaN(parseDay(item.date)) || !item.types || typeof item.types !== 'object') throw badAnalytics();
+      const types = {};
+      for (const type of analyticsTypes) types[type] = { count: wholeNumber(item.types[type]?.count), seconds: wholeNumber(item.types[type]?.seconds) };
+      data.byDay.push({ date: item.date, total: wholeNumber(item.total), connected: wholeNumber(item.connected), talkSeconds: wholeNumber(item.talkSeconds), types });
+    }
+    for (const item of raw.byHourWeekday) {
+      if (item && Number.isInteger(item.weekday) && item.weekday >= 0 && item.weekday <= 6 && Number.isInteger(item.hour) && item.hour >= 0 && item.hour <= 23) {
+        data.cells[item.weekday * 24 + item.hour] = wholeNumber(item.count);
+      }
+    }
+    for (const item of raw.durationBuckets) {
+      if (!item || typeof item.label !== 'string') throw badAnalytics();
+      data.buckets.push({ key: String(item.key), label: item.label.slice(0, 24), count: wholeNumber(item.count) });
+    }
+    return data;
+  }
+
+  // ---- SVG helpers ----
+  function svgEl(tag, attrs, parent) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const key of Object.keys(attrs || {})) node.setAttribute(key, String(attrs[key]));
+    if (parent) parent.append(node);
+    return node;
+  }
+  function svgTitle(node, text) {
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = text;
+    node.prepend(title);
+  }
+  function svgText(parent, x, y, text, className, anchor, full) {
+    const node = svgEl('text', { x: r1(x), y: r1(y), class: 'ch-text' + (className ? ' ' + className : ''), 'text-anchor': anchor || 'start' }, parent);
+    node.textContent = text;
+    if (full && full !== text) svgTitle(node, full);
+    return node;
+  }
+  function fitText(text, pixels) {
+    const max = Math.max(2, Math.floor(pixels / 6.2));
+    return text.length > max ? text.slice(0, max - 1) + '…' : text;
+  }
+  function hostWidth(host) { return Math.max(240, Math.floor(host.clientWidth)); }
+  function newChart(host, width, height) {
+    host.replaceChildren();
+    const svg = svgEl('svg', { class: 'chart-svg', width, height, viewBox: '0 0 ' + width + ' ' + height, role: 'img', focusable: 'false' });
+    host.append(svg);
+    return svg;
+  }
+  function finishChart(name, svg, title, summary) {
+    if (svg) svg.setAttribute('aria-label', title + '. ' + summary);
+    byId('analytics-summary-' + name).textContent = summary;
+  }
+  function chartMessage(name, text) {
+    byId('analytics-chart-' + name).replaceChildren(element('p', text, 'chart-empty'));
+    byId('analytics-summary-' + name).textContent = '';
+  }
+  function swatch(type) {
+    const svg = svgEl('svg', { width: 12, height: 12, viewBox: '0 0 12 12', class: 'sw t-' + type, 'aria-hidden': 'true', focusable: 'false' });
+    svgEl('rect', { x: 0.5, y: 0.5, width: 11, height: 11, rx: 2, class: 'seg' }, svg);
+    if (type !== 'incoming') svgEl('rect', { x: 0.5, y: 0.5, width: 11, height: 11, rx: 2, fill: 'url(#pat-' + type + ')' }, svg);
+    return svg;
+  }
+  function buildLegend(name, items) {
+    const host = byId('analytics-legend-' + name);
+    host.replaceChildren();
+    for (const item of items) {
+      const entry = element('span', undefined, 'legend-item');
+      if (item.line) {
+        const icon = svgEl('svg', { width: 18, height: 12, viewBox: '0 0 18 12', 'aria-hidden': 'true', focusable: 'false' });
+        svgEl('path', { d: 'M1 6H17', class: 'rate-line' }, icon);
+        svgEl('circle', { cx: 9, cy: 6, r: 3, class: 'rate-dot' }, icon);
+        entry.append(icon);
+      } else {
+        entry.append(swatch(item.type));
+      }
+      entry.append(item.label);
+      host.append(entry);
+    }
+  }
+  function segment(parent, type, x, y, w, h, tip, grow) {
+    if (!(w > 0) || !(h > 0)) return null;
+    const group = svgEl('g', grow ? { class: grow } : {}, parent);
+    svgTitle(group, tip);
+    const box = { x: r1(x), y: r1(y), width: r1(w), height: r1(h) };
+    svgEl('rect', { ...box, class: 'seg t-' + type }, group);
+    if (type !== 'incoming' && w >= 7 && h >= 7) svgEl('rect', { ...box, fill: 'url(#pat-' + type + ')', 'pointer-events': 'none' }, group);
+    return group;
+  }
+  function niceCountScale(max) {
+    if (max <= 4) return { step: 1, top: Math.max(1, max) };
+    const raw = max / 4;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / magnitude;
+    const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * magnitude;
+    return { step, top: Math.ceil(max / step) * step };
+  }
+  function niceTimeScale(max) {
+    const raw = max / 4;
+    const step = timeSteps.find((candidate) => candidate >= raw) || timeSteps[timeSteps.length - 1];
+    return { step, top: Math.max(step, Math.ceil(max / step) * step) };
+  }
+  function drawYAxis(svg, left, top, plotW, plotH, scale, format) {
+    for (let value = 0; value <= scale.top + 1e-9; value += scale.step) {
+      const y = top + plotH - (value / scale.top) * plotH;
+      svgEl('line', { x1: left, x2: left + plotW, y1: r1(y), y2: r1(y), class: value === 0 ? 'ch-axis' : 'ch-grid' }, svg);
+      svgText(svg, left - 6, y + 3.5, format(value), 'ch-muted', 'end');
+    }
+  }
+  function drawDayLabels(svg, days, left, slot, baseY) {
+    const short = days.length <= 10;
+    const every = Math.max(1, Math.ceil((short ? 42 : 48) / slot));
+    days.forEach((day, index) => {
+      if (index % every === 0) svgText(svg, left + index * slot + slot / 2, baseY + 15, dayLabel(day.date, short), 'ch-muted', 'middle', dayFull(day.date));
+    });
+  }
+  function busiest(items, value) {
+    let best = null;
+    for (const item of items) if (!best || value(item) > value(best)) best = item;
+    return best;
+  }
+
+  // ---- Charts ----
+  function renderUsersChart(data) {
+    const host = byId('analytics-chart-users');
+    const rows = data.employees.slice(0, 15);
+    buildLegend('users', userSegments.filter((key) => rows.some((row) => row[key] > 0)).map((key) => ({ type: key, label: analyticsSegmentNames[key] })));
+    if (!rows.length) return chartMessage('users', 'No employee activity in this period.');
+    const width = hostWidth(host);
+    const labelW = Math.round(Math.min(150, Math.max(72, width * 0.3)));
+    const rowH = 30;
+    const barH = 18;
+    const pad = 4;
+    const barX = labelW + 8;
+    const barMax = Math.max(40, width - barX - 58);
+    const sumOf = (row) => userSegments.reduce((sum, key) => sum + row[key], 0);
+    const maxTotal = Math.max(1, ...rows.map((row) => Math.max(row.total, sumOf(row))));
+    const svg = newChart(host, width, rows.length * rowH + pad * 2);
+    rows.forEach((row, index) => {
+      const y = pad + index * rowH;
+      const mid = y + rowH / 2 + 4;
+      const group = svgEl('g', {}, svg);
+      svgTitle(group, row.name + ': ' + fmtCount(row.total) + ' calls · ' + userSegments.filter((key) => row[key] > 0).map((key) => analyticsSegmentNames[key] + ' ' + fmtCount(row[key])).join(', '));
+      svgText(group, labelW, mid, fitText(row.name, labelW), '', 'end', row.name);
+      let x = barX;
+      for (const key of userSegments) {
+        const w = row[key] / maxTotal * barMax;
+        const drawn = segment(group, key, x, y + (rowH - barH) / 2, w, barH, row.name + ' · ' + analyticsSegmentNames[key] + ': ' + fmtCount(row[key]), 'grow-x');
+        if (drawn && w >= 24) svgText(group, x + w / 2, mid - 1, fmtCount(row[key]), 'ch-seg-label', 'middle');
+        x += w;
+      }
+      svgText(group, x + 6, mid, fmtCount(row.total), 'ch-strong');
+    });
+    const top = rows[0];
+    finishChart('users', svg, 'Total calls by user', top.name + ' made ' + percentText(top.total, data.totals.total) + ' of calls (' + fmtCount(top.total) + ' of ' + fmtCount(data.totals.total) + ').' +
+      (data.employees.length > rows.length ? ' Showing the top ' + rows.length + ' of ' + data.employees.length + ' employees; the leaderboard lists everyone.' : ''));
+  }
+
+  function renderTypesChart(data) {
+    const host = byId('analytics-chart-types');
+    const width = hostWidth(host);
+    const labelW = Math.round(Math.min(160, Math.max(110, width * 0.38)));
+    const valueW = 100;
+    const barX = labelW + 6;
+    const barMax = Math.max(30, width - barX - valueW);
+    const rowH = 30;
+    const pad = 4;
+    const total = data.totals.total;
+    const maxCount = Math.max(1, ...data.byType.map((row) => row.count));
+    const svg = newChart(host, width, data.byType.length * rowH + pad * 2);
+    data.byType.forEach((row, index) => {
+      const y = pad + index * rowH;
+      const mid = y + rowH / 2 + 4;
+      const group = svgEl('g', {}, svg);
+      svgTitle(group, callTypeNames[row.type] + ': ' + fmtCount(row.count) + ' calls · talk time ' + talkText(row.seconds));
+      const icon = svgEl('g', { transform: 'translate(0 ' + r1(y + rowH / 2 - 6) + ')' }, group);
+      icon.append(swatch(row.type));
+      svgText(group, 18, mid, fitText(callTypeNames[row.type], labelW - 18), row.count ? '' : 'ch-muted', 'start', callTypeNames[row.type]);
+      svgEl('rect', { x: barX, y: y + (rowH - 14) / 2, width: barMax, height: 14, rx: 3, class: 'track' }, group);
+      segment(group, row.type, barX, y + (rowH - 14) / 2, row.count / maxCount * barMax, 14, callTypeNames[row.type] + ': ' + fmtCount(row.count), 'grow-x');
+      svgText(group, width, mid, row.count ? fmtCount(row.count) + ' · ' + percentText(row.count, total) : '0', row.count ? 'ch-strong' : 'ch-muted', 'end');
+    });
+    const ranked = data.byType.filter((row) => row.count > 0).sort((a, b) => b.count - a.count);
+    const lead = ranked[0];
+    const second = ranked[1];
+    finishChart('types', svg, 'Calls by type', lead
+      ? callTypeNames[lead.type] + ' made up ' + percentText(lead.count, total) + ' of calls (' + fmtCount(lead.count) + ' of ' + fmtCount(total) + ').' +
+        (second ? ' Next: ' + callTypeNames[second.type] + ' (' + percentText(second.count, total) + ').' : '')
+      : 'No calls by type.');
+  }
+
+  function renderDaysChart(data) {
+    const host = byId('analytics-chart-days');
+    const days = data.byDay;
+    const used = analyticsTypes.filter((type) => days.some((day) => day.types[type].count > 0));
+    buildLegend('days', used.map((type) => ({ type, label: callTypeNames[type] })).concat([{ line: true, label: 'Connect rate (right axis)' }]));
+    if (!days.length) return chartMessage('days', 'No days to chart.');
+    const width = hostWidth(host);
+    const left = 34;
+    const right = 40;
+    const top = 16;
+    const bottom = 28;
+    const height = width < 420 ? 220 : 260;
+    const plotW = width - left - right;
+    const plotH = height - top - bottom;
+    const stackSum = (day) => analyticsTypes.reduce((sum, type) => sum + day.types[type].count, 0);
+    const scale = niceCountScale(Math.max(1, ...days.map((day) => Math.max(day.total, stackSum(day)))));
+    const svg = newChart(host, width, height);
+    drawYAxis(svg, left, top, plotW, plotH, scale, fmtCount);
+    const slot = plotW / days.length;
+    const barW = Math.max(1, Math.min(44, slot * 0.72));
+    const points = [];
+    days.forEach((day, index) => {
+      const x = left + index * slot + (slot - barW) / 2;
+      const centre = left + index * slot + slot / 2;
+      let y = top + plotH;
+      for (const type of analyticsTypes) {
+        const count = day.types[type].count;
+        if (!count) continue;
+        const h = count / scale.top * plotH;
+        y -= h;
+        segment(svg, type, x, y, barW, h, dayFull(day.date) + ' · ' + callTypeNames[type] + ': ' + fmtCount(count) + ' ' + plural(count, 'call', 'calls'), 'grow-y');
+      }
+      if (!stackSum(day)) {
+        const hit = svgEl('rect', { x: r1(left + index * slot), y: top, width: r1(slot), height: plotH, fill: 'transparent' }, svg);
+        svgTitle(hit, dayFull(day.date) + ' · no calls');
+      } else if (slot >= 26 && days.length <= 16) {
+        svgText(svg, centre, y - 3, fmtCount(day.total), 'ch-strong', 'middle');
+      }
+      points.push(day.total > 0 ? { x: centre, rate: day.connected / day.total, day } : null);
+    });
+    for (const ratio of [0, 50, 100]) svgText(svg, left + plotW + 6, top + plotH - ratio / 100 * plotH + 3.5, ratio + '%', 'ch-muted');
+    let path = '';
+    points.forEach((point, index) => {
+      if (!point) return;
+      path += (points[index - 1] ? 'L' : 'M') + r1(point.x) + ' ' + r1(top + plotH - Math.min(1, point.rate) * plotH) + ' ';
+    });
+    if (path) svgEl('path', { d: path.trim(), class: 'rate-line' }, svg);
+    points.forEach((point, index) => {
+      if (!point) return;
+      const isolated = !points[index - 1] && !points[index + 1];
+      if (days.length > 45 && !isolated) return;
+      const dot = svgEl('circle', { cx: r1(point.x), cy: r1(top + plotH - Math.min(1, point.rate) * plotH), r: 3.5, class: 'rate-dot' }, svg);
+      svgTitle(dot, dayFull(point.day.date) + ' · connect rate ' + rateText(point.rate * 100) + ' (' + fmtCount(point.day.connected) + ' of ' + fmtCount(point.day.total) + ' connected)');
+    });
+    drawDayLabels(svg, days, left, slot, top + plotH);
+    const peak = busiest(days, (day) => day.total);
+    const average = r1(data.totals.total / Math.max(1, days.length));
+    finishChart('days', svg, 'Calls by day', 'Busiest day: ' + dayFull(peak.date) + ' with ' + fmtCount(peak.total) + ' ' + plural(peak.total, 'call', 'calls') + '. Average ' + average.toLocaleString() + ' calls a day; ' +
+      rateText(rateOf(data.totals.connected, data.totals.total)) + ' of calls connected over the period.');
+  }
+
+  function renderTalkChart(data) {
+    const host = byId('analytics-chart-talk');
+    const days = data.byDay.map((day) => {
+      const incoming = day.types.incoming.seconds;
+      const outgoing = day.types.outgoing.seconds;
+      return { date: day.date, incoming, outgoing, other: Math.max(0, day.talkSeconds - incoming - outgoing), total: Math.max(day.talkSeconds, incoming + outgoing) };
+    });
+    const keys = ['incoming', 'outgoing', 'other'];
+    const sums = { incoming: 0, outgoing: 0, other: 0 };
+    for (const day of days) for (const key of keys) sums[key] += day[key];
+    buildLegend('talk', keys.filter((key) => sums[key] > 0).map((key) => ({ type: key, label: analyticsSegmentNames[key] === 'Other' ? 'Other types' : analyticsSegmentNames[key] })));
+    const grand = sums.incoming + sums.outgoing + sums.other;
+    if (!days.length || !grand) return chartMessage('talk', 'No talk time in this period: no connected calls.');
+    const width = hostWidth(host);
+    const left = 52;
+    const right = 8;
+    const top = 16;
+    const bottom = 28;
+    const height = width < 420 ? 220 : 260;
+    const plotW = width - left - right;
+    const plotH = height - top - bottom;
+    const scale = niceTimeScale(Math.max(1, ...days.map((day) => day.total)));
+    const svg = newChart(host, width, height);
+    drawYAxis(svg, left, top, plotW, plotH, scale, axisTime);
+    const slot = plotW / days.length;
+    const barW = Math.max(1, Math.min(44, slot * 0.72));
+    days.forEach((day, index) => {
+      const x = left + index * slot + (slot - barW) / 2;
+      let y = top + plotH;
+      for (const key of keys) {
+        if (!day[key]) continue;
+        const h = day[key] / scale.top * plotH;
+        y -= h;
+        segment(svg, key, x, y, barW, h, dayFull(day.date) + ' · ' + (key === 'other' ? 'Other types' : analyticsSegmentNames[key]) + ': ' + talkText(day[key]), 'grow-y');
+      }
+      if (!day.total) {
+        const hit = svgEl('rect', { x: r1(left + index * slot), y: top, width: r1(slot), height: plotH, fill: 'transparent' }, svg);
+        svgTitle(hit, dayFull(day.date) + ' · no talk time');
+      } else if (slot >= 40 && days.length <= 12) {
+        svgText(svg, left + index * slot + slot / 2, y - 3, axisTime(day.total), 'ch-strong', 'middle', talkText(day.total));
+      }
+    });
+    drawDayLabels(svg, days, left, slot, top + plotH);
+    const peak = busiest(days, (day) => day.total);
+    finishChart('talk', svg, 'Talk time by day', 'Total talk time ' + talkText(grand) + ': outgoing ' + percentText(sums.outgoing, grand) + ', incoming ' + percentText(sums.incoming, grand) +
+      (sums.other ? ', other types ' + percentText(sums.other, grand) : '') + '. Longest day: ' + dayFull(peak.date) + ' with ' + talkText(peak.total) + '.');
+  }
+
+  function heatColor(count, max) {
+    if (!count) return '#f3f5f1';
+    const s = 0.18 + 0.82 * Math.sqrt(Math.min(1, count / max));
+    const from = [232, 241, 234];
+    const to = [14, 70, 62];
+    return '#' + from.map((channel, i) => Math.round(channel + (to[i] - channel) * s).toString(16).padStart(2, '0')).join('');
+  }
+  function hourRange(hour) { return pad2(hour) + ':00–' + pad2((hour + 1) % 24) + ':00'; }
+  function renderHeatChart(data) {
+    const host = byId('analytics-chart-heat');
+    const counts = data.cells;
+    const max = Math.max(...counts);
+    if (max <= 0) return chartMessage('heat', 'No calls to chart.');
+    const width = hostWidth(host);
+    const leftW = 38;
+    const top = 20;
+    const cw = (width - leftW - 2) / 24;
+    const ch = Math.round(Math.min(28, Math.max(16, cw * 0.9)));
+    const legendY = top + 7 * ch + 16;
+    const stacked = width < 520;
+    const svg = newChart(host, width, legendY + (stacked ? 44 : 24));
+    svgText(svg, 0, top - 7, 'IST', 'ch-muted');
+    const every = cw >= 22 ? 1 : cw >= 14 ? 2 : 3;
+    for (let hour = 0; hour < 24; hour += every) svgText(svg, leftW + hour * cw + cw / 2, top - 7, pad2(hour), 'ch-muted', 'middle');
+    const hourTotals = new Array(24).fill(0);
+    const dayTotals = new Array(7).fill(0);
+    let peak = { weekday: 1, hour: 0, count: -1 };
+    weekdayOrder.forEach((weekday, row) => {
+      const y = top + row * ch;
+      svgText(svg, leftW - 6, y + ch / 2 + 3.5, weekdayShort[weekday], 'ch-muted', 'end', weekdayNames[weekday]);
+      for (let hour = 0; hour < 24; hour++) {
+        const count = counts[weekday * 24 + hour];
+        hourTotals[hour] += count;
+        dayTotals[weekday] += count;
+        if (count > peak.count) peak = { weekday, hour, count, row };
+        const x = leftW + hour * cw;
+        const cell = svgEl('g', {}, svg);
+        svgTitle(cell, weekdayNames[weekday] + ' ' + hourRange(hour) + ' IST · ' + fmtCount(count) + ' ' + plural(count, 'call', 'calls'));
+        svgEl('rect', { x: r1(x), y, width: r1(Math.max(1, cw - 1)), height: ch - 1, rx: 2, fill: heatColor(count, max) }, cell);
+        if (cw >= 24 && count > 0) svgText(cell, x + cw / 2, y + ch / 2 + 3.5, fmtCount(count), 'ch-seg-label' + (count / max > 0.45 ? ' ch-light' : ''), 'middle');
+      }
+    });
+    svgEl('rect', { x: r1(leftW + peak.hour * cw - 1), y: top + peak.row * ch - 1, width: r1(Math.max(2, cw + 1)), height: ch + 1, rx: 3, class: 'heat-peak' }, svg);
+    const steps = [0, 0.1, 0.3, 0.55, 0.8, 1];
+    svgText(svg, leftW, legendY + 10, '0', 'ch-muted', 'end');
+    steps.forEach((ratio, index) => svgEl('rect', { x: leftW + 6 + index * 22, y: legendY, width: 21, height: 13, rx: 2, fill: heatColor(ratio ? ratio * max : 0, max) }, svg));
+    const afterScale = leftW + 6 + steps.length * 22 + 6;
+    svgText(svg, afterScale, legendY + 10, fmtCount(max) + ' ' + plural(max, 'call', 'calls') + ' in a slot', 'ch-muted');
+    const keyX = stacked ? leftW + 6 : afterScale + 118;
+    const keyY = stacked ? legendY + 24 : legendY;
+    svgEl('rect', { x: keyX, y: keyY, width: 21, height: 13, rx: 3, class: 'heat-peak' }, svg);
+    svgText(svg, keyX + 28, keyY + 10, 'Outlined = busiest slot', 'ch-muted');
+    const bestHour = hourTotals.indexOf(Math.max(...hourTotals));
+    const bestDay = dayTotals.indexOf(Math.max(...dayTotals));
+    finishChart('heat', svg, 'When calls happen', 'Busiest slot: ' + weekdayNames[peak.weekday] + ' ' + hourRange(peak.hour) + ' IST with ' + fmtCount(peak.count) + ' ' + plural(peak.count, 'call', 'calls') +
+      '. Busiest weekday: ' + weekdayNames[bestDay] + ' (' + fmtCount(dayTotals[bestDay]) + '). Busiest hour: ' + hourRange(bestHour) + ' (' + fmtCount(hourTotals[bestHour]) + ').');
+  }
+
+  function renderRateChart(data) {
+    const host = byId('analytics-chart-rate');
+    const rows = data.employees.filter((row) => row.total > 0)
+      .sort((a, b) => b.connected / b.total - a.connected / a.total || b.total - a.total || a.name.localeCompare(b.name)).slice(0, 12);
+    if (!rows.length) return chartMessage('rate', 'No employee activity in this period.');
+    const width = hostWidth(host);
+    const rowH = 52;
+    const svg = newChart(host, width, rows.length * rowH + 4);
+    rows.forEach((row, index) => {
+      const y = 4 + index * rowH;
+      const rate = row.connected / row.total;
+      const group = svgEl('g', {}, svg);
+      svgTitle(group, row.name + ': ' + rateText(rate * 100) + ' connect rate · ' + fmtCount(row.connected) + ' of ' + fmtCount(row.total) + ' calls connected · average length ' + (row.avgConnectedSeconds ? talkText(row.avgConnectedSeconds) : 'not available'));
+      svgText(group, 0, y + 12, fitText(row.name, width - 64), '', 'start', row.name);
+      svgText(group, width, y + 12, rateText(rate * 100), 'ch-strong', 'end');
+      svgEl('rect', { x: 0, y: y + 19, width, height: 10, rx: 5, class: 'track' }, group);
+      svgEl('rect', { x: 0, y: y + 19, width: r1(Math.max(rate > 0 ? 3 : 0, rate * width)), height: 10, rx: 5, class: 'bar-rate grow-x' }, group);
+      svgText(group, 0, y + 44, fmtCount(row.connected) + ' of ' + fmtCount(row.total) + ' connected · avg ' + (row.avgConnectedSeconds ? talkText(row.avgConnectedSeconds) : 'n/a'), 'ch-muted');
+    });
+    const best = rows[0];
+    finishChart('rate', svg, 'Connect rate by employee', 'Highest: ' + best.name + ' at ' + rateText(best.connected / best.total * 100) + ' (' + fmtCount(best.connected) + ' of ' + fmtCount(best.total) + '). Team average ' +
+      rateText(rateOf(data.totals.connected, data.totals.total)) + '. Rates on few calls swing widely, so check the counts.');
+  }
+
+  function renderLengthChart(data) {
+    const host = byId('analytics-chart-length');
+    const buckets = data.buckets;
+    const total = buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+    if (!buckets.length || !total) return chartMessage('length', 'No connected calls in this period.');
+    const width = hostWidth(host);
+    const left = 32;
+    const right = 6;
+    const top = 22;
+    const bottom = 42;
+    const height = 230;
+    const plotW = width - left - right;
+    const plotH = height - top - bottom;
+    const scale = niceCountScale(Math.max(1, ...buckets.map((bucket) => bucket.count)));
+    const svg = newChart(host, width, height);
+    drawYAxis(svg, left, top, plotW, plotH, scale, fmtCount);
+    const slot = plotW / buckets.length;
+    const barW = Math.max(8, Math.min(56, slot * 0.62));
+    buckets.forEach((bucket, index) => {
+      const centre = left + index * slot + slot / 2;
+      const h = bucket.count / scale.top * plotH;
+      const y = top + plotH - h;
+      const group = svgEl('g', {}, svg);
+      svgTitle(group, bucket.label + ': ' + fmtCount(bucket.count) + ' connected ' + plural(bucket.count, 'call', 'calls') + ' (' + percentText(bucket.count, total) + ')');
+      if (h > 0) svgEl('rect', { x: r1(centre - barW / 2), y: r1(y), width: r1(barW), height: r1(h), rx: 2, class: 'bar-blue grow-y' }, group);
+      svgText(group, centre, y - 5, fmtCount(bucket.count), 'ch-strong', 'middle');
+      svgText(group, centre, top + plotH + 15, bucket.label, '', 'middle');
+      svgText(group, centre, top + plotH + 29, percentText(bucket.count, total), 'ch-muted', 'middle');
+    });
+    const lead = busiest(buckets, (bucket) => bucket.count);
+    finishChart('length', svg, 'Call length distribution', 'Most connected calls (' + percentText(lead.count, total) + ', ' + fmtCount(lead.count) + ' of ' + fmtCount(total) + ') lasted ' + lead.label + '.');
+  }
+
+  const leaderColumns = [
+    { key: 'name', label: 'Employee', value: (row) => row.name, text: (row) => row.name },
+    { key: 'total', label: 'Total', value: (row) => row.total, text: (row) => fmtCount(row.total) },
+    { key: 'connected', label: 'Connected', value: (row) => row.connected, text: (row) => fmtCount(row.connected) },
+    { key: 'rate', label: 'Connect %', value: (row) => rateOf(row.connected, row.total) || 0, text: (row) => rateText(rateOf(row.connected, row.total)) },
+    { key: 'talk', label: 'Talk time', value: (row) => row.talkSeconds, text: (row) => talkText(row.talkSeconds) },
+    { key: 'avg', label: 'Avg length', value: (row) => row.avgConnectedSeconds, text: (row) => talkText(row.avgConnectedSeconds) },
+    { key: 'unique', label: 'Unique contacts', value: (row) => row.uniqueContacts, text: (row) => fmtCount(row.uniqueContacts) },
+    { key: 'missed', label: 'Missed', value: (row) => row.missed, text: (row) => fmtCount(row.missed) },
+    { key: 'recorded', label: 'Recorded', value: (row) => row.withRecording, text: (row) => fmtCount(row.withRecording) + ' (' + percentText(row.withRecording, row.connected) + ')' }
+  ];
+  function renderLeaderboard() {
+    const host = byId('analytics-leaderboard');
+    const data = analyticsData;
+    if (!data.employees.length) {
+      host.replaceChildren(element('p', 'No employee activity in this period.', 'chart-empty'));
+      byId('analytics-leaderboard-note').textContent = '';
+      return;
+    }
+    const column = leaderColumns.find((candidate) => candidate.key === analyticsSort.key) || leaderColumns[1];
+    const factor = analyticsSort.dir === 'asc' ? 1 : -1;
+    const rows = data.employees.slice().sort((a, b) => {
+      const left = column.value(a);
+      const right = column.value(b);
+      const order = typeof left === 'string' ? left.localeCompare(right) : left - right;
+      return order * factor || a.name.localeCompare(b.name);
+    });
+    const table = element('table', undefined, 'leaderboard');
+    table.append(element('caption', 'Employee call statistics for the selected period', 'sr-only'));
+    const headRow = element('tr');
+    for (const candidate of leaderColumns) {
+      const cell = element('th');
+      cell.scope = 'col';
+      const active = candidate.key === column.key;
+      if (active) cell.setAttribute('aria-sort', analyticsSort.dir === 'asc' ? 'ascending' : 'descending');
+      const sortButton = element('button', undefined, 'sort');
+      sortButton.type = 'button';
+      sortButton.dataset.sort = candidate.key;
+      const mark = element('span', active ? (analyticsSort.dir === 'asc' ? '▲' : '▼') : '', 'sort-mark');
+      mark.setAttribute('aria-hidden', 'true');
+      sortButton.append(candidate.label, mark);
+      sortButton.addEventListener('click', () => {
+        analyticsSort = analyticsSort.key === candidate.key
+          ? { key: candidate.key, dir: analyticsSort.dir === 'asc' ? 'desc' : 'asc' }
+          : { key: candidate.key, dir: candidate.key === 'name' ? 'asc' : 'desc' };
+        renderLeaderboard();
+        const focusTarget = host.querySelector('button[data-sort="' + candidate.key + '"]');
+        if (focusTarget) focusTarget.focus();
+      });
+      cell.append(sortButton);
+      headRow.append(cell);
+    }
+    const head = element('thead');
+    head.append(headRow);
+    const body = element('tbody');
+    for (const row of rows) {
+      const tr = element('tr');
+      leaderColumns.forEach((candidate, index) => {
+        const cell = element(index === 0 ? 'th' : 'td', candidate.text(row));
+        if (index === 0) { cell.scope = 'row'; cell.title = row.name; }
+        tr.append(cell);
+      });
+      body.append(tr);
+    }
+    const foot = element('tfoot');
+    const totalRow = element('tr');
+    const everyone = { name: 'All employees', ...data.totals };
+    leaderColumns.forEach((candidate) => totalRow.append(element('td', candidate.text(everyone))));
+    foot.append(totalRow);
+    table.append(head, body, foot);
+    host.replaceChildren(table);
+    byId('analytics-leaderboard-note').textContent = data.employees.length + ' ' + plural(data.employees.length, 'employee', 'employees') + ' with calls · sorted by ' + column.label +
+      ', ' + (column.key === 'name' ? (analyticsSort.dir === 'asc' ? 'A to Z' : 'Z to A') : (analyticsSort.dir === 'asc' ? 'low to high' : 'high to low')) + '. The bottom row covers everyone; unique contacts are counted once across employees.';
+  }
+
+  function renderCharts() {
+    if (!analyticsData || byId('analytics-charts').hidden) return;
+    const widths = chartNames.map((name) => byId('analytics-chart-' + name).clientWidth);
+    if (widths.some((width) => width < 1)) return;
+    analyticsWidthKey = widths.join(',');
+    renderUsersChart(analyticsData);
+    renderTypesChart(analyticsData);
+    renderDaysChart(analyticsData);
+    renderTalkChart(analyticsData);
+    renderHeatChart(analyticsData);
+    renderRateChart(analyticsData);
+    renderLengthChart(analyticsData);
+  }
+
+  // ---- KPI cards ----
+  const kpiDefs = [
+    { label: 'Total calls', value: (m) => m.total, format: fmtCount, delta: 'percent', tone: 'neutral' },
+    { label: 'Connected', value: (m) => m.connected, format: fmtCount, sub: (m) => 'Talk time ' + talkText(m.talkSeconds), delta: 'percent', tone: 'up-good' },
+    { label: 'Not connected', value: (m) => m.notConnected, format: fmtCount, sub: () => 'No talk time', delta: 'percent', tone: 'up-bad' },
+    { label: 'Unique contacts', value: (m) => m.uniqueContacts, format: fmtCount, delta: 'percent', tone: 'neutral' },
+    { label: 'Incoming', type: 'incoming', value: (m) => m.incoming, format: fmtCount, sub: (m) => 'Talk time ' + talkText(m.incomingSeconds), delta: 'percent', tone: 'neutral' },
+    { label: 'Outgoing', type: 'outgoing', value: (m) => m.outgoing, format: fmtCount, sub: (m) => 'Talk time ' + talkText(m.outgoingSeconds), delta: 'percent', tone: 'neutral' },
+    { label: 'Missed', type: 'missed', value: (m) => m.missed, format: fmtCount, delta: 'percent', tone: 'up-bad' },
+    { label: 'Rejected', type: 'rejected', value: (m) => m.rejected, format: fmtCount, delta: 'percent', tone: 'neutral' },
+    { label: 'Connect rate', value: (m) => rateOf(m.connected, m.total), format: rateText, sub: (m) => fmtCount(m.connected) + ' of ' + fmtCount(m.total) + ' calls', delta: 'points', tone: 'up-good' },
+    { label: 'Avg call length', value: (m) => m.avgConnectedSeconds, format: talkText, sub: () => 'Connected calls only', delta: 'percent', tone: 'neutral' },
+    { label: 'Recorded', value: (m) => rateOf(m.withRecording, m.connected), format: rateText, sub: (m) => fmtCount(m.withRecording) + ' of ' + fmtCount(m.connected) + ' connected calls', delta: 'points', tone: 'neutral' }
+  ];
+  function computeDelta(current, previous, mode) {
+    if (current === null) return null;
+    if (previous === null || (previous === 0 && current > 0)) return { dir: 'up', text: 'new' };
+    const diff = current - previous;
+    if (diff === 0) return { dir: 'flat', text: 'No change' };
+    if (mode === 'points') {
+      const points = r1(Math.abs(diff));
+      return points === 0 ? { dir: 'flat', text: 'No change' } : { dir: diff > 0 ? 'up' : 'down', text: points + ' pts' };
+    }
+    const pct = Math.abs(diff) / previous * 100;
+    return { dir: diff > 0 ? 'up' : 'down', text: pct < 1 ? '<1%' : Math.round(pct).toLocaleString() + '%' };
+  }
+  function kpiCard(def, totals, previous) {
+    const card = element('article', undefined, 'kpi');
+    const label = element('h3', undefined, 'kpi-label');
+    if (def.type) label.append(swatch(def.type));
+    label.append(def.label);
+    const current = def.value(totals);
+    const prior = def.value(previous);
+    card.append(label, element('p', def.format(current), 'kpi-value'));
+    if (def.sub) card.append(element('p', def.sub(totals), 'kpi-sub'));
+    const row = element('p', undefined, 'kpi-delta');
+    const delta = computeDelta(current, prior, def.delta);
+    if (delta) {
+      let tone = 'flat';
+      if (delta.dir !== 'flat' && def.tone !== 'neutral') tone = (delta.dir === 'up') === (def.tone === 'up-good') ? 'good' : 'bad';
+      const badge = element('span', undefined, 'delta ' + tone);
+      const arrow = element('span', delta.dir === 'up' ? '▲' : delta.dir === 'down' ? '▼' : '–');
+      arrow.setAttribute('aria-hidden', 'true');
+      badge.append(arrow);
+      if (delta.dir !== 'flat') badge.append(element('span', delta.dir === 'up' ? 'Up ' : 'Down ', 'sr-only'));
+      badge.append(delta.text);
+      row.append(badge, element('span', 'previous ' + def.format(prior)));
+      row.title = 'Compared with the previous period of equal length';
+    } else {
+      row.append(element('span', 'No calls to compare'));
+    }
+    card.append(row);
+    return card;
+  }
+  function renderKpis(data) {
+    const fragment = document.createDocumentFragment();
+    for (const def of kpiDefs) fragment.append(kpiCard(def, data.totals, data.previous));
+    const peak = data.totals.total ? busiest(data.byDay, (day) => day.total) : null;
+    const card = element('article', undefined, 'kpi');
+    card.append(element('h3', 'Busiest day', 'kpi-label'), element('p', peak ? dayLabel(peak.date, true) + ' ' + dayParts(peak.date).month : '–', 'kpi-value'),
+      element('p', peak ? fmtCount(peak.total) + ' ' + plural(peak.total, 'call', 'calls') + ' · ' + fmtCount(peak.connected) + ' connected' : 'No calls', 'kpi-sub'),
+      element('p', peak ? dayFull(peak.date) : '', 'kpi-delta'));
+    fragment.append(card);
+    byId('analytics-kpis').replaceChildren(fragment);
+  }
+
+  function renderAnalytics(animate) {
+    const data = analyticsData;
+    setAnalyticsTitle(data.range.from, data.range.to);
+    byId('analytics-subtitle').textContent = 'Compared with ' + rangeText(data.range.previousFrom, data.range.previousTo) + ', the ' + data.range.days + ' ' + plural(data.range.days, 'day', 'days') + ' before. Days run midnight to midnight IST.';
+    renderKpis(data);
+    const empty = data.totals.total === 0;
+    byId('analytics-empty').hidden = !empty;
+    byId('analytics-charts').hidden = empty;
+    if (empty) return;
+    const content = byId('analytics-content');
+    clearTimeout(analyticsAnimTimer);
+    content.classList.toggle('anim', animate);
+    if (animate) analyticsAnimTimer = setTimeout(() => content.classList.remove('anim'), 900);
+    renderCharts();
+    renderLeaderboard();
+  }
+
+  // ---- Loading ----
+  function cancelAnalytics() {
+    analyticsVersion++;
+    if (analyticsController) analyticsController.abort();
+    if (!analyticsLoading) return;
+    analyticsLoading = false;
+    byId('analytics-results').setAttribute('aria-busy', 'false');
+    byId('analytics-refresh').disabled = false;
+    byId('analytics-skeleton').hidden = true;
+    byId('analytics-content').classList.remove('is-loading');
+    message('analytics-status', 'Loading cancelled. Return to Call analytics or use Refresh to retry.');
+  }
+  async function loadAnalytics() {
+    const version = ++analyticsVersion;
+    if (analyticsController) analyticsController.abort();
+    analyticsController = new AbortController();
+    const requested = analyticsState;
+    analyticsLoading = true;
+    byId('analytics-results').setAttribute('aria-busy', 'true');
+    byId('analytics-refresh').disabled = true;
+    message('analytics-error', '');
+    setAnalyticsTitle(requested.from, requested.to);
+    message('analytics-status', 'Loading call analytics…');
+    byId('analytics-skeleton').hidden = Boolean(analyticsData);
+    byId('analytics-content').classList.toggle('is-loading', Boolean(analyticsData));
+    try {
+      const raw = await api('/analytics/calls?' + analyticsParams(requested), { signal: analyticsController.signal });
+      if (version !== analyticsVersion) return;
+      analyticsData = readAnalytics(raw);
+      byId('analytics-skeleton').hidden = true;
+      byId('analytics-content').hidden = false;
+      byId('analytics-content').classList.remove('is-loading');
+      renderAnalytics(true);
+      message('analytics-status', fmtCount(analyticsData.totals.total) + ' ' + plural(analyticsData.totals.total, 'call', 'calls') + ' · ' + rangeText(analyticsData.range.from, analyticsData.range.to) + ' · IST');
+    } catch (error) {
+      if (version !== analyticsVersion || error.name === 'AbortError') return;
+      analyticsData = null;
+      byId('analytics-skeleton').hidden = true;
+      byId('analytics-content').hidden = true;
+      message('analytics-status', 'Call analytics could not be loaded.');
+      message('analytics-error', errorMessage(error) + ' Use Refresh to try again.');
+    } finally {
+      if (version === analyticsVersion) {
+        analyticsLoading = false;
+        byId('analytics-results').setAttribute('aria-busy', 'false');
+        byId('analytics-refresh').disabled = false;
+      }
+    }
+  }
+
+  // ---- Filters ----
+  function checkedValues(box) { return Array.from(box.querySelectorAll('input:checked'), (input) => input.value); }
+  function choiceItem(value, text, checked, icon) {
+    const label = element('label', undefined, 'checkbox-filter');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = value;
+    box.checked = checked;
+    label.append(box);
+    if (icon) label.append(icon);
+    label.append(element('span', text));
+    return label;
+  }
+  function updateMultiLabels() {
+    const ids = checkedValues(byId('analytics-employee-choices'));
+    byId('analytics-employees-label').textContent = !ids.length ? 'All employees' : ids.length === 1 ? (employees.get(ids[0])?.name || ids[0]) : ids.length + ' employees';
+    const types = checkedValues(byId('analytics-type-choices'));
+    byId('analytics-types-label').textContent = !types.length ? 'All types' : types.length === 1 ? callTypeNames[types[0]] || types[0] : types.length + ' types';
+  }
+  function renderAnalyticsEmployeeChoices(selectedIds) {
+    const box = byId('analytics-employee-choices');
+    const selected = new Set(selectedIds || checkedValues(box));
+    const fragment = document.createDocumentFragment();
+    for (const employee of employees.values()) fragment.append(choiceItem(employee.id, employee.name + (employee.active === false ? ' (inactive)' : ''), selected.has(employee.id)));
+    for (const id of selected) if (!employees.has(id)) fragment.append(choiceItem(id, id + ' (not in directory)', true));
+    if (!fragment.childNodes.length) fragment.append(element('p', 'Employee choices are still loading.', 'hint'));
+    box.replaceChildren(fragment);
+    updateMultiLabels();
+  }
+  function renderAnalyticsTypeChoices(selectedTypes) {
+    const fragment = document.createDocumentFragment();
+    for (const type of analyticsTypes) fragment.append(choiceItem(type, callTypeNames[type], selectedTypes.includes(type), swatch(type)));
+    byId('analytics-type-choices').replaceChildren(fragment);
+    updateMultiLabels();
+  }
+  function updatePresetState() {
+    const from = byId('analytics-from').value;
+    const to = byId('analytics-to').value;
+    for (const chip of byId('analytics-presets').querySelectorAll('button[data-preset]')) {
+      const range = presetRange(chip.dataset.preset);
+      chip.setAttribute('aria-pressed', String(range.from === from && range.to === to));
+    }
+  }
+  function presetRange(name) {
+    const today = istToday();
+    if (name === 'today') return { from: today, to: today };
+    if (name === 'yesterday') { const day = shiftDay(today, -1); return { from: day, to: day }; }
+    if (name === 'month') return { from: today.slice(0, 8) + '01', to: today };
+    return { from: shiftDay(today, name === '30' ? -29 : -6), to: today };
+  }
+  function syncAnalyticsControls() {
+    byId('analytics-from').value = analyticsState.from;
+    byId('analytics-to').value = analyticsState.to;
+    renderAnalyticsEmployeeChoices(analyticsState.employeeIds);
+    renderAnalyticsTypeChoices(analyticsState.callTypes);
+    updatePresetState();
+    setAnalyticsTitle(analyticsState.from, analyticsState.to);
+  }
+  function applyAnalyticsFilters(range) {
+    message('analytics-filter-error', '');
+    const from = range ? range.from : byId('analytics-from').value;
+    const to = range ? range.to : byId('analytics-to').value;
+    if (range) { byId('analytics-from').value = from; byId('analytics-to').value = to; }
+    const employeeIds = checkedValues(byId('analytics-employee-choices'));
+    const checkedTypes = checkedValues(byId('analytics-type-choices'));
+    let problem = '';
+    let focus = byId('analytics-from');
+    if (Number.isNaN(parseDay(from))) problem = 'Choose a valid start date.';
+    else if (Number.isNaN(parseDay(to))) { problem = 'Choose a valid end date.'; focus = byId('analytics-to'); }
+    else if (from > to) problem = 'The start date must be on or before the end date.';
+    else if (daysBetween(from, to) > 366) problem = 'Choose a range of 366 days or fewer.';
+    else if (employeeIds.length > 50) { problem = 'Choose at most 50 employees, or use Show all employees.'; focus = byId('analytics-employees').querySelector('summary'); }
+    if (problem) {
+      message('analytics-filter-error', problem);
+      focus.focus();
+      return;
+    }
+    analyticsState = { from, to, employeeIds, callTypes: analyticsTypes.filter((type) => checkedTypes.includes(type)) };
+    for (const menu of document.querySelectorAll('details.multi')) menu.open = false;
+    writeAnalyticsHash();
+    syncAnalyticsControls();
+    loadAnalytics();
+  }
+  function openAnalytics(entering) {
+    const parsed = location.hash.indexOf('?') >= 0 ? parseAnalyticsHash() : null;
+    const first = !analyticsState;
+    let changed = false;
+    if (first) analyticsState = parsed || defaultAnalyticsState();
+    else if (parsed && !sameAnalyticsState(parsed, analyticsState)) { analyticsState = parsed; changed = true; }
+    writeAnalyticsHash();
+    if (first || changed || entering) {
+      syncAnalyticsControls();
+      loadAnalytics();
+    }
+  }
+  byId('analytics-form').addEventListener('submit', (event) => { event.preventDefault(); applyAnalyticsFilters(); });
+  byId('analytics-refresh').addEventListener('click', () => { if (analyticsState) loadAnalytics(); });
+  for (const chip of byId('analytics-presets').querySelectorAll('button[data-preset]')) {
+    chip.addEventListener('click', () => applyAnalyticsFilters(presetRange(chip.dataset.preset)));
+  }
+  byId('analytics-from').addEventListener('input', updatePresetState);
+  byId('analytics-to').addEventListener('input', updatePresetState);
+  byId('analytics-employee-choices').addEventListener('change', updateMultiLabels);
+  byId('analytics-type-choices').addEventListener('change', updateMultiLabels);
+  byId('analytics-employees-clear').addEventListener('click', () => {
+    for (const box of byId('analytics-employee-choices').querySelectorAll('input')) box.checked = false;
+    updateMultiLabels();
+  });
+  byId('analytics-types-clear').addEventListener('click', () => {
+    for (const box of byId('analytics-type-choices').querySelectorAll('input')) box.checked = false;
+    updateMultiLabels();
+  });
+  for (const menu of document.querySelectorAll('details.multi')) {
+    menu.addEventListener('toggle', () => {
+      if (!menu.open) return;
+      for (const other of document.querySelectorAll('details.multi[open]')) if (other !== menu) other.open = false;
+    });
+    menu.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !menu.open) return;
+      event.preventDefault();
+      menu.open = false;
+      menu.querySelector('summary').focus();
+    });
+  }
+  document.addEventListener('click', (event) => {
+    for (const menu of document.querySelectorAll('details.multi[open]')) if (!menu.contains(event.target)) menu.open = false;
+  });
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => {
+      if (!analyticsData || byId('analytics-panel').hidden || byId('analytics-charts').hidden) return;
+      if (chartNames.map((name) => byId('analytics-chart-' + name).clientWidth).join(',') === analyticsWidthKey) return;
+      clearTimeout(analyticsResizeTimer);
+      analyticsResizeTimer = setTimeout(renderCharts, 100);
+    }).observe(byId('analytics-charts'));
+  }
+  window.addEventListener('pagehide', () => { clearInvitation(); closePlayer(); cancelCallHistory(); cancelAnalytics(); });
   let employeesLoaded = false;
   let activeTab = null;
-  const tabNames = ['call-history', 'customers', 'whatsapp', 'employees'];
-  const tabTitles = { 'call-history': 'Call history', customers: 'Customers', whatsapp: 'WhatsApp chats', employees: 'Employees' };
-  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', customers: 'Customers, who handles them, and their chats and calls.', whatsapp: 'Stored WhatsApp conversations with customers.', employees: 'Manage people, enrolled devices and handovers.' };
+  const tabNames = ['call-history', 'analytics', 'customers', 'whatsapp', 'employees'];
+  const tabTitles = { 'call-history': 'Call history', analytics: 'Call analytics', customers: 'Customers', whatsapp: 'WhatsApp chats', employees: 'Employees' };
+  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', analytics: 'Call volume, talk time, connect rates and busy hours across your team.', customers: 'Customers, who handles them, and their chats and calls.', whatsapp: 'Stored WhatsApp conversations with customers.', employees: 'Manage people, enrolled devices and handovers.' };
   function showTab() {
-    const selected = tabNames.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'call-history';
+    const hashTab = location.hash.slice(1).split('?')[0];
+    const selected = tabNames.includes(hashTab) ? hashTab : 'call-history';
     if (selected !== activeTab) {
       closePlayer();
       if (activeTab === 'call-history') cancelCallHistory();
+      if (activeTab === 'analytics') cancelAnalytics();
       if (invitationExpiresAt || invitationPending) clearInvitation('The displayed code was cleared when leaving this view. Invitation history remains available.');
       if (selected === 'call-history') loadCallHistory();
     }
+    const entering = selected !== activeTab;
     activeTab = selected;
     for (const name of tabNames) {
       const tab = byId(name + '-tab');
@@ -1652,6 +2585,7 @@ export const clientJavaScript = String.raw`(() => {
     document.title = title + ' · Linekeep';
     byId('page-title').textContent = title;
     byId('page-description').textContent = tabDescriptions[selected];
+    if (selected === 'analytics') openAnalytics(entering);
     if (selected === 'employees' && !employeesLoaded) {
       employeesLoaded = true;
       employeeList.load();

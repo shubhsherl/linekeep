@@ -56,6 +56,8 @@ The bypass requires both `ENVIRONMENT=development` and a loopback hostname (`loc
 
 ## Cloudflare deployment
 
+> Prefer a guided setup? `npm run setup` provisions everything below from a Cloudflare API token and asks which optional features you want. See the [setup guide](../docs/SETUP.md). The steps below are the manual equivalent.
+
 ### Private configuration and resources
 
 The template's names are examples for a new installation; you may choose your own:
@@ -189,6 +191,10 @@ Migration `0008_customers.sql` adds `customers`, `customer_employees` and `whats
 
 Administrators manage customers and read chats and calls at `/v1/admin/customers*` and `/v1/admin/whatsapp/chats`. An enrolled device reads only customers assigned to its **current** employee at `/v1/device/customers*` and `/v1/device/whatsapp/*`; other customers return `404`. `message.sentAt` and all other timestamps are UTC RFC 3339 strings. Historical conversations are inserted by an operator (`whatsapp_messages.source = 'import'`); no endpoint imports them. There is no WhatsApp transport yet: `GET /v1/device/whatsapp/status` returns `{"canSend": false}` and `POST /v1/device/customers/{id}/messages` validates the request and returns `503 WHATSAPP_NOT_CONFIGURED` without storing anything. Customer phone numbers and message bodies are personal data; do not log them or copy them into fixtures.
 
+## Call analytics
+
+`GET /v1/admin/analytics/calls?from=YYYY-MM-DD&to=YYYY-MM-DD&employeeIds=a,b&callTypes=incoming,outgoing` returns read-only aggregates (totals, previous-period totals for deltas, per-employee metrics, by type, by IST day, weekday-by-hour and duration buckets) over undeleted `call_logs`; see the [analytics contract](../handoffs/SERVER_AGENT.md#call-analytics--2026-10-18-approved-by-project-owner). Days are Asia/Kolkata (IST), both ends inclusive; the default window is the last 7 days ending today in IST and the maximum is 366 days. Malformed or unknown query values, duplicate keys, `from` after `to` and windows over 366 days return `400 INVALID_REQUEST`; a well-formed employee ID that matches nothing returns zeros. The implementation (`src/data/analytics.ts`) sends five statements in one D1 batch, computes IST day/hour/weekday in SQL from the UTC `started_at` text and fills zero days, all 168 weekday-hour cells and all eight call types in code. Responses contain no phone numbers, contact names or recording URLs. Run `node --test src/modules/analytics/analytics.test.mjs` for focused checks.
+
 ## Daily email summaries
 
 The same Worker can send a Mailgun email at **6 PM IST every day**, using Cloudflare Cron `30 12 * * *` (UTC). No GitHub Actions runner or additional public endpoint is required. Reporting is disabled by default in the public configuration template.
@@ -228,6 +234,10 @@ Deploy with `npm run deploy` for development. Configure production separately wi
 Run `node --test src/reporting/call-summary.test.mjs` for isolated D1, timezone/cutoff, deletion/attribution, escaping/privacy and native Worker scheduling regressions. Email requests are intercepted; this command sends no real email. Local development remains disabled by default in `.dev.vars.example`. Enabling it with real credentials can send real messages.
 
 Cloudflare **Cron Events** shows scheduled invocation outcomes. A successful request means **Mailgun accepted** the message, not that an inbox received it; inspect Mailgun delivery/bounce events for delivery status. Provider rejection fails the invocation without logging its response body, recipients or credentials. Redirects are not followed, and email open/click tracking is disabled. There is one send request per invocation, not an exactly-once delivery guarantee; manually replaying an event can resend its report.
+
+## Recording retention
+
+Optional and **off by default**. Set `RECORDING_RETENTION_DAYS` (a whole number of days, for example `"30"`) in the Worker's `vars` and the daily Cron job also deletes recording audio older than that: the R2 object is removed first, then the call is tombstoned as `deleted`, exactly like **Delete recording** (playback then reports it as deleted). Age is the call's recorded time, falling back to when the server received it, so old recordings uploaded late from a phone are removed too. Call logs, customers and chats are never touched. Each run handles at most 750 recordings and logs only counts; a remainder continues the next day, and an R2 failure leaves rows untouched so they retry. Unset, `0` or a non-number disables the job. Pending and failed uploads are not touched. Test it on a development environment first (`node --test src/retention/recordings.test.mjs`).
 
 ## Fixture workflow and focused checks
 

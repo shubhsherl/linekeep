@@ -29,6 +29,8 @@
         "ENVIRONMENT": "development",
         "MAX_RECORDING_BYTES": "104857600",
         "CALL_SUMMARY_ENABLED": "false",
+        // Opt-in retention: uncomment to delete recording audio older than N days (call logs are kept).
+        // "RECORDING_RETENTION_DAYS": "30",
         "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
         "ACCESS_AUDIENCE": "replace-with-your-access-application-audience"
       },
@@ -47,6 +49,8 @@
         "ENVIRONMENT": "production",
         "MAX_RECORDING_BYTES": "104857600",
         "CALL_SUMMARY_ENABLED": "false",
+        // Opt-in retention: uncomment to delete recording audio older than N days (call logs are kept).
+        // "RECORDING_RETENTION_DAYS": "30",
         "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
         "ACCESS_AUDIENCE": "replace-with-your-production-access-application-audience"
       },
