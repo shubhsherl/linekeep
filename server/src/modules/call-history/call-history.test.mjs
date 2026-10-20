@@ -647,9 +647,23 @@ test("migration backfills existing Samsung metadata without changing source evid
   const before = await f.DB.prepare("SELECT * FROM calls ORDER BY id").all();
   const sql = await readFile(new URL("../../../migrations/0007_recording_association.sql", import.meta.url), "utf8");
   await f.DB.batch(unstable_splitSqlQuery(sql).map((statement) => f.DB.prepare(statement)));
+  // The listing reads the linked-recordings index that a later migration adds.
+  await f.DB.prepare("CREATE INDEX calls_linked_idx ON calls(call_log_id) WHERE call_log_id IS NOT NULL AND upload_status = 'complete' AND deleted_at IS NULL").run();
   const page = (await (await f.list("?hasRecording=true")).json()).items;
   assert.deepEqual(page.find((row) => row.id === accepted[0].id).recordings.map((row) => row.id), [audio.id]);
   assert.equal(page.find((row) => row.id === kept.id).kind, "recording");
   const after = await f.DB.prepare("SELECT * FROM calls ORDER BY id").all();
   assert.deepEqual(after.results.map(({ call_log_id, ...row }) => row), before.results.map(({ call_log_id, ...row }) => row));
+});
+
+test("a recording named 'Call recording <identity>_date_time' links to its call like the older naming", async (t) => {
+  const f = await fixture(t);
+  const accepted = (await (await f.post([entry(1, {
+    startedAt: "2026-09-27T09:10:25.312Z", durationSeconds: 96, callType: "incoming", callerName: "Casey#",
+  })])).json()).accepted;
+  const audio = await recording(f, 1, {
+    displayName: "Call recording Casey#_260927_144033.m4a", recordedAt: "2026-09-27T09:12:09Z", durationSeconds: 96,
+  });
+  const page = (await (await f.list("?hasRecording=true")).json()).items;
+  assert.deepEqual(page.find((row) => row.id === accepted[0].id).recordings.map((row) => row.id), [audio.id]);
 });

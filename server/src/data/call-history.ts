@@ -65,23 +65,13 @@ export type UnifiedCallItem = CallHistoryItem | UnlinkedRecordingItem;
 export class CallHistoryAuthorizationError extends Error {}
 export class CallHistoryConflictError extends Error {}
 
-type FeedRow = CallRow & {
-  kind: UnifiedCallItem["kind"];
-  feed_id: string;
-  feed_device_id: string;
-  feed_employee_id: string;
-  employee_name: string;
-  feed_started_at: string | null;
-  feed_duration_seconds: number | null;
-  call_type: CallHistoryItem["callType"] | null;
-  feed_remote_number: string | null;
-  caller_name: string | null;
-  local_number: string | null;
-  sim_label: string | null;
-  phone_account_id: string | null;
-  feed_created_at: string;
-  sort_at: string;
+type CallFeedRow = {
+  id: string; device_id: string; employee_id: string; employee_name: string; started_at: string; sort_at: string;
+  duration_seconds: number; call_type: CallHistoryItem["callType"]; remote_number: string | null;
+  caller_name: string | null; local_number: string | null; sim_label: string | null;
+  phone_account_id: string | null; created_at: string;
 };
+type RecordingFeedRow = CallRow & { employee_name: string; sort_at: string };
 
 export function createCallHistoryRepository(
   db: D1Database,
@@ -115,7 +105,17 @@ export function createCallHistoryRepository(
           local_number = COALESCE(call_logs.local_number, excluded.local_number),
           sim_label = COALESCE(call_logs.sim_label, excluded.sim_label),
           phone_account_id = COALESCE(call_logs.phone_account_id, excluded.phone_account_id)
-        WHERE call_logs.deleted_at IS NULL`,
+        -- A replay that changes nothing must be free: skipping the UPDATE avoids rewriting the row and its indexes and
+        -- re-running association. Each disjunct mirrors exactly what the SET clause above can change.
+        WHERE call_logs.deleted_at IS NULL AND (
+          call_logs.duration_seconds IS NOT excluded.duration_seconds
+          OR call_logs.call_type IS NOT excluded.call_type
+          OR call_logs.remote_number IS NOT excluded.remote_number
+          OR (excluded.caller_name IS NOT NULL AND call_logs.caller_name IS NOT excluded.caller_name)
+          OR (call_logs.local_number IS NULL AND excluded.local_number IS NOT NULL)
+          OR (call_logs.sim_label IS NULL AND excluded.sim_label IS NOT NULL)
+          OR (call_logs.phone_account_id IS NULL AND excluded.phone_account_id IS NOT NULL)
+        )`,
       ).bind(
         opaqueId("call"), value.deviceId, value.deviceId, entry.fingerprint,
         value.deviceId, entry.startedAt, entry.fingerprint, entry.startedAt,
@@ -161,100 +161,105 @@ export function createCallHistoryRepository(
       nextCursor: CallHistoryCursor | null;
     }> {
       const value = listInput.parse(input);
-      const conditions: string[] = [];
-      const bindings: (string | number)[] = [];
-      if (value.employeeId !== undefined) {
-        conditions.push("c.employee_id = ?");
-        bindings.push(value.employeeId);
+      const like = value.number === undefined ? undefined : `%${value.number.replace(/[\\%_]/g, "\\$&")}%`;
+      // The page is ordered by (sort_at, id) over two sources: call history and audio that no call claims. Each
+      // source is read from its own index with the limit pushed down, so a page costs about `limit` rows rather
+      // than the whole history; the two short lists are then merged. Associations include tombstone evidence
+      // independently of these live filters, and attachments never consume page slots.
+      const bounded = (sortExpr: string, alias: string, base: string) => {
+        const conditions = [base];
+        const bindings: (string | number)[] = [];
+        if (value.employeeId !== undefined) { conditions.push(`${alias}.employee_id = ?`); bindings.push(value.employeeId); }
+        if (like !== undefined) { conditions.push(`${alias}.remote_number LIKE ? ESCAPE '\\'`); bindings.push(like); }
+        if (value.from !== undefined) { conditions.push(`${sortExpr} >= ?`); bindings.push(value.from); }
+        if (value.to !== undefined) { conditions.push(`${sortExpr} <= ?`); bindings.push(value.to); }
+        if (value.cursor) { conditions.push(`(${sortExpr}, ${alias}.id) < (?, ?)`); bindings.push(value.cursor.sortAt, value.cursor.id); }
+        return { conditions, bindings };
+      };
+      const callPart = bounded("h.started_at", "h", "h.deleted_at IS NULL");
+      if (value.callType !== undefined) { callPart.conditions.push("h.call_type = ?"); callPart.bindings.push(value.callType); }
+      if (value.hasRecording) {
+        // Started from the small set of linked, completed recordings (calls_linked_idx), not by probing every call.
+        callPart.conditions.push(`h.id IN (SELECT x.call_log_id FROM calls x INDEXED BY calls_linked_idx
+          WHERE x.call_log_id IS NOT NULL AND x.upload_status = 'complete' AND x.deleted_at IS NULL)`);
       }
-      if (value.callType !== undefined) {
-        conditions.push("c.call_type = ?");
-        bindings.push(value.callType);
+      const recPart = bounded("COALESCE(r.recorded_at, r.created_at)", "r", "r.call_log_id IS NULL AND r.upload_status <> 'deleted'");
+      if (value.hasRecording) recPart.conditions.push("r.upload_status = 'complete'");
+      const limit = value.limit + 1;
+      const statements = [db.prepare(`
+        SELECT h.id, h.device_id, h.employee_id, e.name AS employee_name, h.started_at, h.started_at AS sort_at,
+          h.duration_seconds, h.call_type, h.remote_number, h.caller_name, h.local_number, h.sim_label,
+          h.phone_account_id, h.created_at
+        FROM (SELECT * FROM call_logs h WHERE ${callPart.conditions.join(" AND ")}
+          ORDER BY h.started_at DESC, h.id DESC LIMIT ?) h
+        JOIN employees e ON e.id = h.employee_id
+        ORDER BY h.started_at DESC, h.id DESC`).bind(...callPart.bindings, limit)];
+      // Unlinked audio has no call type, so a call-type filter excludes it entirely. The ordered partial index is pinned:
+      // left to its statistics SQLite may pick the call_log_id index and sort every unlinked recording.
+      if (value.callType === undefined) {
+        statements.push(db.prepare(`
+          SELECT r.*, e.name AS employee_name, COALESCE(r.recorded_at, r.created_at) AS sort_at
+          FROM (SELECT * FROM calls r INDEXED BY calls_unlinked_directory_idx WHERE ${recPart.conditions.join(" AND ")}
+            ORDER BY COALESCE(r.recorded_at, r.created_at) DESC, r.id DESC LIMIT ?) r
+          JOIN employees e ON e.id = r.employee_id
+          ORDER BY sort_at DESC, r.id DESC`).bind(...recPart.bindings, limit));
       }
-      if (value.number !== undefined) {
-        conditions.push("c.remote_number LIKE ? ESCAPE '\\'");
-        bindings.push(`%${value.number.replace(/[\\%_]/g, "\\$&")}%`);
-      }
-      if (value.from !== undefined) {
-        conditions.push("c.sort_at >= ?");
-        bindings.push(value.from);
-      }
-      if (value.to !== undefined) {
-        conditions.push("c.sort_at <= ?");
-        bindings.push(value.to);
-      }
-      if (value.cursor) {
-        conditions.push("(c.sort_at, c.id) < (?, ?)");
-        bindings.push(value.cursor.sortAt, value.cursor.id);
-      }
-      if (value.hasRecording) conditions.push("c.has_recording = 1");
-      // Associations include tombstone evidence, independently of these live filters.
-      // Limit the union before joining audio, so attachments cannot consume page slots.
-      const rows = await db.prepare(`
-        WITH feed AS (
-          SELECT 'call' AS kind, h.id, h.device_id, h.employee_id,
-            h.started_at, h.started_at AS sort_at, h.duration_seconds, h.call_type,
-            h.remote_number, h.caller_name, h.local_number, h.sim_label, h.phone_account_id, h.created_at,
-            EXISTS (SELECT 1 FROM calls r WHERE r.call_log_id = h.id AND r.upload_status = 'complete') AS has_recording
-          FROM call_logs h WHERE h.deleted_at IS NULL
-          UNION ALL
-          SELECT 'recording', r.id, r.device_id, r.employee_id,
-            r.recorded_at, COALESCE(r.recorded_at, r.created_at), NULL, NULL,
-            r.remote_number, NULL, NULL, NULL, NULL, r.created_at, r.upload_status = 'complete'
-          FROM calls r WHERE r.call_log_id IS NULL AND r.upload_status <> 'deleted'
-        ), page AS (
-          SELECT c.* FROM feed c
-          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
-          ORDER BY c.sort_at DESC, c.id DESC LIMIT ?
-        )
-        SELECT r.*, p.kind, p.id AS feed_id, p.device_id AS feed_device_id,
-          p.employee_id AS feed_employee_id, e.name AS employee_name,
-          p.started_at AS feed_started_at, p.duration_seconds AS feed_duration_seconds,
-          p.call_type, p.remote_number AS feed_remote_number, p.caller_name, p.local_number,
-          p.sim_label, p.phone_account_id, p.created_at AS feed_created_at, p.sort_at
-        FROM page p JOIN employees e ON e.id = p.employee_id
-        LEFT JOIN calls r ON r.upload_status <> 'deleted' AND (
-          (p.kind = 'call' AND r.call_log_id = p.id)
-          OR (p.kind = 'recording' AND r.id = p.id))
-        ORDER BY p.sort_at DESC, p.id DESC, r.created_at DESC, r.id DESC
-      `).bind(...bindings, value.limit + 1).all<FeedRow>();
-      const items: UnifiedCallItem[] = [];
-      let lastSortAt = "";
-      let lastKey = "";
-      for (const row of rows.results) {
-        const key = `${row.kind}:${row.feed_id}`;
-        if (lastKey !== key) {
-          lastKey = key;
-          lastSortAt = row.sort_at;
-          const common = {
-            id: row.feed_id,
-            deviceId: row.feed_device_id,
-            employee: { id: row.feed_employee_id, name: row.employee_name },
-            createdAt: row.feed_created_at,
-            recordings: [] as AdminCall[],
-          };
-          items.push(row.kind === "call" ? {
-            ...common, kind: "call", startedAt: row.feed_started_at!,
-            durationSeconds: row.feed_duration_seconds!, callType: row.call_type!,
-            remoteNumber: row.feed_remote_number ?? undefined,
-            callerName: row.caller_name ?? undefined,
-            localNumber: row.local_number ?? undefined,
-            simLabel: row.sim_label ?? undefined,
-            phoneAccountId: row.phone_account_id ?? undefined,
-          } : { ...common, kind: "recording", startedAt: row.feed_started_at ?? undefined });
+      const [callResult, recordingResult] = statements.length === 1
+        ? [await statements[0].all<CallFeedRow>(), undefined]
+        : await db.batch<CallFeedRow | RecordingFeedRow>(statements);
+      const merged = [
+        ...(callResult.results as CallFeedRow[]).map((row) => ({ kind: "call" as const, row })),
+        ...((recordingResult?.results ?? []) as RecordingFeedRow[]).map((row) => ({ kind: "recording" as const, row })),
+      ].sort((a, b) => (a.row.sort_at === b.row.sort_at
+        ? (a.row.id < b.row.id ? 1 : -1)
+        : (a.row.sort_at < b.row.sort_at ? 1 : -1))).slice(0, limit);
+
+      // Audio attached to the page's calls (never deleted audio), newest first. IN lists stay under D1's
+      // 100-parameter limit; the call_log_id index is pinned because unlinked audio skews its statistics.
+      const callIds = merged.filter((entry) => entry.kind === "call").map((entry) => entry.row.id);
+      const attached = new Map<string, CallRow[]>();
+      const chunks: string[][] = [];
+      for (let i = 0; i < callIds.length; i += 90) chunks.push(callIds.slice(i, i + 90));
+      if (chunks.length) {
+        const results = await db.batch<CallRow>(chunks.map((ids) => db.prepare(
+          `SELECT r.* FROM calls r INDEXED BY calls_history_idx WHERE r.upload_status <> 'deleted' AND r.call_log_id IN (${ids.map(() => "?").join(",")})
+           ORDER BY r.created_at DESC, r.id DESC`,
+        ).bind(...ids)));
+        for (const result of results) {
+          for (const row of result.results) {
+            const key = (row as CallRow & { call_log_id: string }).call_log_id;
+            (attached.get(key) ?? attached.set(key, []).get(key)!).push(row);
+          }
         }
-        if (row.id) items.at(-1)!.recordings.push(adminCallDto({
-          ...call(row), employee: { id: row.feed_employee_id, name: row.employee_name },
-        }));
       }
+      const items: UnifiedCallItem[] = merged.map((entry): UnifiedCallItem => {
+        if (entry.kind === "call") {
+          const row = entry.row as CallFeedRow;
+          const owner = { id: row.employee_id, name: row.employee_name };
+          return {
+            id: row.id, deviceId: row.device_id, employee: owner, createdAt: row.created_at,
+            kind: "call", startedAt: row.started_at, durationSeconds: row.duration_seconds, callType: row.call_type,
+            remoteNumber: row.remote_number ?? undefined, callerName: row.caller_name ?? undefined,
+            localNumber: row.local_number ?? undefined, simLabel: row.sim_label ?? undefined,
+            phoneAccountId: row.phone_account_id ?? undefined,
+            recordings: (attached.get(row.id) ?? []).map((recording) => adminCallDto({ ...call(recording), employee: owner })),
+          };
+        }
+        const row = entry.row as RecordingFeedRow;
+        const owner = { id: row.employee_id, name: row.employee_name };
+        return {
+          id: row.id, deviceId: row.device_id, employee: owner, createdAt: row.created_at,
+          kind: "recording", startedAt: row.recorded_at ?? undefined,
+          recordings: [adminCallDto({ ...call(row), employee: owner })],
+        };
+      });
       const hasMore = items.length > value.limit;
       if (hasMore) items.pop();
       const last = items.at(-1);
       // Source-less audio uses creation time for ordering, not a fabricated start.
-      if (last) lastSortAt = last.startedAt ?? last.createdAt;
       return {
         items,
-        nextCursor: hasMore && last ? { sortAt: lastSortAt, id: last.id } : null,
+        nextCursor: hasMore && last ? { sortAt: last.startedAt ?? last.createdAt, id: last.id } : null,
       };
     },
   };

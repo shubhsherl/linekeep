@@ -237,7 +237,7 @@ Cloudflare **Cron Events** shows scheduled invocation outcomes. A successful req
 
 ## Recording retention
 
-Optional and **off by default**. Set `RECORDING_RETENTION_DAYS` (a whole number of days, for example `"30"`) in the Worker's `vars` and the daily Cron job also deletes recording audio older than that: the R2 object is removed first, then the call is tombstoned as `deleted`, exactly like **Delete recording** (playback then reports it as deleted). Age is the call's recorded time, falling back to when the server received it, so old recordings uploaded late from a phone are removed too. Call logs, customers and chats are never touched. Each run handles at most 750 recordings and logs only counts; a remainder continues the next day, and an R2 failure leaves rows untouched so they retry. Unset, `0` or a non-number disables the job. Pending and failed uploads are not touched. Test it on a development environment first (`node --test src/retention/recordings.test.mjs`).
+Optional and **off by default**. Set `RECORDING_RETENTION_DAYS` (a whole number of days, for example `"30"`) in the Worker's `vars` and the daily Cron job also deletes recording audio older than that: the R2 object is removed first, then the call is tombstoned as `deleted`, exactly like **Delete recording** (playback then reports it as deleted). Age is the call's recorded time, falling back to when the server received it, so old recordings uploaded late from a phone are removed too. Call logs, customers and chats are never touched. Each run handles at most 750 recordings and logs only counts; a remainder continues the next day, and an R2 failure leaves rows untouched so they retry. The same setting also makes the server **refuse to accept** audio whose recorded time is already older than the period: `POST /v1/device/uploads/prepare` answers `409`, stores nothing, and the Android app treats that as permanent ("stopped for this source") so it does not retry or waste uploads; audio without a recorded time is treated as new. Unset, `0` or a non-number disables both the job and the refusal. Pending and failed uploads are not touched. Test it on a development environment first (`node --test src/retention/recordings.test.mjs`).
 
 ## Fixture workflow and focused checks
 
@@ -265,6 +265,10 @@ node --test src/reporting/call-summary.test.mjs
 ```
 
 Backend checks do not establish physical Samsung folder access, installer-granted call-log permission, dual-SIM behavior or background reliability on a particular phone. Verify those on your intended devices.
+
+## D1 usage and plan limits
+
+The Workers **Free** plan caps D1 at **5 million rows read and 100,000 rows written per day for the whole account** (all databases). When a cap is reached every D1 query fails, including migrations, until 00:00 UTC. A paid Workers plan has far larger allowances. A phone's first sync uploads up to a few thousand call-log rows, so a free account can reach the cap during onboarding. Migration `0009` keeps association work per call or recording to a handful of rows; the admin call feed and analytics still read in proportion to history, so budget accordingly. Inspect usage with `npx wrangler d1 insights DB --env <env> --time-period 1d --sort-by reads`.
 
 ## Retention, billing, and rollback
 

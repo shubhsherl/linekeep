@@ -13,6 +13,7 @@ import {
   utcTimestamp,
 } from "../../data/values";
 import type { Env } from "../../env";
+import { retentionDays } from "../../retention/recordings";
 import { requireDevice, type DeviceBindings } from "../identity";
 import { signMediaCapability, verifyMediaCapability } from "./capabilities";
 
@@ -138,6 +139,19 @@ export function createRecordingRoutes(): Hono<DeviceBindings> {
     if (value.file.expectedBytes > maximumBytes(c.env)) {
       throw new HTTPException(413, {
         message: "Recording exceeds the size limit",
+      });
+    }
+    // Retention also applies at the door: audio already older than the retention period would be deleted by the
+    // daily job right after upload, so refuse it before any row or object exists. 409 is permanent for the app
+    // ("stopped for this source"), so it neither retries nor needs an update.
+    const retention = retentionDays(c.env);
+    if (
+      retention !== null &&
+      value.file.recordedAt !== undefined &&
+      Date.parse(value.file.recordedAt) < Date.now() - retention * 86_400_000
+    ) {
+      throw new HTTPException(409, {
+        message: "Recording is older than the retention period",
       });
     }
     const calls = createCallRepository(c.env.DB);

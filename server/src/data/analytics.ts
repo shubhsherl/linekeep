@@ -180,7 +180,9 @@ export function createAnalyticsRepository(db: D1Database) {
         binds: [bounds.start, bounds.end, ...(input.employeeIds ?? []), ...(input.callTypes ?? [])],
       });
       // Calls with a completed, non-deleted recording linked through calls.call_log_id.
-      const hasRecording = `EXISTS (SELECT 1 FROM calls r WHERE r.call_log_id = l.id
+      // Uncorrelated IN: SQLite builds the set of linked call-log ids once per statement. A correlated EXISTS was
+      // planned as a full scan of `calls` for every call-log row (millions of rows read for a week of history).
+      const hasRecording = `l.id IN (SELECT r.call_log_id FROM calls r INDEXED BY calls_linked_idx WHERE r.call_log_id IS NOT NULL
         AND r.upload_status = 'complete' AND r.deleted_at IS NULL)`;
       const scoped = (bounds: { start: string; end: string }) => {
         const { where, binds } = scope(bounds);
