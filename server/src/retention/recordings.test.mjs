@@ -136,3 +136,26 @@ test("an R2 failure leaves rows complete so the next run retries them", async (t
   assert.ok(await f.exists(victim.key));
   assert.equal((await purgeExpiredRecordings(f.env("30"), { now })).deleted, 1);
 });
+
+test("job cost does not grow with the number of recordings already deleted", async (t) => {
+  const f = await fixture(t);
+  for (let index = 0; index < 400; index++) await f.add({ recordedAt: days(100), status: "deleted", object: false });
+  const expired = [];
+  for (let index = 0; index < 5; index++) expired.push(await f.add({ recordedAt: days(40) }));
+  let rowsRead = 0;
+  const counted = {
+    prepare: (sql) => {
+      const statement = f.DB.prepare(sql);
+      const wrap = (bound) => ({
+        bind: (...values) => wrap(bound.bind(...values)),
+        all: async () => { const result = await bound.all(); rowsRead += result.meta.rows_read; return result; },
+        run: async () => { const result = await bound.run(); rowsRead += result.meta.rows_read; return result; },
+      });
+      return wrap(statement);
+    },
+  };
+  const result = await purgeExpiredRecordings({ ...f.env("30"), DB: counted }, { now });
+  assert.equal(result.deleted, 5);
+  for (const call of expired) assert.equal((await f.status(call.id)).upload_status, "deleted");
+  assert.ok(rowsRead < 100, `read ${rowsRead} rows to delete 5 recordings among 400 tombstones`);
+});

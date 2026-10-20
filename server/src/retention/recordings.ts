@@ -36,7 +36,7 @@ export async function purgeExpiredRecordings(
   const expiredCondition = "upload_status = 'complete' AND COALESCE(recorded_at, created_at) < ?";
 
   if (dryRun) {
-    const row = await env.DB.prepare(`SELECT count(*) AS n FROM calls WHERE ${expiredCondition}`)
+    const row = await env.DB.prepare(`SELECT count(*) AS n FROM calls INDEXED BY calls_status_sort_idx WHERE ${expiredCondition}`)
       .bind(cutoff).first<{ n: number }>();
     return { status: "done", cutoff, expired: row?.n ?? 0, deleted: 0, remaining: (row?.n ?? 0) > 0, dryRun };
   }
@@ -45,7 +45,7 @@ export async function purgeExpiredRecordings(
   let remaining = false;
   for (let batch = 0; batch < maxBatches; batch++) {
     const { results } = await env.DB.prepare(
-      `SELECT id, object_key FROM calls WHERE ${expiredCondition} ORDER BY COALESCE(recorded_at, created_at) LIMIT ?`,
+      `SELECT id, object_key FROM calls INDEXED BY calls_status_sort_idx WHERE ${expiredCondition} ORDER BY COALESCE(recorded_at, created_at) LIMIT ?`,
     ).bind(cutoff, batchSize).all<{ id: string; object_key: string }>();
     if (results.length === 0) break;
     // R2 first: a failure leaves the rows complete so the next run retries. Deleting a missing key succeeds.
