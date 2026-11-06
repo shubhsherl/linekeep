@@ -1,5 +1,5 @@
 import { linekeepMark } from "../../admin-ui/brand";
-import { communityReleasesUrl } from "./community-build";
+import { communityApkUrl, communityReleasesUrl } from "./community-build";
 
 /** No script, fonts or images from elsewhere: it must open from a link on any phone. */
 export const downloadPageSecurityPolicy =
@@ -10,7 +10,8 @@ const styles = `*{box-sizing:border-box}body{margin:0;padding:20px;font:16px/1.5
 export const downloadPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><title>Linekeep Community Android build</title><style>${styles}</style></head><body><main>
 <h1>${linekeepMark}Linekeep Community Android build</h1>
 <p class="muted">This is the community-maintained build of the Linekeep Android app, published in the open-source <a href="${communityReleasesUrl}" rel="noopener noreferrer">GitHub releases</a>.</p>
-<a class="button" href="/download/linekeep.apk">Download</a>
+<a class="button" href="${communityApkUrl}" rel="noopener noreferrer">Download</a>
+<p class="muted">Nothing happens? Open this page in Chrome (not inside a QR scanner or chat app), or get the file from the <a href="${communityReleasesUrl}" rel="noopener noreferrer">release page</a> under Assets.</p>
 <p class="muted">Check the <a href="${communityReleasesUrl}" rel="noopener noreferrer">release page</a> for the version and the changelog.</p>
 <h2>Install it in four steps</h2>
 <ol>

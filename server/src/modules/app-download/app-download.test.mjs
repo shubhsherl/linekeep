@@ -36,7 +36,7 @@ test("the download page is public, self-contained and names the community build"
   assert.match(html, /<title>Linekeep Community Android build<\/title>/);
   assert.ok(html.includes("community-maintained build"));
   assert.ok(html.includes(`href="${communityReleasesUrl}"`));
-  assert.ok(html.includes('href="/download/linekeep.apk"'));
+  assert.ok(html.includes('href="https://github.com/shubhsherl/linekeep/releases/latest/download/linekeep.apk"'));
   assert.match(html, /Install unknown apps/);
   assert.match(html, /enrollment QR code or setup code separately/);
   assert.match(html, /version and the changelog/);
