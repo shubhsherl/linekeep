@@ -25,6 +25,7 @@ Linekeep is a self-hosted Android call-history and recording workspace. The Andr
 - Connects your own WhatsApp Business number through Meta's Cloud API: a WhatsApp-style inbox with live updates, per-person unread counts, pictures, voice notes and documents stored privately, and sending of text and approved templates with variable pickers and a live preview.
 - A **Config** tab where admins turn features on, enter the WhatsApp, Mailgun and Firebase credentials (stored encrypted in the database, write-only in the UI) with step-by-step instructions on each page, set the daily email time, and manage automatic replies to matching messages and shared quick messages, and a customer sidebar you can open from the call log, the chat list or the customer list.
 - Push notifications (Firebase Cloud Messaging) tell an employee when a customer assigned to them writes, or when a customer is newly assigned to them.
+- Hosts your latest release APK in the private bucket: upload it in **Config → Android app**, switch on sharing and give employees a download link or QR code, so they can install the app without a file transfer.
 
 **Access and transparency**
 

@@ -160,6 +160,16 @@ cd android
 
 Prerequisites: JDK 17, Android SDK 35 (set `ANDROID_HOME`), Android 8.0+ on the phone. For a release build you distribute to staff, create and back up a signing key first; see [Release build](../android/README.md#release-build). Install with `adb install -r <apk>` or any file transfer.
 
+### Hand the APK to your team from the admin
+
+Instead of sending the file around, upload the release APK to the server and share a link:
+
+1. In the admin open **Config → Android app**, choose the release APK (not a debug build), check the version name and click **Upload APK**. The file is kept in your private bucket; the newest three uploads are retained.
+2. Turn on **Share with employees**. While it is on, anyone who has the link or QR code can download the APK without signing in. Turn it off when everyone has installed the app. The release APK holds no server address or secrets.
+3. Show the QR code or send the link (`https://<worker>/download`). Employees open it on their phone, tap **Download**, allow their browser to **Install unknown apps**, and install. They then scan the enrollment QR from step 6.
+
+The `/download` pages must be reachable without an Access login. The setup script protects only `/admin*` and `/v1/admin*`, so they are. If you created the Access application by hand for the whole hostname, narrow it to those four paths (see [Cloudflare Access](../server/README.md#cloudflare-access)); do not add `/download*` to it.
+
 ## 6. Enroll a phone
 
 1. Open Linekeep and tap **Scan QR code** on Home, then scan the QR code from the admin. Confirm the server name shown.

@@ -284,6 +284,7 @@ export const adminHtml = `<!doctype html>
             <li id="config-nav-whatsapp" hidden><button class="cfg-nav-item" type="button" data-section="whatsapp">Auto replies &amp; quick messages</button></li>
             <li><button class="cfg-nav-item" type="button" data-section="email">Daily email report</button></li>
             <li><button class="cfg-nav-item" type="button" data-section="push">Push notifications</button></li>
+            <li><button class="cfg-nav-item" type="button" data-section="app">Android app</button></li>
           </ul>
         </nav>
         <div class="cfg-content">
@@ -311,6 +312,10 @@ export const adminHtml = `<!doctype html>
           <section id="config-section-push" class="cfg-section" aria-labelledby="config-push-heading" hidden>
             <h2 id="config-push-heading" class="cfg-section-title" tabindex="-1">Push notifications</h2>
             <div id="settings-push-body" class="cfg-body"></div>
+          </section>
+          <section id="config-section-app" class="cfg-section" aria-labelledby="config-app-heading" hidden>
+            <h2 id="config-app-heading" class="cfg-section-title" tabindex="-1">Android app</h2>
+            <div id="settings-app-body" class="cfg-body"></div>
           </section>
           <section id="config-section-whatsapp" class="cfg-section" aria-labelledby="config-whatsapp-heading" hidden>
             <h2 id="config-whatsapp-heading" class="cfg-section-title" tabindex="-1">Auto replies and quick messages</h2>

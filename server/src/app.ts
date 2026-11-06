@@ -30,6 +30,7 @@ import { createAdminWhatsAppMediaRoutes, createDeviceWhatsAppMediaRoutes } from 
 import { createAdminWhatsAppConfigRoutes, createDeviceWhatsAppConfigRoutes } from "./modules/whatsapp/config-routes";
 
 import { createAdminSettingsRoutes } from "./modules/settings";
+import { createAdminAppRoutes, createPublicDownloadRoutes } from "./modules/app-release";
 import type { Env } from "./env";
 import type { Features } from "./settings/fields";
 import { applySettings, loadSettings, resolveFeatures } from "./settings/service";
@@ -132,6 +133,8 @@ export function createApp() {
   app.route("/v1/admin", createAdminWhatsAppMediaRoutes(requireAdmin));
   app.route("/v1/admin", createAdminAnalyticsRoutes(requireAdmin));
   app.route("/v1/admin", createAdminSettingsRoutes(requireAdmin));
+  app.route("/v1/admin", createAdminAppRoutes(requireAdmin));
+  app.route("/", createPublicDownloadRoutes());
   app.route("/", createLocalAdminRoutes());
   app.use("/admin", requireAdminPage);
   app.use("/admin/*", requireAdminPage);
