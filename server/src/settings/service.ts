@@ -74,9 +74,15 @@ function lookup(deployment: Env, snapshot: SettingsSnapshot, key: string): { val
   return fromEnv ? { value: fromEnv, source: "deployment" } : { value: undefined, source: "none" };
 }
 
-const secretState = (deployment: Env, snapshot: SettingsSnapshot, key: string) => {
-  const { source } = lookup(deployment, snapshot, key);
-  return { set: source !== "none", source };
+/** First and last three characters so an admin can recognise a value; values under 16 characters reveal nothing. */
+export function maskSecret(value: string | undefined): string | null {
+  const text = value?.trim();
+  return text && text.length >= 16 ? `${text.slice(0, 3)}••••${text.slice(-3)}` : null;
+}
+
+const secretState = (deployment: Env, snapshot: SettingsSnapshot, key: string, withHint = true) => {
+  const { source, value } = lookup(deployment, snapshot, key);
+  return { set: source !== "none", source, hint: withHint ? maskSecret(value) : null };
 };
 
 function readJson<T>(raw: string | undefined): T | null {
@@ -121,7 +127,7 @@ export function describeSettings(deployment: Env, snapshot: SettingsSnapshot) {
     },
     push: {
       clientConfig,
-      serviceAccount: { ...secretState(deployment, snapshot, "push.serviceAccount"), projectId },
+      serviceAccount: { ...secretState(deployment, snapshot, "push.serviceAccount", false), projectId },
     },
   };
 }

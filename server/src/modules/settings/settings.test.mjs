@@ -61,13 +61,13 @@ test("a fresh install has everything off and unset", async (t) => {
   assert.deepEqual(body.settings.features, { customers: false, whatsapp: false });
   assert.deepEqual(body.settings.whatsapp, {
     phoneNumberId: null, wabaId: null, appId: null, graphVersion: "v23.0",
-    token: { set: false, source: "none" }, appSecret: { set: false, source: "none" }, verifyToken: { set: false, source: "none" },
+    token: { set: false, source: "none", hint: null }, appSecret: { set: false, source: "none", hint: null }, verifyToken: { set: false, source: "none", hint: null },
   });
   assert.deepEqual(body.settings.email, {
     enabled: false, domain: null, fromEmail: null, region: "us", recipients: [], sendTime: "18:00",
-    apiKey: { set: false, source: "none" }, lastSent: null,
+    apiKey: { set: false, source: "none", hint: null }, lastSent: null,
   });
-  assert.deepEqual(body.settings.push, { clientConfig: null, serviceAccount: { set: false, source: "none", projectId: null } });
+  assert.deepEqual(body.settings.push, { clientConfig: null, serviceAccount: { set: false, source: "none", hint: null, projectId: null } });
   assert.deepEqual(body.deployment, { importable: [] });
   const features = await (await f.admin("GET", "/v1/admin/features")).json();
   assert.deepEqual([features.customers, features.whatsapp], [false, false]);
@@ -81,7 +81,7 @@ test("updates are partial, secrets are write-only and encrypted at rest, and nul
   assert.equal(first.status, 200);
   const firstBody = await first.json();
   assert.deepEqual(Object.keys(firstBody.settings), ["whatsapp"]);
-  assert.deepEqual(firstBody.settings.whatsapp.token, { set: true, source: "database" });
+  assert.deepEqual(firstBody.settings.whatsapp.token, { set: true, source: "database", hint: "EAA••••lue" });
   assert.equal(firstBody.settings.whatsapp.phoneNumberId, "1000000000000001");
   assert.equal(firstBody.generatedVerifyToken, undefined);
 
@@ -91,7 +91,7 @@ test("updates are partial, secrets are write-only and encrypted at rest, and nul
   assert.equal(after.settings.whatsapp.wabaId, "1000000000000002");
   assert.equal(after.settings.whatsapp.phoneNumberId, "1000000000000001");
   assert.equal(after.settings.whatsapp.graphVersion, "v24.0");
-  assert.deepEqual(after.settings.whatsapp.token, { set: true, source: "database" });
+  assert.deepEqual(after.settings.whatsapp.token, { set: true, source: "database", hint: "EAA••••lue" });
 
   // No secret value appears in any response, and the database holds ciphertext.
   const everything = JSON.stringify([firstBody, after, await (await f.admin("GET", "/v1/admin/features")).json()]);
@@ -109,7 +109,7 @@ test("updates are partial, secrets are write-only and encrypted at rest, and nul
   assert.notEqual((await f.raw("whatsapp.token")).value, before);
   await f.put("whatsapp", { token: null, wabaId: null });
   const cleared = await f.get();
-  assert.deepEqual(cleared.settings.whatsapp.token, { set: false, source: "none" });
+  assert.deepEqual(cleared.settings.whatsapp.token, { set: false, source: "none", hint: null });
   assert.equal(cleared.settings.whatsapp.wabaId, null);
   assert.equal(await f.raw("whatsapp.token"), null);
 });
@@ -118,7 +118,7 @@ test("a generated verify token is returned once and never again", async (t) => {
   const f = await fixture(t);
   const body = await (await f.put("whatsapp", { verifyToken: { generate: true } })).json();
   assert.match(body.generatedVerifyToken, /^[0-9a-f]{48}$/);
-  assert.deepEqual(body.settings.whatsapp.verifyToken, { set: true, source: "database" });
+  assert.deepEqual(body.settings.whatsapp.verifyToken, { set: true, source: "database", hint: `${body.generatedVerifyToken.slice(0, 3)}••••${body.generatedVerifyToken.slice(-3)}` });
   assert.ok(!JSON.stringify(await f.get()).includes(body.generatedVerifyToken));
   assert.ok(!(await f.raw("whatsapp.verifyToken")).value.includes(body.generatedVerifyToken));
   const second = await (await f.put("whatsapp", { verifyToken: { generate: true } })).json();
@@ -160,7 +160,7 @@ test("email settings: recipients, send time, region and the last-sent state", as
   })).json();
   assert.deepEqual({ ...body.settings.email, lastSent: undefined }, {
     enabled: true, domain: "mg.example.com", fromEmail: "reports@mg.example.com", region: "eu",
-    recipients: ["a@example.com", "b@example.com"], sendTime: "09:30", apiKey: { set: true, source: "database" }, lastSent: undefined,
+    recipients: ["a@example.com", "b@example.com"], sendTime: "09:30", apiKey: { set: true, source: "database", hint: "syn••••key" }, lastSent: undefined,
   });
   await f.DB.prepare("INSERT INTO app_settings (key, value, encrypted, updated_at) VALUES ('job.email.lastSent', ?, 0, 'x')")
     .bind(JSON.stringify({ date: "2026-09-28", status: "sent" })).run();
@@ -175,7 +175,7 @@ test("push settings require a valid key and a matching Firebase project", async 
   assert.equal(mismatch.status, 400);
   assert.equal(await f.raw("push.serviceAccount"), null);
   const saved = await (await f.put("push", { serviceAccount: serviceAccount("linekeep-test") })).json();
-  assert.deepEqual(saved.settings.push.serviceAccount, { set: true, source: "database", projectId: "linekeep-test" });
+  assert.deepEqual(saved.settings.push.serviceAccount, { set: true, source: "database", hint: null, projectId: "linekeep-test" });
   assert.deepEqual(saved.settings.push.clientConfig, clientConfig("linekeep-test"));
   const stored = await f.raw("push.serviceAccount");
   assert.equal(stored.encrypted, 1);
@@ -191,7 +191,7 @@ test("the database wins over deployment variables, which stay as the fallback", 
     MAILGUN_DOMAIN: "env.example.com", EMAIL_IDS: "env@example.com", CALL_SUMMARY_ENABLED: "true",
   });
   const before = await f.get();
-  assert.deepEqual(before.settings.whatsapp.token, { set: true, source: "deployment" });
+  assert.deepEqual(before.settings.whatsapp.token, { set: true, source: "deployment", hint: "dep••••lue" });
   assert.equal(before.settings.whatsapp.phoneNumberId, "2000000000000001");
   assert.deepEqual(before.settings.email.recipients, ["env@example.com"]);
   assert.equal(before.settings.email.enabled, true);
@@ -200,7 +200,7 @@ test("the database wins over deployment variables, which stay as the fallback", 
   await f.put("whatsapp", { token: secrets.token, phoneNumberId: "1000000000000001" });
   await f.put("email", { enabled: false, domain: "db.example.com" });
   const after = await f.get();
-  assert.deepEqual(after.settings.whatsapp.token, { set: true, source: "database" });
+  assert.deepEqual(after.settings.whatsapp.token, { set: true, source: "database", hint: "EAA••••lue" });
   assert.equal(after.settings.whatsapp.phoneNumberId, "1000000000000001");
   assert.equal(after.settings.whatsapp.wabaId, "2000000000000002"); // untouched: still the deployment value
   assert.equal(after.settings.email.enabled, false);
@@ -209,7 +209,7 @@ test("the database wins over deployment variables, which stay as the fallback", 
   // Clearing falls back to the deployment value.
   await f.put("whatsapp", { token: null, phoneNumberId: null });
   const cleared = await f.get();
-  assert.deepEqual(cleared.settings.whatsapp.token, { set: true, source: "deployment" });
+  assert.deepEqual(cleared.settings.whatsapp.token, { set: true, source: "deployment", hint: "dep••••lue" });
   assert.equal(cleared.settings.whatsapp.phoneNumberId, "2000000000000001");
 });
 
@@ -247,7 +247,7 @@ test("importing deployment values copies them into the encrypted store once", as
   assert.equal(await f.raw("whatsapp.graphVersion"), null); // invalid values are not imported
   const after = await f.get();
   assert.deepEqual(after.deployment.importable, []);
-  assert.deepEqual(after.settings.whatsapp.token, { set: true, source: "database" });
+  assert.deepEqual(after.settings.whatsapp.token, { set: true, source: "database", hint: "EAA••••lue" });
   assert.deepEqual(after.settings.email.recipients, ["a@example.com", "b@example.com"]);
   assert.deepEqual((await (await f.admin("POST", "/v1/admin/settings/import-deployment")).json()).imported, []);
 });

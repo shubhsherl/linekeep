@@ -5081,7 +5081,7 @@ export const clientJavaScript = String.raw`(() => {
       const isSet = info.set === true;
       input.hidden = field.mode !== 'replace';
       if (field.mode === 'keep') {
-        stateNode.textContent = SAVED_TEXT[info.source] || 'Saved';
+        stateNode.textContent = (SAVED_TEXT[info.source] || 'Saved') + (typeof info.hint === 'string' && info.hint ? ': ' + info.hint : '');
         const replace = make('Replace', 'replace');
         replace.setAttribute('aria-label', 'Replace ' + labelText);
         row.append(replace);
