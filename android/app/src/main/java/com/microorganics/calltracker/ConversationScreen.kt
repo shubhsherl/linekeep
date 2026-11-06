@@ -1,7 +1,13 @@
 package com.microorganics.calltracker
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -201,13 +207,7 @@ internal fun ConversationScreen(
             CustomerDetailsScreen(
                 customers, scope, customer, phone, onBack = { detailsOpen = false },
                 reload = { scope.launch { customers.refreshConversation() } },
-                dial = {
-                    try {
-                        context.startActivity(Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", phone, null)))
-                    } catch (_: ActivityNotFoundException) {
-                        notice = "No phone app is available to dial."
-                    }
-                },
+                openBusinessWhatsApp = { detailsOpen = false },
             )
         }
         else -> Column(modifier.fillMaxSize()) {
@@ -336,12 +336,16 @@ private fun DayChip(millis: Long, colors: ChatColors) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(message: WhatsAppMessage, tail: Boolean, customers: CustomersRepository, controller: MediaController, colors: ChatColors) {
     val outgoing = message.direction == MessageDirection.OUT
     val attachment = message.media
     val label = if (attachment != null) null else typeLabel(message.messageType, message.templateName)
     val bubbleColor = if (outgoing) colors.outgoing else colors.incoming
+    val copyText = copyableText(message.body)
+    var menuOpen by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val radius = 10.dp
     val shape = RoundedCornerShape(
         topStart = if (tail && !outgoing) 0.dp else radius, topEnd = if (tail && outgoing) 0.dp else radius,
@@ -368,7 +372,11 @@ private fun MessageBubble(message: WhatsAppMessage, tail: Boolean, customers: Cu
             },
         ) {
             Surface(shape = shape, color = bubbleColor, contentColor = colors.text) {
-                Column(Modifier.padding(start = 9.dp, end = 9.dp, top = 6.dp, bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Column(
+                    Modifier.then(if (copyText != null) Modifier.combinedClickable(onClick = {}, onLongClickLabel = "Copy message text", onLongClick = { menuOpen = true }) else Modifier)
+                        .padding(start = 9.dp, end = 9.dp, top = 6.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
                     if (outgoing) message.sentBy?.name?.takeIf { it.isNotEmpty() }?.let {
                         Text(it, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = colors.meta)
                     }
@@ -380,6 +388,14 @@ private fun MessageBubble(message: WhatsAppMessage, tail: Boolean, customers: Cu
                         if (outgoing && message.status == "failed") Text("Failed", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                         Text(timeOnlyFormat.format(Instant.ofEpochMilli(message.sentAt)), style = MaterialTheme.typography.labelSmall, color = colors.meta)
                         if (outgoing) StatusTick(message.status, colors)
+                    }
+                    if (copyText != null) DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Copy") }, onClick = {
+                            menuOpen = false
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Message", copyText))
+                            Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                        })
                     }
                 }
             }

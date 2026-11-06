@@ -1,5 +1,11 @@
 package com.microorganics.calltracker
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.ContactsContract
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,7 +32,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -43,7 +52,7 @@ internal fun CustomerDetailsScreen(
     phone: String,
     onBack: () -> Unit,
     reload: () -> Unit,
-    dial: () -> Unit,
+    openBusinessWhatsApp: () -> Unit,
 ) {
     var name by remember(customer?.id) { mutableStateOf(customer?.name.orEmpty()) }
     var notes by remember(customer?.id) { mutableStateOf(customer?.notes.orEmpty()) }
@@ -101,7 +110,7 @@ internal fun CustomerDetailsScreen(
                     if (saving) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                     Text(if (saving) "Saving…" else "Save changes", Modifier.padding(start = if (saving) 8.dp else 0.dp))
                 }
-                OutlinedButton(onClick = dial, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Dial ${customer.phone}") }
+                CustomerActions(customer, phone.ifEmpty { customer.phone }, openBusinessWhatsApp)
                 customer.email?.let { DetailField("Email", it) }
                 customer.source?.let { DetailField("Source", it) }
                 customer.district?.let { DetailField("District", it) }
@@ -113,6 +122,67 @@ internal fun CustomerDetailsScreen(
             }
         }
     }
+}
+
+/** Dial, the two WhatsApp routes and the system contact editor. None of them needs a permission. */
+@Composable
+private fun CustomerActions(customer: Customer, phone: String, openBusinessWhatsApp: () -> Unit) {
+    val context = LocalContext.current
+    fun unavailable(what: String) = Toast.makeText(context, what, Toast.LENGTH_SHORT).show()
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Actions", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+        ActionButton(R.drawable.ic_dial, "Dial") {
+            try {
+                context.startActivity(Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", phone, null)))
+            } catch (_: ActivityNotFoundException) {
+                unavailable("No phone app is available to dial.")
+            }
+        }
+        ActionButton(R.drawable.ic_whatsapp, "Open Business WhatsApp", onClick = openBusinessWhatsApp)
+        ActionButton(R.drawable.ic_whatsapp, "Open Personal WhatsApp") {
+            if (!openPersonalWhatsApp(context, phone)) unavailable("WhatsApp can't be opened on this phone.")
+        }
+        ActionButton(R.drawable.ic_chat_add, "Save contact") {
+            try {
+                context.startActivity(saveContactIntent(customer.name, phone))
+            } catch (_: ActivityNotFoundException) {
+                unavailable("No contacts app is available.")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionButton(icon: Int, label: String, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+        Icon(painterResource(icon), contentDescription = null, modifier = Modifier.size(20.dp))
+        Text(label, Modifier.weight(1f).padding(start = 12.dp))
+    }
+}
+
+/** Opens the system contact editor prefilled; the app never reads contacts. */
+internal fun saveContactIntent(name: String, phone: String): Intent =
+    Intent(Intent.ACTION_INSERT, ContactsContract.Contacts.CONTENT_URI).apply {
+        putExtra(ContactsContract.Intents.Insert.NAME, name)
+        putExtra(ContactsContract.Intents.Insert.PHONE, phone)
+    }
+
+/** The employee's own WhatsApp on this number: the installed app, else the same link in a browser. */
+internal fun openPersonalWhatsApp(context: Context, e164: String): Boolean {
+    val url = waMeUrl(e164) ?: return false
+    var step = nextPersonalWhatsAppStep(null)
+    while (step != null) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            if (step == PersonalWhatsAppStep.WHATSAPP_APP) setPackage(WHATSAPP_PACKAGE)
+        }
+        try {
+            context.startActivity(intent)
+            return true
+        } catch (_: ActivityNotFoundException) {
+            step = nextPersonalWhatsAppStep(step)
+        }
+    }
+    return false
 }
 
 /** Add-customer form. Checks the number against the server first; [open] shows the conversation of a created or existing customer. */

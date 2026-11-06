@@ -11,4 +11,19 @@
     <string name="restricted_history_explanation">Call history may also be blocked by your APK installer\'s restricted-permission policy. If Android does not offer access, ask your manager to check the installer. %1$s cannot override this restriction; accessible recordings can still sync.</string>
     <string name="tile_instructions">Edit Android Quick Settings tiles and add %1$s settings for a shortcut.</string>
     <string name="recording_explanation">%1$s does not record calls. Choose only the folder where Samsung Phone saves recordings. Supported audio in that folder and its subfolders can be shared; unrelated storage is not scanned.</string>
+    <string name="perm_banner_title">Call sync is not fully enabled</string>
+    <string name="perm_banner_intro">Your calls cannot be kept up to date until these are fixed:</string>
+    <string name="perm_item_sharing">Sharing has not been accepted yet</string>
+    <string name="perm_item_call_history">Call history access</string>
+    <string name="perm_item_phone_state">Phone information access</string>
+    <string name="perm_item_phone_numbers">SIM phone number access</string>
+    <string name="perm_item_notifications">Status notifications are off</string>
+    <string name="perm_item_background">Unrestricted background activity (battery)</string>
+    <string name="perm_item_folder">Access to the recordings folder</string>
+    <string name="perm_action_setup">Open Settings &gt; Setup</string>
+    <string name="perm_action_grant">Grant access</string>
+    <string name="perm_action_settings">Open Android app settings</string>
+    <string name="perm_action_background">Allow background activity</string>
+    <string name="perm_action_folder">Choose recordings folder</string>
+    <string name="perm_not_enrolled">Open Settings &gt; Setup to connect this phone before call sync can start.</string>
 </resources>

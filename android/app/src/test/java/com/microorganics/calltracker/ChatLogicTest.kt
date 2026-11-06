@@ -218,3 +218,25 @@ class ChatLogicTest {
         assertNull(parseProfile(JSONObject("""{"requestId":"r"}""")))
     }
 }
+
+class CustomerActionsLogicTest {
+    @Test fun waMeUrlUsesDigitsOnly() {
+        assertEquals("https://wa.me/919000000001", waMeUrl("+919000000001"))
+        assertEquals("https://wa.me/14155550123", waMeUrl("+1 415 555 0123"))
+        assertNull(waMeUrl(""))
+        assertNull(waMeUrl("+123"))
+    }
+
+    @Test fun personalWhatsAppTriesAppThenBrowser() {
+        assertEquals(PersonalWhatsAppStep.WHATSAPP_APP, nextPersonalWhatsAppStep(null))
+        assertEquals(PersonalWhatsAppStep.BROWSER, nextPersonalWhatsAppStep(PersonalWhatsAppStep.WHATSAPP_APP))
+        assertNull(nextPersonalWhatsAppStep(PersonalWhatsAppStep.BROWSER))
+        assertEquals("com.whatsapp", WHATSAPP_PACKAGE)
+    }
+
+    @Test fun onlyTextMessagesCanBeCopied() {
+        assertEquals("hello", copyableText("hello"))
+        assertNull(copyableText(null))
+        assertNull(copyableText("  "))
+    }
+}

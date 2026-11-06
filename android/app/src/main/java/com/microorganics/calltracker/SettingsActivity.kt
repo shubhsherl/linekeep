@@ -105,6 +105,8 @@ private data class RequiredAccess(
     val chatNotifications: Boolean = true,
     val needsSettings: Boolean = false,
     val background: BackgroundStatus = BackgroundStatus(),
+    /** Runtime permissions Android will still prompt for (not granted and not permanently denied). */
+    val requestable: List<String> = emptyList(),
 ) {
     val runtimeGranted get() = phoneState && phoneNumbers && callHistory && notifications && background.unrestricted
 }
@@ -158,6 +160,13 @@ class SettingsActivity : ComponentActivity() {
             val backgroundRequest = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
                 refreshAccess()
                 permissionStep = "finish"
+            }
+            // The banner on the call-analytics tabs asks only for what is still requestable, and only after a tap.
+            val callSyncPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+                permissionRequests.edit().apply {
+                    results.keys.forEach { putBoolean(it, true) }
+                }.apply()
+                refreshAccess()
             }
             LaunchedEffect(permissionStep) {
                 try {
@@ -296,6 +305,17 @@ class SettingsActivity : ComponentActivity() {
                     scope = app.scope,
                     openRequest = openRequest,
                     consumeOpenRequest = { openRequest = null },
+                    callSyncAction = { action ->
+                        setupFailure = null
+                        when (action) {
+                            CallSyncAction.REQUEST_PERMISSIONS ->
+                                callSyncPermissions.launch(access.requestable.toTypedArray())
+                            CallSyncAction.OPEN_APP_SETTINGS -> openAppSettings()
+                            CallSyncAction.ALLOW_BACKGROUND -> permissionStep = "background"
+                            CallSyncAction.CHOOSE_FOLDER -> permissionStep = "change_folder"
+                            CallSyncAction.OPEN_SETUP -> Unit
+                        }
+                    },
                 )
             }
         }
@@ -385,6 +405,7 @@ class SettingsActivity : ComponentActivity() {
             needsSettings = requiredPermissions().any(::needsSettings) ||
                 (!notifications && (Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS))),
             background = BackgroundAccess.read(this),
+            requestable = requiredPermissions().filter { !granted(it) && !needsSettings(it) },
         )
         app.repository.updateContentNotification()
     }
@@ -476,6 +497,7 @@ private fun DeviceScreen(
     scope: CoroutineScope,
     openRequest: OpenRequest?,
     consumeOpenRequest: () -> Unit,
+    callSyncAction: (CallSyncAction) -> Unit,
 ) {
     var destinationIndex by rememberSaveable { mutableStateOf(MainDestination.CUSTOMERS.ordinal) }
     var settingsIndex by rememberSaveable { mutableStateOf(SettingsSection.SETUP.ordinal) }
@@ -563,6 +585,29 @@ private fun DeviceScreen(
                     MainDestination.SETTINGS -> SectionTabs(SettingsSection.entries.map { it.label }, settingsIndex) { settingsIndex = it }
                     MainDestination.ANALYTICS -> SectionTabs(AnalyticsSection.entries.map { it.label }, analyticsIndex) { analyticsIndex = it }
                     else -> Unit
+                }
+                if (destination == MainDestination.ANALYTICS) {
+                    val notice = callSyncNotice(
+                        enrolled = status.deviceId != null && !status.unauthorized && !status.storageUnavailable,
+                        setupAccepted = content.setupAccepted,
+                        phoneState = access.phoneState,
+                        phoneNumbers = access.phoneNumbers,
+                        callHistory = access.callHistory,
+                        notifications = access.notifications,
+                        background = access.background,
+                        folderAccessible = content.folderAccessible,
+                        requestable = access.requestable,
+                    )
+                    CallSyncBanner(
+                        notice,
+                        act = { action ->
+                            if (action == CallSyncAction.OPEN_SETUP) {
+                                settingsIndex = SettingsSection.SETUP.ordinal
+                                destinationIndex = MainDestination.SETTINGS.ordinal
+                            } else callSyncAction(action)
+                        },
+                        modifier = Modifier.widthIn(max = 640.dp).padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
                 }
                 Box(Modifier.widthIn(max = 640.dp).weight(1f)) {
                     when (destination) {

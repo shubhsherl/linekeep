@@ -344,3 +344,27 @@ internal fun dayStartIndexes(times: List<Long>, offsetFor: (Long) -> Long): Set<
     }
     return result
 }
+
+// ---- Customer actions: personal WhatsApp and copying --------------------------------------------------------------
+
+internal const val WHATSAPP_PACKAGE = "com.whatsapp"
+
+/** `https://wa.me/<digits>` for an E.164 number; null when it has no usable digits. */
+internal fun waMeUrl(e164: String): String? {
+    val digits = e164.filter { it in '0'..'9' }
+    return if (digits.length in 8..15) "https://wa.me/$digits" else null
+}
+
+/** How to reach the employee's own WhatsApp: the app first, then the same link in a browser. */
+internal enum class PersonalWhatsAppStep { WHATSAPP_APP, BROWSER }
+
+internal fun personalWhatsAppSteps(): List<PersonalWhatsAppStep> = listOf(PersonalWhatsAppStep.WHATSAPP_APP, PersonalWhatsAppStep.BROWSER)
+
+/** The step to try after [failed] raised ActivityNotFoundException; null when nothing is left. */
+internal fun nextPersonalWhatsAppStep(failed: PersonalWhatsAppStep?): PersonalWhatsAppStep? {
+    val steps = personalWhatsAppSteps()
+    return if (failed == null) steps.first() else steps.getOrNull(steps.indexOf(failed) + 1)
+}
+
+/** Only messages with text or a caption can be copied. */
+internal fun copyableText(body: String?): String? = body?.takeIf { it.isNotBlank() }

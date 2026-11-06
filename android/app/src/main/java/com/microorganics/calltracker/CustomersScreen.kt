@@ -188,6 +188,7 @@ private fun <T> PagedColumn(
 @Composable
 internal fun CustomersTab(customers: CustomersRepository, scope: CoroutineScope, open: (id: String, name: String, phone: String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
+    var detailsId by rememberSaveable { mutableStateOf<String?>(null) }
     var adding by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val state by customers.customers.state.collectAsStateWithLifecycle()
@@ -211,9 +212,19 @@ internal fun CustomersTab(customers: CustomersRepository, scope: CoroutineScope,
         }
         return
     }
+    detailsId?.let { id ->
+        BackHandler { detailsId = null }
+        val customer = state.items.firstOrNull { it.id == id }
+        CustomerDetailsScreen(
+            customers, scope, customer, customer?.phone.orEmpty(), onBack = { detailsId = null },
+            reload = { scope.launch { customers.customers.refresh() } },
+            openBusinessWhatsApp = { customer?.let { open(it.id, it.name, it.phone) } },
+        )
+        return
+    }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            SearchField(query, "Search name, phone or email", Modifier.weight(1f)) { query = it }
+            SearchField(query, "Search customer", Modifier.weight(1f)) { query = it }
             FilledTonalIconButton(onClick = { adding = true }, modifier = Modifier.size(48.dp)) {
                 Icon(painterResource(R.drawable.ic_chat_add), contentDescription = "Add customer", modifier = Modifier.size(24.dp))
             }
@@ -226,7 +237,7 @@ internal fun CustomersTab(customers: CustomersRepository, scope: CoroutineScope,
                 refresh = { scope.launch { customers.customers.refresh() } },
                 loadMore = { scope.launch { customers.customers.loadMore() } },
             ) { customer ->
-                CustomerRow(customer) { open(customer.id, customer.name, customer.phone) }
+                CustomerRow(customer) { detailsId = customer.id }
             }
         }
     }

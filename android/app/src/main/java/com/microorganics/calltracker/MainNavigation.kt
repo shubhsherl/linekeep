@@ -5,7 +5,7 @@ import androidx.annotation.DrawableRes
 /** Bottom navigation, in display order. */
 internal enum class MainDestination(val label: String, @DrawableRes val icon: Int) {
     CUSTOMERS("Customers", R.drawable.ic_nav_customers),
-    CHATS("WhatsApp", R.drawable.ic_nav_chat),
+    CHATS("WhatsApp", R.drawable.ic_whatsapp),
     ANALYTICS("Call analytics", R.drawable.ic_nav_analytics),
     SETTINGS("Settings", R.drawable.ic_nav_settings),
     ;
