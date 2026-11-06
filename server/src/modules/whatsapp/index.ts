@@ -1,99 +1,14 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { z } from "zod";
 
 import type { AppBindings } from "../../app";
-import { type Customer, type WhatsAppMessage, type whatsappSendInput } from "../../data/customers";
 import { createWhatsAppRepository } from "../../data/whatsapp";
-import type { Env } from "../../env";
-import { fetchTemplates, renderTemplate, type WhatsAppTemplate } from "../../whatsapp/templates";
 import { defer } from "../../http/defer";
 import { notifyNewMessage } from "../../push/notify";
 import { requireFeature } from "../../settings/gate";
 import { runAutoReply } from "./auto-reply";
 import { storeInboundMedia } from "./media";
-import {
-  parseWebhook, sendCloudMessage, verifyWebhookSignature, whatsappConfig, WhatsAppSendError,
-} from "../../whatsapp/cloud";
-
-const windowMs = 24 * 60 * 60 * 1000;
-
-/** Approved templates for the admin picker. */
-export async function listTemplates(env: Env): Promise<WhatsAppTemplate[]> {
-  const config = whatsappConfig(env);
-  if (!config?.wabaId) throw new WhatsAppUnavailableError();
-  try {
-    return await fetchTemplates(config);
-  } catch (error) {
-    throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
-  }
-}
-
-export function whatsappCanSend(env: Env): boolean {
-  return whatsappConfig(env) !== null;
-}
-
-export class WhatsAppUnavailableError extends Error {}
-/** The 24-hour window is closed (or never opened); only an approved template can be sent. */
-export class WhatsAppTemplateRequiredError extends Error {}
-export class WhatsAppSendFailedError extends Error {
-  constructor(readonly retryable: boolean) { super("WhatsApp message could not be sent"); }
-}
-
-/**
- * Sends one message to a customer. The message is stored first, so a failure is visible in the thread and a
- * client retry with the same `clientMessageId` never sends twice.
- */
-export async function sendToCustomer(
-  env: Env, customer: Customer, input: z.infer<typeof whatsappSendInput>, employeeId: string | null,
-): Promise<WhatsAppMessage> {
-  const config = whatsappConfig(env);
-  if (!config) throw new WhatsAppUnavailableError();
-  const repository = createWhatsAppRepository(env.DB);
-  const id = `wam_${input.clientMessageId}`;
-  const existing = await repository.get(id);
-  if (existing) {
-    if (existing.customerId !== customer.id) throw new HTTPException(409, { message: "Message id already used" });
-    return existing;
-  }
-  if (input.text !== undefined) {
-    const last = await repository.lastInboundAt(customer.id);
-    if (last === null || Date.now() - Date.parse(last) > windowMs) throw new WhatsAppTemplateRequiredError();
-  }
-  let template: WhatsAppTemplate | undefined;
-  if (input.template) {
-    if (!config.wabaId) throw new WhatsAppUnavailableError();
-    try {
-      const wanted = input.template;
-      template = (await fetchTemplates(config, { name: wanted.name })).find((item) => item.language === wanted.language);
-    } catch (error) {
-      throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
-    }
-    if (!template) throw new HTTPException(404, { message: "Template not found" });
-    if (!template.sendable || input.template.params.length !== template.variables.length) {
-      throw new HTTPException(400, { message: "Template cannot be sent with these values" });
-    }
-  }
-  const to = customer.phone.replace(/\D/g, "");
-  const queued = await repository.queueOutbound({
-    id, customerId: customer.id, to: customer.phone, from: null, employeeId,
-    type: template ? "template" : "text",
-    body: template && input.template ? renderTemplate(template, input.template.params) : input.text ?? null,
-    templateName: template?.name ?? null,
-  });
-  if (!queued.created) return queued.message;
-  try {
-    const externalId = await sendCloudMessage(config, to, template && input.template
-      ? { type: "template", name: template.name, language: template.language,
-        params: template.variables.map((variable, index) => ({ key: variable.key, named: template.named, value: input.template?.params[index] ?? "" })) }
-      : { type: "text", text: input.text ?? "" });
-    await repository.markSent(id, externalId);
-  } catch (error) {
-    await repository.markFailed(id);
-    throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
-  }
-  return (await repository.get(id)) ?? queued.message;
-}
+import { parseWebhook, verifyWebhookSignature, whatsappConfig } from "../../whatsapp/cloud";
 
 /**
  * Meta's webhook. Mounted outside Cloudflare Access and the admin guard, because Meta cannot sign in; the

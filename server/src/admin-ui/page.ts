@@ -304,6 +304,20 @@ export const adminHtml = `<!doctype html>
           <section id="config-section-whatsapp-business" class="cfg-section" aria-labelledby="config-whatsapp-business-heading" hidden>
             <h2 id="config-whatsapp-business-heading" class="cfg-section-title" tabindex="-1">WhatsApp Business</h2>
             <div id="settings-whatsapp-body" class="cfg-body"></div>
+            <section id="tplimg-panel" class="panel cfg-block cfg-steps" aria-labelledby="tplimg-heading">
+              <div class="section-heading"><h3 id="tplimg-heading" tabindex="-1">Template images</h3><button id="tplimg-refresh" class="secondary" type="button">Refresh</button></div>
+              <p class="muted">Some approved templates have an image, video or document header. Pick the default file sent with each of them.</p>
+              <ol>
+                <li>Create the template in Meta and get it approved, with an image header.</li>
+                <li>Here, pick a default image for it.</li>
+                <li>Employees and admins send it with this image unless they pick another one while sending.</li>
+              </ol>
+              <p id="tplimg-status" class="cfg-status" role="status" aria-live="polite"></p>
+              <p id="tplimg-error" class="error-text" role="alert" hidden></p>
+              <button id="tplimg-retry" class="secondary" type="button" hidden>Try again</button>
+              <div id="tplimg-list" class="management-list cfg-list" aria-busy="false"></div>
+              <input id="tplimg-file" type="file" hidden tabindex="-1" aria-hidden="true">
+            </section>
           </section>
           <section id="config-section-email" class="cfg-section" aria-labelledby="config-email-heading" hidden>
             <h2 id="config-email-heading" class="cfg-section-title" tabindex="-1">Daily email report</h2>
@@ -483,6 +497,8 @@ export const adminHtml = `<!doctype html>
           <button id="template-back" class="wa-text-btn wa-tpl-back" type="button">Back to templates</button>
           <p id="template-selected" class="wa-tpl-selected"></p>
           <fieldset id="template-fields" class="wa-tpl-fields"><legend class="sr-only">Template variables</legend><div id="template-field-list"></div></fieldset>
+          <div id="template-header-box" class="wa-tpl-media" hidden></div>
+          <input id="template-header-file" type="file" hidden tabindex="-1" aria-hidden="true">
           <div class="wa-preview" role="group" aria-label="Preview of the message"><div id="template-preview"></div></div>
           <p id="template-error" class="wa-notice wa-error" role="alert" hidden></p>
           <div class="wa-dlg-actions"><button id="template-cancel" class="wa-text-btn" type="button">Cancel</button><button id="template-send" class="wa-send-btn" type="submit" disabled>Send template</button></div>

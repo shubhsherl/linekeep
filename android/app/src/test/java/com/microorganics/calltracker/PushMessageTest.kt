@@ -62,9 +62,7 @@ class PushMessageTest {
         assertTrue(shouldPostPush(assigned, appInForeground = true, openConversationId = "c1"))
     }
 
-    @Test fun openRequestChoosesTheTab() {
-        assertEquals(3, parseOpenRequest("message", "c1", "Asha")!!.tab)
-        assertEquals(2, parseOpenRequest("assigned", "c1", null)!!.tab)
+    @Test fun openRequestKeepsAnEmptyNameEmpty() {
         assertEquals("", parseOpenRequest("assigned", "c1", null)!!.customerName)
     }
 

@@ -10,7 +10,7 @@ import java.security.MessageDigest
 import javax.net.ssl.HttpsURLConnection
 
 /** [code] is the server's stable error code when the response carried the standard error body. */
-internal class ApiFailure(val status: Int, val code: String? = null) : IOException("HTTP $status")
+internal class ApiFailure(val status: Int, val code: String? = null, val customerId: String? = null) : IOException("HTTP $status")
 internal const val MAX_MEDIA_BYTES = 25L * 1024 * 1024
 private const val MEDIA_PATH_PREFIX = "/v1/device/whatsapp/messages/"
 internal class MediaTooLarge : IOException("Media is larger than 25 MB")
@@ -186,11 +186,66 @@ internal class DeviceApi(private val server: () -> String?) {
         request("DELETE", "/v1/device/push-token", null, enrollment.token)
     }
 
-    /** Throws [ApiFailure] with code [WHATSAPP_NOT_CONFIGURED] (HTTP 503) until the server has a transport; nothing is stored then. */
-    fun sendMessage(enrollment: Enrollment, customerId: String, clientMessageId: String, text: String): WhatsAppMessage? {
-        val response = post("/v1/device/customers/${android.net.Uri.encode(customerId)}/messages",
-            JSONObject().put("clientMessageId", clientMessageId).put("text", text), enrollment.token)
+    /** This employee's own customer for [phone], whether anyone has it, and nothing else about other people's customers. */
+    fun lookupCustomer(enrollment: Enrollment, phone: String): LookupResult =
+        parseLookup(get("/v1/device/customers/lookup" + queryString("phone" to phone), enrollment.token)) ?: throw IOException("Malformed lookup response")
+
+    /** Creates a customer assigned to this employee. A duplicate number throws [ApiFailure] 409 [CUSTOMER_EXISTS_CODE]. */
+    fun createCustomer(enrollment: Enrollment, body: JSONObject): Customer =
+        post("/v1/device/customers", body, enrollment.token).optJSONObject("customer")?.let(::parseCustomer) ?: throw IOException("Malformed customer response")
+
+    /** Edits name and/or notes of this employee's own customer. */
+    fun updateCustomer(enrollment: Enrollment, customerId: String, body: JSONObject): Customer =
+        request("PATCH", "/v1/device/customers/${android.net.Uri.encode(customerId)}", body, enrollment.token).optJSONObject("customer")?.let(::parseCustomer)
+            ?: throw IOException("Malformed customer response")
+
+    /** This employee's own name and configured phone number. */
+    fun profile(enrollment: Enrollment): EmployeeProfile =
+        parseProfile(get("/v1/device/profile", enrollment.token)) ?: throw IOException("Malformed profile response")
+
+    fun quickMessages(enrollment: Enrollment): List<QuickMessage> =
+        parsePage(get("/v1/device/whatsapp/quick-messages", enrollment.token), ::parseQuickMessage).items
+
+    fun templates(enrollment: Enrollment): List<MessageTemplate> =
+        parsePage(get("/v1/device/whatsapp/templates", enrollment.token), ::parseTemplate).items
+
+    /**
+     * Sends one message ([textMessageBody], [mediaMessageBody] or [templateMessageBody]). Throws [ApiFailure] with code
+     * [WHATSAPP_NOT_CONFIGURED] (HTTP 503) until the server has a transport, or [WINDOW_CLOSED_CODE] (409).
+     */
+    fun sendMessage(enrollment: Enrollment, customerId: String, body: JSONObject): WhatsAppMessage? {
+        val response = post("/v1/device/customers/${android.net.Uri.encode(customerId)}/messages", body, enrollment.token)
         return response.optJSONObject("message")?.let(::parseMessage)
+    }
+
+    /** Uploads one outgoing file as the raw request body; [onProgress] receives the bytes written so far. */
+    fun uploadAttachment(enrollment: Enrollment, fileName: String, mimeType: String, bytes: ByteArray, checkActive: () -> Unit, onProgress: (Long) -> Unit): UploadedAttachment {
+        val connection = secureConnection((server() ?: throw ServerNotSet()) + "/v1/device/whatsapp/attachments" + queryString("fileName" to fileName))
+        try {
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Authorization", "Bearer ${enrollment.token}")
+            connection.setRequestProperty("Content-Type", mimeType)
+            connection.readTimeout = 60_000
+            connection.doOutput = true
+            connection.setFixedLengthStreamingMode(bytes.size)
+            connection.outputStream.use { output ->
+                var written = 0
+                while (written < bytes.size) {
+                    checkActive()
+                    val count = minOf(32 * 1024, bytes.size - written)
+                    output.write(bytes, written, count)
+                    written += count
+                    onProgress(written.toLong())
+                }
+            }
+            val status = connection.responseCode
+            if (status !in 200..299) throw failure(status, connection)
+            val json = connection.inputStream.bufferedReader().use { it.readText().ifBlank { "{}" }.let(::JSONObject) }
+            return parseUploadedAttachment(json) ?: throw IOException("Malformed attachment response")
+        } finally {
+            connection.disconnect()
+        }
     }
 
     /** Live-update marker; changes whenever any WhatsApp message is added or changes. */
@@ -209,7 +264,7 @@ internal class DeviceApi(private val server: () -> String?) {
             connection.setRequestProperty("Authorization", "Bearer ${enrollment.token}")
             connection.readTimeout = 60_000
             val status = connection.responseCode
-            if (status !in 200..299) throw ApiFailure(status, errorCode(connection))
+            if (status !in 200..299) throw failure(status, connection)
             if (connection.contentLengthLong > MAX_MEDIA_BYTES) throw MediaTooLarge()
             return connection.inputStream.use { input ->
                 val out = java.io.ByteArrayOutputStream(connection.contentLength.coerceIn(8 * 1024, MAX_MEDIA_BYTES.toInt()))
@@ -255,19 +310,24 @@ internal class DeviceApi(private val server: () -> String?) {
                 connection.outputStream.close()
             }
             val status = connection.responseCode
-            if (status !in 200..299) throw ApiFailure(status, errorCode(connection))
+            if (status !in 200..299) throw failure(status, connection)
             return connection.inputStream.bufferedReader().use { reader -> reader.readText().ifBlank { "{}" }.let(::JSONObject) }
         } finally {
             connection.disconnect()
         }
     }
 
-    /** Reads at most 4 KiB of the error body for its code; the body itself is never kept or logged. */
-    private fun errorCode(connection: HttpsURLConnection): String? = try {
+    private fun failure(status: Int, connection: HttpsURLConnection): ApiFailure {
+        val body = readErrorBody(connection)
+        return ApiFailure(status, parseApiErrorCode(body), parseApiErrorCustomerId(body))
+    }
+
+    /** Reads at most 4 KiB of the error body; the body itself is never kept or logged. */
+    private fun readErrorBody(connection: HttpsURLConnection): String? = try {
         connection.errorStream?.bufferedReader()?.use { reader ->
             val buffer = CharArray(4096)
             val count = reader.read(buffer)
-            parseApiErrorCode(if (count > 0) String(buffer, 0, count) else null)
+            if (count > 0) String(buffer, 0, count) else null
         }
     } catch (_: Exception) {
         null

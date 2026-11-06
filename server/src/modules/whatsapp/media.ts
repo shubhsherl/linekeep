@@ -51,14 +51,21 @@ async function serve(env: Env, request: Request, id: string, allowed: (customerI
   if (!row.media_key && !(await storeInboundMedia(env, id))) throw new HTTPException(404, { message: "Media not found" });
   const stored = await createWhatsAppRepository(env.DB).mediaRow(id);
   if (!stored?.media_key) throw new HTTPException(404, { message: "Media not found" });
+  return serveStoredFile(env, request, { key: stored.media_key, mimeType: stored.media_mime, fileName: stored.media_name });
+}
+
+/** Streams a private-bucket file with the safe-serving headers (inline only for types a browser may show; byte ranges supported). */
+export async function serveStoredFile(
+  env: Env, request: Request, file: { key: string; mimeType: string | null; fileName: string | null },
+): Promise<Response> {
   const range = request.headers.get("Range");
-  const object = await env.RECORDINGS.get(stored.media_key, range ? { range: request.headers } : undefined);
+  const object = await env.RECORDINGS.get(file.key, range ? { range: request.headers } : undefined);
   if (!object) throw new HTTPException(404, { message: "Media not found" });
-  const declared = (stored.media_mime ?? object.httpMetadata?.contentType ?? "").split(";")[0].trim().toLowerCase();
+  const declared = (file.mimeType ?? object.httpMetadata?.contentType ?? "").split(";")[0].trim().toLowerCase();
   const inline = inlineTypes.has(declared);
   const headers = new Headers({
     "Content-Type": inline ? declared : "application/octet-stream",
-    "Content-Disposition": inline ? "inline" : `attachment; filename="${(stored.media_name ?? "file").replace(/[^\w.\- ]/g, "_").slice(0, 100)}"`,
+    "Content-Disposition": inline ? "inline" : `attachment; filename="${(file.fileName ?? "file").replace(/[^\w.\- ]/g, "_").slice(0, 100)}"`,
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'; sandbox",
     "Cross-Origin-Resource-Policy": "same-origin",

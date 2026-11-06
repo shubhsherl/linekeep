@@ -45,6 +45,8 @@ class CalltrackerApplication : Application() {
         private set
     internal lateinit var customers: CustomersRepository
         private set
+    internal lateinit var analytics: AnalyticsRepository
+        private set
     internal lateinit var push: PushRegistrar
         private set
 
@@ -53,6 +55,7 @@ class CalltrackerApplication : Application() {
         PushConfig.initialize(this)
         repository = EnrollmentRepository(this)
         customers = CustomersRepository(repository)
+        analytics = AnalyticsRepository(repository)
         push = PushRegistrar(this, repository)
         PushNotifications.ensureChannel(this)
         scope.launch { repository.restore() }

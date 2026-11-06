@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -45,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -212,17 +214,17 @@ private fun ImageThumbnail(message: WhatsAppMessage, media: MessageMedia, custom
 
 @Composable
 private fun FileRow(media: MessageMedia, onClick: () -> Unit) {
-    val (glyph, label) = when (media.kind) {
-        MediaKind.VIDEO -> "\uD83C\uDFAC" to "Video"
-        MediaKind.AUDIO -> "\uD83C\uDFA7" to "Audio"
-        else -> "\uD83D\uDCC4" to "Document"
+    val (icon, label) = when (media.kind) {
+        MediaKind.VIDEO -> R.drawable.ic_chat_video to "Video"
+        MediaKind.AUDIO -> R.drawable.ic_chat_document to "Audio"
+        else -> R.drawable.ic_chat_document to "Document"
     }
     Row(
         Modifier.width(240.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)).clickable(onClick = onClick).padding(10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(glyph, style = MaterialTheme.typography.headlineSmall)
+        Icon(painterResource(icon), contentDescription = null, modifier = Modifier.size(28.dp))
         Column(Modifier.weight(1f)) {
             Text(media.fileName ?: label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(listOfNotNull(label, media.size?.let(::formatSize)).joinToString(" · "), style = MaterialTheme.typography.labelSmall)
@@ -299,7 +301,7 @@ private fun ImageViewer(message: WhatsAppMessage, media: MessageMedia, customers
                         onClick = { (state as? ViewerState.Ready)?.let { controller.share(message, it.bytes) } },
                         enabled = state is ViewerState.Ready, colors = colors,
                     ) { Text("Share") }
-                    TextButton(onClick = close, colors = colors) { Text("Close") }
+                    IconAction(R.drawable.ic_close, "Close", close, tint = Color.White)
                 }
             }
         }

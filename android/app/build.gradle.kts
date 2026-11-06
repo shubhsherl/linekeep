@@ -67,8 +67,8 @@ android {
         applicationId = "com.microorganics.calltracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.0.5"
+        versionCode = 16
+        versionName = "1.1.0"
         buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
         buildConfigField("String", "FIREBASE_API_KEY", buildConfigString(firebaseApiKey))
         buildConfigField("String", "FIREBASE_APP_ID", buildConfigString(firebaseAppId))

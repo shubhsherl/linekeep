@@ -2,8 +2,11 @@ import { WhatsAppSendError, type WhatsAppConfig } from "./cloud";
 
 export interface TemplateButton { type: string; text: string }
 export interface TemplateVariable { key: string; example?: string }
+export type HeaderFormat = "NONE" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT";
 export interface WhatsAppTemplate {
   name: string; language: string; category: string;
+  /** What the header carries; media headers (IMAGE, VIDEO, DOCUMENT) need a file at send time. */
+  headerFormat: HeaderFormat;
   header?: string; body: string; footer?: string; buttons?: TemplateButton[];
   /** Body placeholders in order of appearance; `named` templates send the key as the parameter name. */
   variables: TemplateVariable[]; named: boolean;
@@ -47,8 +50,8 @@ export function normalizeTemplate(raw: RawTemplate): WhatsAppTemplate | null {
   let reason: string | undefined;
   if (components.some((component) => !["HEADER", "BODY", "FOOTER", "BUTTONS"].includes(component.type ?? ""))) {
     reason = "Carousel and other rich templates are not supported yet";
-  } else if (header && header.format !== "TEXT") {
-    reason = "Templates with an image, video or document header are not supported yet";
+  } else if (header && !["TEXT", "IMAGE", "VIDEO", "DOCUMENT"].includes(header.format ?? "")) {
+    reason = "Templates with a location or other special header are not supported yet";
   } else if (header?.text && /\{\{/.test(header.text)) {
     reason = "Templates with header variables are not supported yet";
   } else if (buttons?.buttons?.some((button) => !supportedButtons.has(button.type ?? "") || /\{\{/.test(button.url ?? ""))) {
@@ -57,9 +60,10 @@ export function normalizeTemplate(raw: RawTemplate): WhatsAppTemplate | null {
     reason = "Template has no text body";
   }
   const shown = (component: Component | undefined) => typeof component?.text === "string" && component.text ? component.text : undefined;
+  const headerFormat = (header ? header.format : "NONE") as HeaderFormat;
   return {
-    name: raw.name, language: raw.language, category: raw.category ?? "",
-    header: shown(header), body: bodyText, footer: shown(footer),
+    name: raw.name, language: raw.language, category: raw.category ?? "", headerFormat,
+    header: headerFormat === "TEXT" ? shown(header) : undefined, body: bodyText, footer: shown(footer),
     buttons: buttons?.buttons?.flatMap((button) => button.text ? [{ type: button.type ?? "", text: button.text }] : []),
     variables: variablesOf(bodyText, body), named: raw.parameter_format === "NAMED",
     sendable: reason === undefined, ...(reason ? { reason } : {}),

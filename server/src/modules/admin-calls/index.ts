@@ -41,7 +41,7 @@ const audioInput = z.strictObject({
   download: z.literal("1").optional(),
 });
 
-function queryValues(url: string, omitEmpty = false) {
+export function queryValues(url: string, omitEmpty = false) {
   const values: Record<string, string> = Object.create(null);
   for (const [key, value] of new URL(url).searchParams) {
     if (Object.hasOwn(values, key)) {
@@ -57,7 +57,7 @@ function queryValues(url: string, omitEmpty = false) {
   return values;
 }
 
-function encodeCursor(cursor: CallCursor): string {
+export function encodeCursor(cursor: CallCursor): string {
   const bytes = new TextEncoder().encode(JSON.stringify(cursor));
   return btoa(String.fromCharCode(...bytes))
     .replaceAll("+", "-")
@@ -65,7 +65,7 @@ function encodeCursor(cursor: CallCursor): string {
     .replace(/=+$/, "");
 }
 
-function decodeCursor(encoded: string): CallCursor {
+export function decodeCursor(encoded: string): CallCursor {
   try {
     if (!/^[A-Za-z0-9_-]+$/.test(encoded)) throw new Error();
     const bytes = Uint8Array.from(

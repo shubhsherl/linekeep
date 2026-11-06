@@ -1,7 +1,7 @@
 import { createCustomerRepository, type Customer } from "../../data/customers";
 import { createWhatsAppConfigRepository, ruleMatches, type AutoReply } from "../../data/whatsapp-config";
 import type { Env } from "../../env";
-import { sendToCustomer } from ".";
+import { sendToCustomer } from "./send";
 
 /** Customer messages older than this are redeliveries of old traffic and never trigger a reply. */
 const freshnessMs = 10 * 60_000;

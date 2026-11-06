@@ -26,7 +26,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -40,6 +44,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -68,6 +74,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -285,6 +292,7 @@ class SettingsActivity : ComponentActivity() {
                     },
                     inspectFolder = { app.scope.launch { app.repository.inspectRecordingFolder() } },
                     customers = app.customers,
+                    analytics = app.analytics,
                     scope = app.scope,
                     openRequest = openRequest,
                     consumeOpenRequest = { openRequest = null },
@@ -443,6 +451,7 @@ private fun LinekeepTheme(content: @Composable () -> Unit) {
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DeviceScreen(
     status: DeviceStatus,
@@ -463,13 +472,17 @@ private fun DeviceScreen(
     chooseFolder: () -> Unit,
     inspectFolder: () -> Unit,
     customers: CustomersRepository,
+    analytics: AnalyticsRepository,
     scope: CoroutineScope,
     openRequest: OpenRequest?,
     consumeOpenRequest: () -> Unit,
 ) {
-    var tab by rememberSaveable { mutableStateOf(0) }
+    var destinationIndex by rememberSaveable { mutableStateOf(MainDestination.CUSTOMERS.ordinal) }
+    var settingsIndex by rememberSaveable { mutableStateOf(SettingsSection.SETUP.ordinal) }
+    var analyticsIndex by rememberSaveable { mutableStateOf(AnalyticsSection.ANALYTICS.ordinal) }
+    val destination = MainDestination.fromIndex(destinationIndex)
     val unreadChats by customers.unreadChats.collectAsStateWithLifecycle()
-    // Totals refresh on app resume, whenever the Chats tab is shown (including coming back from a conversation).
+    // Totals refresh on app resume, whenever the WhatsApp destination is shown (including coming back from a conversation).
     LifecycleResumeEffect(Unit) {
         scope.launch { customers.refreshUnread() }
         onPauseOrDispose { }
@@ -478,12 +491,12 @@ private fun DeviceScreen(
     var conversationId by rememberSaveable { mutableStateOf<String?>(null) }
     var conversationName by remember { mutableStateOf("") }
     var conversationPhone by remember { mutableStateOf("") }
-    LaunchedEffect(tab, conversationId) { if (tab == 3 && conversationId == null) customers.refreshUnread() }
+    LaunchedEffect(destination, conversationId) { if (chatsVisible(destination) && conversationId == null) customers.refreshUnread() }
     // Foreground-only polling of the version marker: 5 s while a conversation is open, otherwise 15 s.
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(tab, conversationId, lifecycleOwner) {
+    LaunchedEffect(destination, conversationId, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            customers.runLiveUpdates(if (conversationId != null) 5_000L else 15_000L, chatsVisible = tab == 3)
+            customers.runLiveUpdates(if (conversationId != null) 5_000L else 15_000L, chatsVisible = chatsVisible(destination))
         }
     }
     val openConversation = { id: String, name: String, phone: String ->
@@ -491,15 +504,24 @@ private fun DeviceScreen(
         conversationPhone = phone
         conversationId = id
     }
-    // A notification tap opens that customer's conversation on the Chats tab (messages) or Customers tab (assignments).
+    // A notification tap opens that customer's conversation: messages land on WhatsApp, assignments on Customers.
     LaunchedEffect(openRequest) {
         openRequest?.let { request ->
-            tab = request.tab
+            destinationIndex = request.destination().ordinal
             openConversation(request.customerId, request.customerName, "")
             consumeOpenRequest()
         }
     }
-    Scaffold(containerColor = MaterialTheme.colorScheme.background) { insets ->
+    // The keyboard covers the bar anyway; hiding it keeps text fields from sitting above a blank gap.
+    val keyboardOpen = WindowInsets.isImeVisible
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        bottomBar = {
+            if (showsBottomBar(conversationId) && !keyboardOpen) {
+                MainNavigationBar(destination, unreadChats) { destinationIndex = it.ordinal }
+            }
+        },
+    ) { insets ->
         Column(
             Modifier.fillMaxSize().padding(insets).imePadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -516,7 +538,7 @@ private fun DeviceScreen(
                 )
             } else {
                 Row(
-                    Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                    Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -537,32 +559,63 @@ private fun DeviceScreen(
                         Text("Calls, kept together", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                TabRow(
-                    selectedTabIndex = tab,
-                    modifier = Modifier.widthIn(max = 640.dp),
-                    containerColor = MaterialTheme.colorScheme.background,
-                    contentColor = MaterialTheme.colorScheme.primary,
-                    divider = {},
-                ) {
-                    Tab(selected = tab == 0, onClick = { tab = 0 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Home") })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Advanced") })
-                    Tab(selected = tab == 2, onClick = { tab = 2 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Customers") })
-                    Tab(selected = tab == 3, onClick = { tab = 3 }, modifier = Modifier.heightIn(min = 48.dp), text = {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Chats")
-                            if (unreadChats > 0) UnreadBadge(unreadChats, "$unreadChats unread chats")
-                        }
-                    })
+                when (destination) {
+                    MainDestination.SETTINGS -> SectionTabs(SettingsSection.entries.map { it.label }, settingsIndex) { settingsIndex = it }
+                    MainDestination.ANALYTICS -> SectionTabs(AnalyticsSection.entries.map { it.label }, analyticsIndex) { analyticsIndex = it }
+                    else -> Unit
                 }
                 Box(Modifier.widthIn(max = 640.dp).weight(1f)) {
-                    when (tab) {
-                        0 -> HomeScreen(status, content, access, granting, setupFailure, grant, server, scanMessage, scan, enroll, sync, reset)
-                        1 -> AdvancedScreen(status, content, access, granting, server, scanMessage, scan, enroll, saveServer, settings, addTile, chooseFolder, inspectFolder)
-                        2 -> CustomersTab(customers, scope, openConversation)
-                        else -> ChatsTab(customers, scope, openConversation)
+                    when (destination) {
+                        MainDestination.CUSTOMERS -> CustomersTab(customers, scope, openConversation)
+                        MainDestination.CHATS -> ChatsTab(customers, scope, openConversation)
+                        MainDestination.ANALYTICS -> when (AnalyticsSection.fromIndex(analyticsIndex)) {
+                            AnalyticsSection.ANALYTICS -> AnalyticsTab(analytics, scope)
+                            AnalyticsSection.CALL_LOGS -> CallLogsTab(analytics, scope)
+                        }
+                        MainDestination.SETTINGS -> when (SettingsSection.fromIndex(settingsIndex)) {
+                            SettingsSection.SETUP -> SetupScreen(status, content, access, granting, setupFailure, grant, server, scanMessage, scan, enroll, sync, reset)
+                            SettingsSection.ADVANCED -> AdvancedScreen(status, content, access, granting, server, scanMessage, scan, enroll, saveServer, settings, addTile, chooseFolder, inspectFolder)
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MainNavigationBar(selected: MainDestination, unreadChats: Int, select: (MainDestination) -> Unit) {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+        MainDestination.entries.forEach { item ->
+            NavigationBarItem(
+                selected = item == selected,
+                onClick = { select(item) },
+                icon = {
+                    Box {
+                        Icon(painterResource(item.icon), contentDescription = null)
+                        if (item == MainDestination.CHATS && unreadChats > 0) {
+                            UnreadBadge(unreadChats, "$unreadChats unread chats", Modifier.align(Alignment.TopEnd).offset(x = 14.dp, y = (-8).dp))
+                        }
+                    }
+                },
+                label = { Text(item.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            )
+        }
+    }
+}
+
+/** The two-tab row under the header of the Analytics and Settings destinations. */
+@Composable
+private fun SectionTabs(labels: List<String>, selected: Int, select: (Int) -> Unit) {
+    TabRow(
+        selectedTabIndex = selected.coerceIn(0, labels.lastIndex),
+        modifier = Modifier.widthIn(max = 640.dp),
+        containerColor = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.primary,
+        divider = {},
+    ) {
+        labels.forEachIndexed { index, label ->
+            Tab(selected = selected == index, onClick = { select(index) }, modifier = Modifier.heightIn(min = 48.dp), text = { Text(label) })
         }
     }
 }
@@ -612,7 +665,7 @@ private fun readableTime(value: String?): String = remember(value) {
 }
 
 @Composable
-private fun HomeScreen(
+private fun SetupScreen(
     status: DeviceStatus,
     content: ContentSyncStatus,
     access: RequiredAccess,
@@ -884,7 +937,7 @@ private fun AdvancedScreen(
             ) { Text("Inspect folder") }
         }
         SectionCard("Sync diagnostics") {
-            SupportingText(if (content.setupAccepted) "Company sharing setup accepted." else "Sharing has not been accepted. Use Grant permissions on Home.")
+            SupportingText(if (content.setupAccepted) "Company sharing setup accepted." else "Sharing has not been accepted. Use Grant permissions on Setup.")
             SupportingText(if (access.notifications) "Status notifications are enabled." else "Status notifications are not enabled. Check app and notification-channel settings.")
             SupportingText(access.background.problem ?: "Unrestricted background activity is allowed.")
             SupportingText("New calls and readable recordings trigger sync when Android permits. Files must finish writing; network and background restrictions can delay uploads. Periodic checks provide a fallback.")

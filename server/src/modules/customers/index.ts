@@ -7,21 +7,27 @@ import type { AppBindings } from "../../app";
 import { callHistoryCursor } from "../../data/call-history";
 import {
   CustomerAssignmentError,
+  deviceCustomerCreateInput,
+  deviceCustomerUpdateInput,
+  normalizePhone,
   CustomerPhoneExistsError,
   createCustomerRepository,
   customerEmployeesInput,
-  whatsappSendInput,
   type CustomerCursor,
 } from "../../data/customers";
 import type { Env } from "../../env";
 import { defer } from "../../http/defer";
 import { notifyAssigned } from "../../push/notify";
+import { ApiError } from "../../http/errors";
 import { requireFeature } from "../../settings/gate";
 import { createWhatsAppReadRepository } from "../../data/whatsapp-reads";
 import { requireDevice, type DeviceBindings } from "../identity";
+import type { AttachmentOwner } from "../../data/whatsapp-attachments";
+import { whatsappSendInput } from "../../data/whatsapp-send";
 import {
-  listTemplates, sendToCustomer, whatsappCanSend, WhatsAppSendFailedError, WhatsAppTemplateRequiredError, WhatsAppUnavailableError,
-} from "../whatsapp";
+  sendToCustomer, whatsappCanSend, AttachmentNotFoundError, TemplateHeaderRequiredError, UnsupportedAttachmentError,
+  WhatsAppSendFailedError, WhatsAppUnavailableError, WhatsAppWindowClosedError,
+} from "../whatsapp/send";
 
 const customerId = z.string().min(1).max(256);
 const booleanFlag = z.enum(["true", "false"]).transform((value) => value === "true");
@@ -134,22 +140,34 @@ function errorBody(requestId: string, code: string, message: string) {
   return { requestId, error: { code, message } };
 }
 
-/** Shared by the admin and device routes; `employeeId` is the device's employee, or null for an administrator. */
-async function sendMessage<B extends AppBindings>(context: Context<B>, customerKey: string, employeeId: string | null) {
+/**
+ * Shared by the admin and device routes; `employeeId` is the device's employee, or null for an administrator.
+ * `owner` decides which staged attachments the sender may use.
+ */
+async function sendMessage<B extends AppBindings>(context: Context<B>, customerKey: string, employeeId: string | null, owner: AttachmentOwner) {
   const requestId = context.get("requestId");
   const scope = employeeId === null ? undefined : { employeeId };
   const found = await createCustomerRepository(context.env.DB).getCustomer(customerId.parse(customerKey), scope);
   if (!found) throw new HTTPException(404, { message: "Customer not found" });
   const input = whatsappSendInput.parse(await context.req.json());
   try {
-    const sent = await sendToCustomer(context.env as Env, found, input, employeeId);
+    const sent = await sendToCustomer(context.env as Env, found, input, employeeId, owner);
     return context.json({ requestId, message: sent }, 201);
   } catch (error) {
     if (error instanceof WhatsAppUnavailableError) {
       return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp sending is not configured"), 503);
     }
-    if (error instanceof WhatsAppTemplateRequiredError) {
-      return context.json(errorBody(requestId, "TEMPLATE_REQUIRED", "The customer has not written in the last 24 hours; send an approved template"), 409);
+    if (error instanceof WhatsAppWindowClosedError) {
+      return context.json(errorBody(requestId, "window_closed", "The customer has not written in the last 24 hours; send an approved template"), 409);
+    }
+    if (error instanceof TemplateHeaderRequiredError) {
+      return context.json(errorBody(requestId, "template_header_image_required", "This template needs a header file; choose one or set a default in Config"), 400);
+    }
+    if (error instanceof AttachmentNotFoundError) {
+      return context.json(errorBody(requestId, "attachment_not_found", "The attachment was not found; upload it again"), 404);
+    }
+    if (error instanceof UnsupportedAttachmentError) {
+      return context.json(errorBody(requestId, "unsupported_media_type", "WhatsApp cannot send this file in this place; images must be JPEG or PNG"), 400);
     }
     if (error instanceof WhatsAppSendFailedError) {
       return context.json(errorBody(requestId, "WHATSAPP_SEND_FAILED", "WhatsApp could not send the message"), 502);
@@ -243,23 +261,9 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
     return context.json({ ...pageBody(context.get("requestId"), page), items: page.items });
   });
   routes.post("/customers/:customerId/messages", (context) =>
-    sendMessage(context, context.req.param("customerId"), null));
+    sendMessage(context, context.req.param("customerId"), null, { type: "admin", id: context.get("adminId") ?? "local" }));
   routes.get("/whatsapp/status", (context) =>
     context.json({ requestId: context.get("requestId"), canSend: whatsappCanSend(context.env) }));
-  routes.get("/whatsapp/templates", async (context) => {
-    const requestId = context.get("requestId");
-    try {
-      return context.json({ requestId, items: await listTemplates(context.env as Env) });
-    } catch (error) {
-      if (error instanceof WhatsAppUnavailableError) {
-        return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp templates are not configured"), 503);
-      }
-      if (error instanceof WhatsAppSendFailedError) {
-        return context.json(errorBody(requestId, "WHATSAPP_SEND_FAILED", "WhatsApp templates could not be loaded"), 502);
-      }
-      throw error;
-    }
-  });
   routes.get("/whatsapp/version", async (context) =>
     context.json({ requestId: context.get("requestId"), version: await createWhatsAppReadRepository(context.env.DB).feedVersion() }));
   routes.get("/whatsapp/unread", async (context) =>
@@ -293,6 +297,63 @@ export function createDeviceCustomerRoutes() {
       await next();
     }, requireDevice, requireFeature(path.startsWith("/whatsapp") ? "whatsapp" : "customers"));
   }
+  // Registered before the generic `/customers/:customerId` read so `lookup` is not taken for an id.
+  routes.get("/customers/lookup", async (context) => {
+    const result = await createCustomerRepository(context.env.DB).lookupByPhone(
+      { phone: "", ...queryValues(context.req.url) }, { employeeId: context.get("device").employeeId },
+    );
+    return context.json({ requestId: context.get("requestId"), ...result });
+  });
+  routes.post("/customers", async (context) => {
+    const { employeeId } = context.get("device");
+    const repository = createCustomerRepository(context.env.DB);
+    const body = await context.req.json();
+    const { phone } = deviceCustomerCreateInput.parse(body);
+    // Another employee's customer is reported as a bare conflict; only the caller's own is identified.
+    const conflict = async () => {
+      const found = await repository.lookupByPhone({ phone: phone.phone }, { employeeId });
+      if (!found.exists) return null;
+      const requestId = context.get("requestId");
+      const existingId = found.customer?.id;
+      return context.json({
+        requestId,
+        error: { code: "customer_exists", message: "A customer with this phone number already exists", ...(existingId ? { customerId: existingId } : {}) },
+        ...(existingId ? { customerId: existingId } : {}),
+      }, 409);
+    };
+    const existing = await conflict();
+    if (existing) return existing;
+    try {
+      const created = await repository.createOwnCustomer(employeeId, body);
+      return context.json({ requestId: context.get("requestId"), customer: created }, 201);
+    } catch (error) {
+      // Lost a race with another creator of the same number.
+      if (error instanceof CustomerPhoneExistsError) {
+        const raced = await conflict();
+        if (raced) return raced;
+      }
+      throw error;
+    }
+  });
+  routes.patch("/customers/:customerId", async (context) => {
+    const { employeeId } = context.get("device");
+    const scope = { employeeId };
+    const repository = createCustomerRepository(context.env.DB);
+    const id = customerId.parse(context.req.param("customerId"));
+    const current = await repository.getCustomer(id, scope);
+    if (!current) throw new HTTPException(404, { message: "Customer not found" });
+    const { phone, ...changes } = deviceCustomerUpdateInput.parse(await context.req.json());
+    // The phone number identifies the customer; sending the stored number back is allowed, anything else is not.
+    if (phone !== undefined && normalizePhone(phone)?.phone !== current.phone) {
+      throw new ApiError(400, "phone_not_editable", "The phone number of a customer cannot be changed");
+    }
+    if (changes.name === undefined && changes.notes === undefined) {
+      return context.json({ requestId: context.get("requestId"), customer: current });
+    }
+    const updated = await repository.updateCustomer(id, changes, scope);
+    if (!updated) throw new HTTPException(404, { message: "Customer not found" });
+    return context.json({ requestId: context.get("requestId"), customer: updated });
+  });
   routes.route("/", customerReadRoutes<DeviceBindings>(
     (context) => ({ employeeId: context.get("device").employeeId }),
     (url) => deviceListQuery.parse(queryValues(url)),
@@ -322,6 +383,6 @@ export function createDeviceCustomerRoutes() {
     return context.json({ requestId: context.get("requestId"), customerId: id, unreadCount: 0 });
   });
   routes.post("/customers/:customerId/messages", (context) =>
-    sendMessage(context, context.req.param("customerId"), context.get("device").employeeId));
+    sendMessage(context, context.req.param("customerId"), context.get("device").employeeId, { type: "device", id: context.get("device").id }));
   return routes;
 }

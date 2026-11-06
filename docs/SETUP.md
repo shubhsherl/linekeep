@@ -109,7 +109,7 @@ Both are optional and can be added later by running `npm run setup` again (exist
 3. A system user token that never expires: Business Settings → Users → System users, assign the app and the WhatsApp account with full control, then generate a token with `whatsapp_business_management` and `whatsapp_business_messaging`.
 4. From the app: the **App ID** and **App secret** (App settings → Basic), and the **WABA ID** and **Phone number ID** (WhatsApp → API Setup).
 5. Before real customers can reach you: a Privacy policy URL, app icon and category on App settings → Basic, then switch the app to **Live mode**. Until it is Live, customers' messages reach the webhook only for people with a role on the app.
-6. Message templates approved in WhatsApp Manager (needed to start conversations), and a payment method on the WABA for paid template messages.
+6. Message templates approved in WhatsApp Manager (needed to start conversations), and a payment method on the WABA for paid template messages. Templates may have an image, video or document header: after approval, pick the default header file in the dashboard under **Config → WhatsApp Business → Template images**.
 
 **What setup asks for WhatsApp:** the access token (hidden), Phone number ID, WABA ID, App ID and App secret (hidden). Ids are 5-32 digits; the token and secret must be non-empty without spaces. The two secrets come from the `WHATSAPP_TOKEN` and `WHATSAPP_APP_SECRET` environment variables or the hidden prompts, **never from the answers file** (like `MAILGUN_API_KEY`); the ids can be in it:
 

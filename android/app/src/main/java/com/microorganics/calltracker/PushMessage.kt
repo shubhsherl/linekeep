@@ -97,10 +97,7 @@ internal fun shouldPostPush(push: PushNotification, appInForeground: Boolean, op
     !(push.type == PUSH_TYPE_MESSAGE && appInForeground && openConversationId == push.customerId)
 
 /** A request to show one customer's conversation, carried by a notification tap. */
-internal data class OpenRequest(val type: String, val customerId: String, val customerName: String) {
-    /** 0 Home, 1 Advanced, 2 Customers, 3 Chats (the tab order in the main screen). */
-    val tab: Int get() = if (type == PUSH_TYPE_ASSIGNED) 2 else 3
-}
+internal data class OpenRequest(val type: String, val customerId: String, val customerName: String)
 
 internal fun parseOpenRequest(type: String?, customerId: String?, customerName: String?): OpenRequest? {
     if (type != PUSH_TYPE_MESSAGE && type != PUSH_TYPE_ASSIGNED) return null

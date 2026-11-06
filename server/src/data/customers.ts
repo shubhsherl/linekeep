@@ -3,6 +3,7 @@ import { z } from "zod";
 import { adminCallDto, call, type AdminCall, type CallRow } from "./calls";
 import { callHistoryCursor, type CallHistoryItem } from "./call-history";
 import { type Clock, timestamp } from "./values";
+import { whatsappWindow, type WhatsAppWindow } from "../whatsapp/window";
 
 const boundedId = z.string().min(1).max(256);
 
@@ -66,21 +67,19 @@ export const customerUpdateInput = z.strictObject({
   country: optionalText(120).optional(),
 }).refine((value) => Object.values(value).some((field) => field !== undefined));
 export const customerEmployeesInput = z.strictObject({ employeeIds });
-export const whatsappSendInput = z.strictObject({
-  clientMessageId: z.uuid(),
-  text: z.string().min(1).max(4096).optional(),
-  // An approved template (with its variable values); the only way to start a conversation or to write after
-  // the customer's 24-hour window has closed.
-  template: z.strictObject({
-    name: z.string().regex(/^[a-z0-9_]{1,512}$/),
-    language: z.string().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).default("en_US"),
-    // Values for the body variables, in order. Meta rejects newlines and tabs inside a variable.
-    params: z.array(z.string().trim().min(1).max(1024).regex(/^[^\n\r\t]*$/)).max(20).default([]),
-  }).optional(),
-}).refine((value) => (value.text === undefined) !== (value.template === undefined), {
-  message: "Send either text or a template",
+/** What an employee may enter when adding a customer from the app: the customer is always assigned to them. */
+export const deviceCustomerCreateInput = z.strictObject({
+  name,
+  phone: phoneInput,
+  notes: optionalText(4000).optional(),
 });
-
+/** The phone is accepted only to be compared with the stored one; employees cannot change it. */
+export const deviceCustomerUpdateInput = z.strictObject({
+  name: name.optional(),
+  notes: optionalText(4000).optional(),
+  phone: z.string().min(1).max(64).optional(),
+}).refine((value) => Object.values(value).some((field) => field !== undefined));
+export const customerLookupInput = z.strictObject({ phone: phoneInput });
 const limit = z.number().int().min(1).max(100).default(50);
 const search = z.string().trim().min(1).max(200);
 const pageInput = z.strictObject({ cursor: callHistoryCursor.optional(), limit });
@@ -119,6 +118,10 @@ export interface Customer {
   lastMessageAt?: string;
   lastCallAt?: string;
   createdAt: string;
+  /** The employee who added the customer from the app; absent for customers an administrator created or imported. */
+  createdBy?: { id: string; name: string };
+  /** Whether free-form messages may be sent now (the customer wrote within the last 24 hours). */
+  whatsappWindow: WhatsAppWindow;
   updatedAt: string;
 }
 export interface WhatsAppMessage {
@@ -145,6 +148,7 @@ export interface ChatSummary {
   messageCount: number;
   /** Customer messages this viewer has not read yet (their own marker, never another viewer's). */
   unreadCount: number;
+  whatsappWindow: WhatsAppWindow;
 }
 export interface CustomerPage<T> { items: T[]; nextCursor: CustomerCursor | null }
 
@@ -156,7 +160,7 @@ type CustomerRow = {
   id: string; name: string; phone: string; email: string | null; notes: string | null;
   source: string | null; district: string | null; state: string | null; country: string;
   created_at: string; updated_at: string; message_count: number;
-  last_message_at: string | null; last_call_at: string | null; employees: string;
+  last_message_at: string | null; last_call_at: string | null; employees: string; created_by: string | null; last_inbound_at: string | null;
 };
 export type MessageRow = {
   id: string; customer_id: string; direction: WhatsAppMessage["direction"]; message_type: string;
@@ -169,6 +173,7 @@ export type MessageRow = {
 type ChatRow = {
   id: string; name: string; phone: string; direction: WhatsAppMessage["direction"];
   message_type: string; text: string; sent_at: string; status: WhatsAppMessage["status"]; message_count: number; employees: string; unread_count: number;
+  last_inbound_at: string | null;
 };
 type CallFeedRow = CallRow & {
   feed_id: string; feed_device_id: string; feed_employee_id: string; employee_name: string;
@@ -187,7 +192,9 @@ const customerSelect = `SELECT c.id, c.name, c.phone, c.email, c.notes, c.source
     ORDER BY m.sent_at DESC, m.id DESC LIMIT 1) AS last_message_at,
   (SELECT h.started_at FROM call_logs h WHERE h.phone_key = c.phone_key AND h.deleted_at IS NULL
     ORDER BY h.started_at DESC, h.id DESC LIMIT 1) AS last_call_at,
-  ${employeesJson} AS employees
+  ${employeesJson} AS employees,
+  (SELECT json_object('id', x.id, 'name', x.name) FROM employees x WHERE x.id = c.created_by_employee_id) AS created_by,
+  (SELECT max(i.sent_at) FROM whatsapp_messages i WHERE i.customer_id = c.id AND i.direction = 'in') AS last_inbound_at
   FROM customers c`;
 const assigned = (binding: string) =>
   `EXISTS (SELECT 1 FROM customer_employees s WHERE s.customer_id = c.id AND s.employee_id = ${binding})`;
@@ -209,14 +216,23 @@ function customer(row: CustomerRow): Customer {
     lastCallAt: row.last_call_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    createdBy: row.created_by ? JSON.parse(row.created_by) as { id: string; name: string } : undefined,
+    whatsappWindow: whatsappWindow(row.last_inbound_at),
   };
 }
 
 const mediaKinds = new Set(["image", "video", "audio", "document", "sticker"]);
 
+/** A template message stores its header file as media; the kind follows from the file type. */
+function templateHeaderKind(mimeType: string | null): string | undefined {
+  return mimeType?.startsWith("image/") ? "image" : mimeType?.startsWith("video/") ? "video" : mimeType ? "document" : undefined;
+}
+
 export function message(row: MessageRow, apiBase = "/v1/admin"): WhatsAppMessage {
-  const media = (row.media_key || row.media_id) && mediaKinds.has(row.message_type)
-    ? { kind: row.message_type as NonNullable<WhatsAppMessage["media"]>["kind"], mimeType: row.media_mime ?? undefined,
+  const mediaKind = mediaKinds.has(row.message_type) ? row.message_type
+    : row.message_type === "template" ? templateHeaderKind(row.media_mime) : undefined;
+  const media = (row.media_key || row.media_id) && mediaKind
+    ? { kind: mediaKind as NonNullable<WhatsAppMessage["media"]>["kind"], mimeType: row.media_mime ?? undefined,
       fileName: row.media_name ?? undefined, size: row.media_size ?? undefined, url: `${apiBase}/whatsapp/messages/${row.id}/media` }
     : undefined;
   return {
@@ -294,6 +310,28 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
     if (rows.results.length !== ids.length) throw new CustomerAssignmentError();
   }
 
+  /** Shared by the administrator and employee creation paths; the unique index is the final arbiter of the phone. */
+  async function insert(
+    value: z.output<typeof customerCreateInput>, ids: string[], createdBy: string | null,
+  ): Promise<Customer> {
+    await assertAssignable(null, ids);
+    const customerId = `cus_${crypto.randomUUID()}`;
+    const now = timestamp(clock);
+    await guardUnique(() => db.batch([
+      db.prepare(
+        `INSERT INTO customers (id, name, phone, phone_key, email, notes, source, district,
+          state, country, created_at, updated_at, created_by_employee_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'India'), ?, ?, ?)`,
+      ).bind(customerId, value.name, value.phone.phone, value.phone.phoneKey,
+        value.email ?? null, value.notes ?? null, value.source ?? null,
+        value.district ?? null, value.state ?? null, value.country ?? null, now, now, createdBy),
+      ...ids.map((employeeId) => assignStatement(customerId, employeeId, now)),
+    ]));
+    const created = await find(customerId);
+    if (!created) throw new Error("Customer write returned no row");
+    return created;
+  }
+
   const assignStatement = (customerId: string, employeeId: string, now: string) => db.prepare(
     `INSERT INTO customer_employees (customer_id, employee_id, assigned_at)
       SELECT ?, e.id, ? FROM employees e WHERE e.id = ? AND (e.active = 1 OR EXISTS (
@@ -316,23 +354,30 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
   return {
     async createCustomer(input: z.input<typeof customerCreateInput>): Promise<Customer> {
       const value = customerCreateInput.parse(input);
-      const ids = [...new Set(value.employeeIds ?? [])];
-      await assertAssignable(null, ids);
-      const customerId = `cus_${crypto.randomUUID()}`;
-      const now = timestamp(clock);
-      await guardUnique(() => db.batch([
-        db.prepare(
-          `INSERT INTO customers (id, name, phone, phone_key, email, notes, source, district,
-            state, country, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'India'), ?, ?)`,
-        ).bind(customerId, value.name, value.phone.phone, value.phone.phoneKey,
-          value.email ?? null, value.notes ?? null, value.source ?? null,
-          value.district ?? null, value.state ?? null, value.country ?? null, now, now),
-        ...ids.map((employeeId) => assignStatement(customerId, employeeId, now)),
-      ]));
-      const created = await find(customerId);
-      if (!created) throw new Error("Customer write returned no row");
-      return created;
+      return insert(value, [...new Set(value.employeeIds ?? [])], null);
+    },
+
+    /** An employee adding a customer from the app: assigned to them alone, source "App", created-by recorded. */
+    async createOwnCustomer(employeeId: string, input: z.input<typeof deviceCustomerCreateInput>): Promise<Customer> {
+      const value = deviceCustomerCreateInput.parse(input);
+      return insert({ ...value, source: "App" }, [boundedId.parse(employeeId)], employeeId);
+    },
+
+    /**
+     * Whether a live customer already has this phone number (the same key the unique index uses), and
+     * whether it is this employee's. Names of customers that belong to someone else are never read.
+     */
+    async lookupByPhone(
+      input: z.input<typeof customerLookupInput>, scope: CustomerScope,
+    ): Promise<{ phone: string; exists: boolean; mine: boolean; customer?: { id: string; name: string } }> {
+      const { phone } = customerLookupInput.parse(input);
+      const row = await db.prepare(
+        `SELECT c.id, c.name, ${assigned("?")} AS mine FROM customers c
+          WHERE c.phone_key = ? AND c.archived_at IS NULL`,
+      ).bind(boundedId.parse(scope.employeeId), phone.phoneKey).first<{ id: string; name: string; mine: number }>();
+      if (!row) return { phone: phone.phone, exists: false, mine: false };
+      if (!row.mine) return { phone: phone.phone, exists: true, mine: false };
+      return { phone: phone.phone, exists: true, mine: true, customer: { id: row.id, name: row.name } };
     },
 
     getCustomer: find,
@@ -389,7 +434,7 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
 
     /** Returns null for an unknown or archived customer. */
     async updateCustomer(
-      customerId: string, input: z.input<typeof customerUpdateInput>,
+      customerId: string, input: z.input<typeof customerUpdateInput>, scope?: CustomerScope,
     ): Promise<Customer | null> {
       const value = customerUpdateInput.parse(input);
       const sets: string[] = [];
@@ -415,10 +460,11 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
         bindings.push(value.country);
       }
       const updated = await guardUnique(() => db.prepare(
-        `UPDATE customers SET ${sets.join(", ")}, updated_at = ?
-          WHERE id = ? AND archived_at IS NULL RETURNING id`,
-      ).bind(...bindings, timestamp(clock), boundedId.parse(customerId)).first<{ id: string }>());
-      return updated ? find(customerId) : null;
+        `UPDATE customers AS c SET ${sets.join(", ")}, updated_at = ?
+          WHERE c.id = ? AND c.archived_at IS NULL ${scope ? `AND ${assigned("?")}` : ""} RETURNING id`,
+      ).bind(...bindings, timestamp(clock), boundedId.parse(customerId), ...(scope ? [scope.employeeId] : []))
+        .first<{ id: string }>());
+      return updated ? find(customerId, scope) : null;
     },
 
     /** Replaces the handler set. Returns null for an unknown or archived customer. */
@@ -557,6 +603,7 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
           (SELECT count(*) FROM whatsapp_messages u WHERE u.customer_id = c.id AND u.direction = 'in'
             AND u.sent_at > COALESCE((SELECT r.last_read_at FROM whatsapp_chat_reads r
               WHERE r.viewer_type = ? AND r.viewer_id = ? AND r.customer_id = c.id), ?)) AS unread_count
+          , (SELECT max(i.sent_at) FROM whatsapp_messages i WHERE i.customer_id = c.id AND i.direction = 'in') AS last_inbound_at
         FROM customers c JOIN whatsapp_messages m ON m.id = (
           SELECT l.id FROM whatsapp_messages l WHERE l.customer_id = c.id
           ORDER BY l.sent_at DESC, l.id DESC LIMIT 1)
@@ -573,6 +620,7 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
             sentAt: row.sent_at, status: row.status,
           },
           messageCount: row.message_count, unreadCount: row.unread_count,
+          whatsappWindow: whatsappWindow(row.last_inbound_at),
         } satisfies ChatSummary,
       }));
       const result = paged(chats, value.limit, (item) => item.cursor);

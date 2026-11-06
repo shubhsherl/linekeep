@@ -23,6 +23,8 @@ internal data class Customer(
     val messageCount: Int = 0,
     val lastMessageAt: Long? = null,
     val lastCallAt: Long? = null,
+    /** Null when the server did not say; see [isReplyWindowOpen]. */
+    val whatsappWindow: WhatsAppWindow? = null,
 )
 
 internal enum class MessageDirection { IN, OUT }
@@ -105,6 +107,7 @@ internal fun parseCustomer(json: JSONObject): Customer? {
         employees = json.employees("employees"),
         messageCount = json.optInt("messageCount", 0),
         lastMessageAt = json.optionalTime("lastMessageAt"), lastCallAt = json.optionalTime("lastCallAt"),
+        whatsappWindow = parseWindow(json.optJSONObject("whatsappWindow")),
     )
 }
 
@@ -177,4 +180,13 @@ internal fun parseCanSend(json: JSONObject): Boolean = json.optBoolean("canSend"
 internal fun parseApiErrorCode(body: String?): String? {
     if (body.isNullOrBlank()) return null
     return try { JSONObject(body).optJSONObject("error")?.optionalString("code") } catch (_: Exception) { null }
+}
+
+/** The `customerId` an error body may carry (inside `error` or at the top level), e.g. for a duplicate of the caller's own customer. */
+internal fun parseApiErrorCustomerId(body: String?): String? {
+    if (body.isNullOrBlank()) return null
+    return try {
+        val json = JSONObject(body)
+        json.optJSONObject("error")?.optionalString("customerId") ?: json.optionalString("customerId")
+    } catch (_: Exception) { null }
 }

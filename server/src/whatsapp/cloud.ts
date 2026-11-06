@@ -21,25 +21,52 @@ export class WhatsAppSendError extends Error {
   }
 }
 
+/** Meta's "more than 24 hours have passed since the customer last replied" error. */
+export const REENGAGEMENT_ERROR_CODE = 131047;
+
+export type MediaKind = "image" | "video" | "document";
+/** A file already uploaded to Meta; `fileName` is only used for documents. */
+export interface CloudMedia { kind: MediaKind; mediaId: string; fileName?: string }
+
 export type OutboundContent =
   | { type: "text"; text: string }
-  | { type: "template"; name: string; language: string; params: { key: string; named: boolean; value: string }[] };
+  | { type: "media"; media: CloudMedia; caption?: string }
+  | {
+    type: "template"; name: string; language: string; params: { key: string; named: boolean; value: string }[];
+    /** Image, video or document shown above the body of a template that has a media header. */
+    header?: CloudMedia;
+  };
+
+const mediaObject = (media: CloudMedia, caption?: string) => ({
+  id: media.mediaId,
+  ...(caption ? { caption } : {}),
+  ...(media.kind === "document" && media.fileName ? { filename: media.fileName } : {}),
+});
+
+function messageBody(content: OutboundContent) {
+  switch (content.type) {
+    case "text": return { type: "text", text: { body: content.text, preview_url: false } };
+    case "media": return { type: content.media.kind, [content.media.kind]: mediaObject(content.media, content.caption) };
+    case "template": {
+      const components: object[] = [];
+      if (content.header) {
+        components.push({ type: "header", parameters: [{ type: content.header.kind, [content.header.kind]: mediaObject(content.header) }] });
+      }
+      if (content.params.length > 0) {
+        components.push({ type: "body", parameters: content.params.map((param) => ({
+          type: "text", text: param.value, ...(param.named ? { parameter_name: param.key } : {}),
+        })) });
+      }
+      return { type: "template", template: {
+        name: content.name, language: { code: content.language }, ...(components.length > 0 ? { components } : {}),
+      } };
+    }
+  }
+}
 
 /** Sends one message and returns Meta's message id. `to` is digits only, with country code. */
 export async function sendCloudMessage(config: WhatsAppConfig, to: string, content: OutboundContent): Promise<string> {
-  const body = {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to,
-    ...(content.type === "text"
-      ? { type: "text", text: { body: content.text, preview_url: false } }
-      : { type: "template", template: {
-        name: content.name, language: { code: content.language },
-        ...(content.params.length > 0 ? { components: [{ type: "body", parameters: content.params.map((param) => ({
-          type: "text", text: param.value, ...(param.named ? { parameter_name: param.key } : {}),
-        })) }] } : {}),
-      } }),
-  };
+  const body = { messaging_product: "whatsapp", recipient_type: "individual", to, ...messageBody(content) };
   let response: Response;
   try {
     response = await fetch(`https://graph.facebook.com/${config.version}/${config.phoneNumberId}/messages`, {
@@ -55,6 +82,26 @@ export async function sendCloudMessage(config: WhatsAppConfig, to: string, conte
     { messages?: { id?: unknown }[]; error?: { code?: unknown } } | null;
   const id = parsed?.messages?.[0]?.id;
   if (response.ok && typeof id === "string" && id.length > 0 && id.length <= 256) return id;
+  const code = typeof parsed?.error?.code === "number" ? parsed.error.code : null;
+  throw new WhatsAppSendError(response.status, code, response.status >= 500 || response.status === 429);
+}
+
+/** Uploads a file to Meta (`POST /{phone-number-id}/media`) and returns its media id, valid for about 30 days. */
+export async function uploadCloudMedia(config: WhatsAppConfig, file: { bytes: ArrayBuffer; mimeType: string; fileName: string }): Promise<string> {
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", file.mimeType);
+  form.append("file", new Blob([file.bytes], { type: file.mimeType }), file.fileName);
+  let response: Response;
+  try {
+    response = await fetch(`https://graph.facebook.com/${config.version}/${config.phoneNumberId}/media`, {
+      method: "POST", headers: { Authorization: `Bearer ${config.token}` }, body: form, signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    throw new WhatsAppSendError(0, null, true);
+  }
+  const parsed = await response.json().catch(() => null) as { id?: unknown; error?: { code?: unknown } } | null;
+  if (response.ok && typeof parsed?.id === "string" && /^\d{5,40}$/.test(parsed.id)) return parsed.id;
   const code = typeof parsed?.error?.code === "number" ? parsed.error.code : null;
   throw new WhatsAppSendError(response.status, code, response.status >= 500 || response.status === 429);
 }

@@ -29,7 +29,7 @@ const errors = {
 
 /** An error with its own stable code and a message safe to show an administrator (never values or secrets). */
 export class ApiError extends Error {
-  constructor(readonly status: 400 | 404 | 409 | 502 | 503, readonly code: string, message: string) {
+  constructor(readonly status: 400 | 404 | 409 | 413 | 429 | 502 | 503, readonly code: string, message: string) {
     super(message);
   }
 }

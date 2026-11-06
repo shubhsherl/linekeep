@@ -144,7 +144,7 @@ test("text is refused until the customer has written in the last 24 hours; a tem
   const send = (body) => f.admin("POST", `/v1/admin/customers/${f.customer.id}/messages`, body);
   const refused = await send({ clientMessageId: crypto.randomUUID(), text: "hello" });
   assert.equal(refused.status, 409);
-  assert.equal((await refused.json()).error.code, "TEMPLATE_REQUIRED");
+  assert.equal((await refused.json()).error.code, "window_closed");
   assert.equal(calls.length, 0);
   assert.equal((await f.messages()).length, 0);
 
@@ -226,14 +226,16 @@ test("the picker lists approved templates with variables and flags those that ca
   stubGraph(t, () => ok("wamid.X"));
   const list = (await (await f.admin("GET", "/v1/admin/whatsapp/templates")).json()).items;
   // Sendable templates come first so the picker leads with what can be used.
-  assert.deepEqual(list.map((x) => x.name), ["hello_world", "named_greeting", "order_update", "a_carousel", "with_image"]);
-  assert.deepEqual(list.map((x) => x.sendable), [true, true, true, false, false]);
+  assert.deepEqual(list.map((x) => x.name), ["hello_world", "named_greeting", "order_update", "with_image", "a_carousel"]);
+  assert.deepEqual(list.map((x) => x.sendable), [true, true, true, true, false]);
   const order = list.find((x) => x.name === "order_update");
   assert.deepEqual(order.variables, [{ key: "1", example: "Asha" }, { key: "2", example: "A-17" }]);
   assert.equal(order.sendable, true);
   const image = list.find((x) => x.name === "with_image");
-  assert.equal(image.sendable, false);
-  assert.match(image.reason, /header/);
+  assert.deepEqual([image.sendable, image.headerFormat, image.headerImageConfigured], [true, "IMAGE", false]);
+  assert.equal(list.find((x) => x.name === "hello_world").headerFormat, "TEXT");
+  assert.equal(list.find((x) => x.name === "order_update").headerFormat, "NONE");
+  assert.match(list.find((x) => x.name === "a_carousel").reason, /Carousel/);
   const off = await fixture(t, { ...whatsapp, WHATSAPP_WABA_ID: undefined });
   assert.equal((await off.admin("GET", "/v1/admin/whatsapp/templates")).status, 503);
 });

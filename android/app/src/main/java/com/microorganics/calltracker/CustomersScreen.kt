@@ -2,7 +2,7 @@ package com.microorganics.calltracker
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,6 +26,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -55,6 +59,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.withStarted
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -62,15 +67,13 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 
-private const val NOT_SET_UP = "Sending WhatsApp messages from this app is not set up yet. Ask your manager."
 private const val SEARCH_DELAY_MS = 350L
 
 private val listTimeFormat = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault())
-private val bubbleTimeFormat = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT, FormatStyle.SHORT).withZone(ZoneId.systemDefault())
 
-private fun formatTime(format: DateTimeFormatter, millis: Long?): String? = millis?.let { format.format(Instant.ofEpochMilli(it)) }
+internal fun formatTime(format: DateTimeFormatter, millis: Long?): String? = millis?.let { format.format(Instant.ofEpochMilli(it)) }
 
-private fun statusLabel(status: String): String = when (status) {
+internal fun statusLabel(status: String): String = when (status) {
     "queued" -> "Queued"
     "sent" -> "Sent"
     "delivered" -> "Delivered"
@@ -80,7 +83,7 @@ private fun statusLabel(status: String): String = when (status) {
 }
 
 /** Describes what a message is when it has no text, for list previews and bubbles without attachments. */
-private fun typeLabel(type: String, templateName: String? = null): String? = when (type) {
+internal fun typeLabel(type: String, templateName: String? = null): String? = when (type) {
     "text" -> null
     "image" -> "Photo"
     "document" -> "Document"
@@ -105,19 +108,20 @@ private fun ListSurface(onClick: () -> Unit, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SearchField(value: String, label: String, onChange: (String) -> Unit) {
+private fun SearchField(value: String, label: String, modifier: Modifier = Modifier, onChange: (String) -> Unit) {
     OutlinedTextField(
         value = value,
         onValueChange = { onChange(it.take(100)) },
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        modifier = modifier.fillMaxWidth(),
         label = { Text(label) },
         singleLine = true,
-        trailingIcon = if (value.isNotEmpty()) ({ TextButton(onClick = { onChange("") }) { Text("Clear") } }) else null,
+        leadingIcon = { Icon(painterResource(R.drawable.ic_search), contentDescription = null, modifier = Modifier.size(20.dp)) },
+        trailingIcon = if (value.isNotEmpty()) ({ IconAction(R.drawable.ic_close, "Clear search", { onChange("") }) }) else null,
     )
 }
 
 @Composable
-private fun Centered(content: @Composable () -> Unit) {
+internal fun Centered(content: @Composable () -> Unit) {
     Column(
         Modifier.fillMaxWidth().padding(vertical = 48.dp, horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -126,7 +130,7 @@ private fun Centered(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun ErrorNotice(message: String, retry: () -> Unit) {
+internal fun ErrorNotice(message: String, retry: () -> Unit) {
     Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer)
@@ -184,18 +188,40 @@ private fun <T> PagedColumn(
 @Composable
 internal fun CustomersTab(customers: CustomersRepository, scope: CoroutineScope, open: (id: String, name: String, phone: String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
+    var adding by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
     val state by customers.customers.state.collectAsStateWithLifecycle()
+    // A list that failed because the phone was not enrolled yet reloads as soon as it is.
+    val connected by customers.connection.collectAsStateWithLifecycle(initialValue = null)
+    LaunchedEffect(connected) { if (connected != null) customers.onConnected() }
     // Loads on first open and re-queries after typing pauses; later visits reuse what is in memory.
     LaunchedEffect(query) {
         if (query.isNotEmpty()) delay(SEARCH_DELAY_MS)
         scope.launch { customers.openCustomers(query) }
     }
+    if (adding) {
+        BackHandler { adding = false }
+        AddCustomerScreen(customers, scope, onBack = { adding = false }) { id, name, phone, message ->
+            // The form reports from the repository's IO scope; toasts and navigation need the main thread.
+            scope.launch(Dispatchers.Main) {
+                adding = false
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                open(id, name, phone)
+            }
+        }
+        return
+    }
     Column(Modifier.fillMaxSize()) {
-        Box(Modifier.padding(top = 12.dp)) { SearchField(query, "Search name, phone or email") { query = it } }
+        Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            SearchField(query, "Search name, phone or email", Modifier.weight(1f)) { query = it }
+            FilledTonalIconButton(onClick = { adding = true }, modifier = Modifier.size(48.dp)) {
+                Icon(painterResource(R.drawable.ic_chat_add), contentDescription = "Add customer", modifier = Modifier.size(24.dp))
+            }
+        }
         Box(Modifier.weight(1f)) {
             PagedColumn(
                 state = state,
-                emptyText = if (state.query.isEmpty()) "No customers are assigned to you yet." else "No customers match this search.",
+                emptyText = if (state.query.isEmpty()) "No customers are assigned to you yet. Use + to add one." else "No customers match this search.",
                 rowKey = { it.id },
                 refresh = { scope.launch { customers.customers.refresh() } },
                 loadMore = { scope.launch { customers.customers.loadMore() } },
@@ -222,12 +248,14 @@ private fun CustomerRow(customer: Customer, onClick: () -> Unit) {
 internal fun ChatsTab(customers: CustomersRepository, scope: CoroutineScope, open: (id: String, name: String, phone: String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     val state by customers.chats.state.collectAsStateWithLifecycle()
+    val connected by customers.connection.collectAsStateWithLifecycle(initialValue = null)
+    LaunchedEffect(connected) { if (connected != null) customers.onConnected() }
     LaunchedEffect(query) {
         if (query.isNotEmpty()) delay(SEARCH_DELAY_MS)
         scope.launch { customers.openChats(query) }
     }
     Column(Modifier.fillMaxSize()) {
-        Box(Modifier.padding(top = 12.dp)) { SearchField(query, "Search chats") { query = it } }
+        Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) { SearchField(query, "Search chats") { query = it } }
         Box(Modifier.weight(1f)) {
             PagedColumn(
                 state = state,
@@ -276,216 +304,5 @@ private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
             if (unread) UnreadBadge(chat.unreadCount, "${chat.unreadCount} unread messages")
         }
         SupportingText(chat.customerPhone)
-    }
-}
-
-@Composable
-internal fun ConversationScreen(
-    customers: CustomersRepository,
-    scope: CoroutineScope,
-    customerId: String,
-    hintName: String,
-    hintPhone: String,
-    close: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val context = LocalContext.current
-    val thread by customers.messages.state.collectAsStateWithLifecycle()
-    val customer by customers.selectedCustomer.collectAsStateWithLifecycle()
-    val availability by customers.availability.collectAsStateWithLifecycle()
-    val sending by customers.sending.collectAsStateWithLifecycle()
-    var detailsOpen by rememberSaveable { mutableStateOf(false) }
-    var draft by rememberSaveable(customerId) { mutableStateOf("") }
-    var sendNotice by remember(customerId) { mutableStateOf<String?>(null) }
-    BackHandler(onBack = close)
-    LaunchedEffect(customerId) { scope.launch { customers.openConversation(customerId, null) } }
-    // Once per open after the messages load, and again when a newer incoming message arrives while the screen is shown.
-    val media = rememberMediaController(customers, scope)
-    MediaDialogs(media, customers)
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val newestIncomingId = thread.items.firstOrNull { it.direction == MessageDirection.IN }?.id
-    LaunchedEffect(customerId, thread.loaded, newestIncomingId) {
-        if (thread.loaded && newestIncomingId != null) {
-            lifecycle.withStarted { }
-            customers.markConversationRead(customerId)
-        }
-    }
-    val name = customer?.name ?: hintName.ifEmpty { "Conversation" }
-    val phone = customer?.phone ?: hintPhone
-
-    Column(modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = close) { Text("Back") }
-            Column(Modifier.weight(1f)) {
-                Text(name, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (phone.isNotEmpty()) SupportingText(phone)
-            }
-            TextButton(onClick = { detailsOpen = !detailsOpen }) { Text(if (detailsOpen) "Hide details" else "Details") }
-            TextButton(onClick = { scope.launch { customers.refreshConversation() } }) { Text("Refresh") }
-        }
-        if (detailsOpen) {
-            Column(
-                Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                CustomerFacts(customer, phone) {
-                    try {
-                        context.startActivity(Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", phone, null)))
-                    } catch (_: ActivityNotFoundException) {
-                        sendNotice = "No phone app is available to dial."
-                    }
-                }
-            }
-        }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            MessageThread(thread, customers, media, { scope.launch { customers.refreshConversation() } }, { scope.launch { customers.messages.loadMore() } })
-        }
-        Composer(
-            availability = availability,
-            sending = sending,
-            draft = draft,
-            notice = sendNotice,
-            onDraft = { draft = it.take(MAX_MESSAGE_CHARACTERS); sendNotice = null },
-            recheck = { scope.launch { customers.checkAvailability() } },
-            send = {
-                sendNotice = null
-                val text = draft
-                scope.launch {
-                    when (val outcome = customers.send(text)) {
-                        SendOutcome.Sent -> { if (draft == text) draft = "" }
-                        SendOutcome.NotConfigured -> sendNotice = NOT_SET_UP
-                        is SendOutcome.Failed -> sendNotice = outcome.message
-                    }
-                }
-            },
-        )
-    }
-}
-
-@Composable
-private fun CustomerFacts(customer: Customer?, phone: String, dial: () -> Unit) {
-    if (customer == null) {
-        SupportingText("Loading customer details…")
-        return
-    }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Column(Modifier.weight(1f)) { DetailField("Phone", phone) }
-        OutlinedButton(onClick = dial) { Text("Dial") }
-    }
-    customer.email?.let { DetailField("Email", it) }
-    customer.notes?.let { DetailField("Notes", it) }
-    customer.source?.let { DetailField("Source", it) }
-    customer.district?.let { DetailField("District", it) }
-    customer.state?.let { DetailField("State", it) }
-    customer.country?.let { DetailField("Country", it) }
-    if (customer.employees.isNotEmpty()) {
-        DetailField("Handled by", customer.employees.joinToString(", ") { it.name.ifEmpty { "Employee" } })
-    }
-}
-
-@Composable
-private fun MessageThread(thread: PagedState<WhatsAppMessage>, customers: CustomersRepository, media: MediaController, refresh: () -> Unit, loadEarlier: () -> Unit) {
-    when {
-        thread.items.isEmpty() -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-            Centered {
-                when {
-                    thread.error != null -> {
-                        Text(thread.error, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                        OutlinedButton(onClick = refresh) { Text("Try again") }
-                    }
-                    !thread.loaded -> CircularProgressIndicator()
-                    else -> SupportingText("No WhatsApp messages with this customer yet.")
-                }
-            }
-        }
-        // Newest first with a reversed layout: the latest message sits at the bottom and older ones are above.
-        else -> LazyColumn(
-            Modifier.fillMaxSize(),
-            reverseLayout = true,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (thread.error != null) item("error") { ErrorNotice(thread.error, refresh) }
-            items(thread.items, key = { it.id }) { MessageBubble(it, customers, media) }
-            if (thread.nextCursor != null) {
-                item("earlier") {
-                    LaunchedEffect(thread.nextCursor, thread.items.size) { loadEarlier() }
-                    Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
-                        if (thread.loadingMore) CircularProgressIndicator() else OutlinedButton(onClick = loadEarlier) { Text("Load earlier messages") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MessageBubble(message: WhatsAppMessage, customers: CustomersRepository, controller: MediaController) {
-    val outgoing = message.direction == MessageDirection.OUT
-    val attachment = message.media
-    val label = if (attachment != null) null else typeLabel(message.messageType, message.templateName)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start) {
-        Surface(
-            modifier = Modifier.widthIn(max = 420.dp),
-            shape = RoundedCornerShape(16.dp),
-            color = if (outgoing) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = if (outgoing) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-        ) {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                label?.let { Text(it, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) }
-                if (attachment != null) MediaBlock(message, attachment, customers, controller)
-                message.body?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
-                if (label == null && attachment == null && message.body == null) Text("(empty message)", style = MaterialTheme.typography.bodySmall)
-                val meta = buildList {
-                    formatTime(bubbleTimeFormat, message.sentAt)?.let { add(it) }
-                    if (outgoing) {
-                        add(statusLabel(message.status))
-                        message.sentBy?.name?.takeIf { it.isNotEmpty() }?.let { add(it) }
-                    }
-                }.joinToString(" · ")
-                Text(
-                    meta, style = MaterialTheme.typography.labelSmall,
-                    color = if (outgoing && message.status == "failed") MaterialTheme.colorScheme.error else LocalContentColor.current.copy(alpha = 0.7f),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun Composer(
-    availability: SendAvailability,
-    sending: Boolean,
-    draft: String,
-    notice: String?,
-    onDraft: (String) -> Unit,
-    recheck: () -> Unit,
-    send: () -> Unit,
-) {
-    val enabled = availability == SendAvailability.AVAILABLE
-    Surface(color = MaterialTheme.colorScheme.background, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
-        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = onDraft,
-                    modifier = Modifier.weight(1f),
-                    enabled = enabled && !sending,
-                    label = { Text("Message") },
-                    maxLines = 4,
-                )
-                Button(onClick = send, enabled = enabled && !sending && draft.isNotBlank()) { Text(if (sending) "Sending…" else "Send") }
-            }
-            when (availability) {
-                SendAvailability.UNAVAILABLE -> SupportingText(NOT_SET_UP)
-                SendAvailability.CHECKING -> SupportingText("Checking whether sending is available…")
-                SendAvailability.UNREACHABLE -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f)) { SupportingText("Could not check whether sending is available.") }
-                    TextButton(onClick = recheck) { Text("Try again") }
-                }
-                SendAvailability.AVAILABLE -> Unit
-            }
-            notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-        }
     }
 }

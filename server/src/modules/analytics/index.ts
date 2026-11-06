@@ -5,7 +5,7 @@ import type { AppBindings } from "../../app";
 import { analyticsQuery, createAnalyticsRepository, istDate } from "../../data/analytics";
 import type { Clock } from "../../data/values";
 
-function queryValues(url: string) {
+export function queryValues(url: string) {
   const values: Record<string, string> = Object.create(null);
   for (const [key, value] of new URL(url).searchParams) {
     if (Object.hasOwn(values, key)) {

@@ -1,10 +1,15 @@
 package com.microorganics.calltracker
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
@@ -31,6 +36,8 @@ internal enum class SendAvailability { CHECKING, UNAVAILABLE, AVAILABLE, UNREACH
 internal sealed interface SendOutcome {
     data object Sent : SendOutcome
     data object NotConfigured : SendOutcome
+    /** The customer's 24-hour window is closed: only a template may be sent. */
+    data object WindowClosed : SendOutcome
     data class Failed(val message: String) : SendOutcome
 }
 
@@ -39,9 +46,16 @@ internal fun isAccessLost(error: Exception) = error is NotConnected || (error is
 /** Short, data-free text for the UI. Server bodies and customer values never appear in it. */
 internal fun customersFailureMessage(error: Exception): String = when {
     error is NotConnected && error.revoked -> "Access for this phone was revoked. Contact your manager."
-    error is ServerNotSet -> "No server is set. Add one in Advanced."
-    error is NotConnected -> "Set up this phone on the Home tab first."
+    error is ServerNotSet -> "No server is set. Add one in Settings > Advanced."
+    error is NotConnected -> "Open Settings > Setup first."
     error is ApiFailure && error.status == 401 -> "Access for this phone was revoked. Contact your manager."
+    hasCode(error, WINDOW_CLOSED_CODE) -> "The 24-hour reply window is closed. Send a template to start the conversation again."
+    hasCode(error, HEADER_IMAGE_REQUIRED_CODE) -> "Choose a header image for this template."
+    hasCode(error, "unsupported_media_type") -> "This file type can't be sent on WhatsApp."
+    hasCode(error, "file_too_large") || (error is ApiFailure && error.status == 413) -> "This file is larger than ${formatSize(MAX_ATTACHMENT_BYTES)}."
+    hasCode(error, PHONE_NOT_EDITABLE_CODE) -> "The phone number can't be changed."
+    hasCode(error, CUSTOMER_EXISTS_CODE) -> OTHER_HANDLER_MESSAGE
+    error is ApiFailure && error.status == 502 -> "WhatsApp could not complete this. Try again in a moment."
     error is ApiFailure && error.status == 404 -> "This customer is not assigned to you any more."
     error is ApiFailure && (error.status == 429 || error.status >= 500) -> "Linekeep is busy right now. Try again in a moment."
     error is ApiFailure -> "Linekeep could not complete this (HTTP ${error.status})."
@@ -230,6 +244,9 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
         mutableUnreadChats.value = 0
         lastVersion = null
         chatsStale = false
+        mutableProfile.value = null
+        quickCache.clear()
+        templateCache.clear()
         closeConversation()
     }
 
@@ -300,6 +317,7 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
         if (selectedId != customerId) {
             selectedId = customerId
             pending = null
+            clearComposer()
             messages.clear()
             mutableCustomer.value = known ?: customers.state.value.items.firstOrNull { it.id == customerId }
             mutableAvailability.value = SendAvailability.CHECKING
@@ -343,6 +361,7 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     fun closeConversation() {
         selectedId = null
         pending = null
+        clearComposer()
         messages.clear()
         mutableCustomer.value = null
         mutableAvailability.value = SendAvailability.CHECKING
@@ -378,25 +397,104 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     }
 
     /**
-     * Sends one message. The same text to the same customer reuses its client id after a failure, so a retry
-     * cannot create a duplicate once a transport exists. The caller keeps the typed text unless [SendOutcome.Sent].
+     * Composer state that must survive a configuration change (rotation, keyboard, night mode): the file waiting to be
+     * sent and the last send problem of the open conversation. Memory only; dropped when the conversation is closed.
+     */
+    var composerAttachment by androidx.compose.runtime.mutableStateOf<AttachmentDraft?>(null)
+    var composerNotice by androidx.compose.runtime.mutableStateOf<String?>(null)
+
+    private fun clearComposer() {
+        composerAttachment = null
+        composerNotice = null
+    }
+
+    /** Emits this phone's device id once it is enrolled and not revoked, otherwise null. */
+    val connection: kotlinx.coroutines.flow.Flow<String?> = enrollments.status
+        .map { if (it.unauthorized) null else it.deviceId }
+        .distinctUntilChanged()
+
+    /** Reloads lists that failed only because the phone was not connected yet, once it is. */
+    suspend fun onConnected() {
+        resetIfOwnerChanged()
+        if (customers.state.value.let { it.items.isEmpty() && it.error != null }) customers.refresh()
+        if (chats.state.value.let { it.items.isEmpty() && it.error != null }) chats.refresh()
+    }
+
+    private val mutableProfile = MutableStateFlow<EmployeeProfile?>(null)
+    /** This employee's profile, fetched once per process and kept in memory only; null until loaded. */
+    val profile: StateFlow<EmployeeProfile?> = mutableProfile.asStateFlow()
+
+    /** Loads the profile if it isn't known yet. A failure is ignored: the SIM number and enrolled name are the fallback. */
+    suspend fun ensureProfile() {
+        if (mutableProfile.value != null) return
+        try {
+            val loaded = enrollments.authorized { api.profile(it) }
+            mutableProfile.value = loaded
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+        }
+    }
+
+    /** Name and number of this employee for {{handler_*}} placeholders and template variables. */
+    fun handlerContext(customerName: String): FillContext {
+        val status = enrollments.status.value
+        val loaded = mutableProfile.value
+        return FillContext(
+            customerName = customerName,
+            handlerName = resolveHandlerName(loaded, status.employeeName),
+            handlerPhone = resolveHandlerPhone(loaded, status.sim.numbers),
+        )
+    }
+
+    private val quickCache = Cached<List<QuickMessage>> { enrollments.authorized { api.quickMessages(it) } }
+    private val templateCache = Cached<List<MessageTemplate>> { enrollments.authorized { api.templates(it) } }
+
+    /** Shared quick replies; refetched when older than a minute or when [force]d. */
+    suspend fun quickMessages(force: Boolean = false): List<QuickMessage> = quickCache.get(force).sortedBy { it.title.lowercase() }
+
+    /** Approved templates; refetched when older than five minutes or when [force]d. */
+    suspend fun templates(force: Boolean = false): List<MessageTemplate> = templateCache.get(force, maxAgeMs = 300_000L)
+
+    /**
+     * Sends one text message. The same text to the same customer reuses its client id after a failure, so a retry
+     * cannot create a duplicate. The caller keeps the typed text unless [SendOutcome.Sent].
      */
     suspend fun send(text: String): SendOutcome {
-        val customerId = selectedId ?: return SendOutcome.Failed("Open a conversation first.")
         val body = text.trim()
         if (body.isEmpty()) return SendOutcome.Failed("Type a message first.")
         if (body.length > MAX_MESSAGE_CHARACTERS) return SendOutcome.Failed("Messages can be up to $MAX_MESSAGE_CHARACTERS characters.")
+        return deliver("text:$body", requiresOpenWindow = true) { textMessageBody(it, body) }
+    }
+
+    /** Sends an uploaded attachment, with an optional caption. */
+    suspend fun sendMedia(attachmentId: String, caption: String): SendOutcome {
+        if (caption.length > MAX_MESSAGE_CHARACTERS) return SendOutcome.Failed("Captions can be up to $MAX_MESSAGE_CHARACTERS characters.")
+        return deliver("media:$attachmentId:${caption.trim()}", requiresOpenWindow = true) { mediaMessageBody(it, attachmentId, caption) }
+    }
+
+    /** Sends an approved template; allowed at any time, including when the 24-hour window is closed. */
+    suspend fun sendTemplate(template: MessageTemplate, values: List<String>, headerAttachmentId: String?): SendOutcome {
+        val problem = templateProblem(template, values, headerAttachmentId != null)
+        if (problem != null) return SendOutcome.Failed(problem)
+        return deliver("template:${template.key}:${values.joinToString("\u0000")}:$headerAttachmentId", requiresOpenWindow = false) {
+            templateMessageBody(it, template, values, headerAttachmentId)
+        }
+    }
+
+    private suspend fun deliver(fingerprint: String, requiresOpenWindow: Boolean, build: (clientMessageId: String) -> org.json.JSONObject): SendOutcome {
+        val customerId = selectedId ?: return SendOutcome.Failed("Open a conversation first.")
         when (mutableAvailability.value) {
             SendAvailability.AVAILABLE -> Unit
             SendAvailability.UNAVAILABLE -> return SendOutcome.NotConfigured
             SendAvailability.CHECKING -> return SendOutcome.Failed("Checking whether sending is available. Try again shortly.")
             SendAvailability.UNREACHABLE -> return SendOutcome.Failed("Could not check whether sending is available. Check your connection and try again.")
         }
+        if (requiresOpenWindow && !isReplyWindowOpen(mutableCustomer.value?.whatsappWindow, System.currentTimeMillis())) return SendOutcome.WindowClosed
         if (!mutableSending.compareAndSet(false, true)) return SendOutcome.Failed("A message is already being sent.")
-        val clientId = pending?.takeIf { it.first == customerId && it.second == body }?.third ?: UUID.randomUUID().toString()
-        pending = Triple(customerId, body, clientId)
+        val clientId = pending?.takeIf { it.first == customerId && it.second == fingerprint }?.third ?: UUID.randomUUID().toString()
+        pending = Triple(customerId, fingerprint, clientId)
         try {
-            val sent = enrollments.authorized { api.sendMessage(it, customerId, clientId, body) }
+            val sent = enrollments.authorized { api.sendMessage(it, customerId, build(clientId)) }
             pending = null
             if (selectedId == customerId) {
                 if (sent != null) messages.prepend(sent) else messages.refresh()
@@ -408,9 +506,90 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
                 mutableAvailability.value = SendAvailability.UNAVAILABLE
                 return SendOutcome.NotConfigured
             }
+            if (hasCode(error, WINDOW_CLOSED_CODE)) {
+                pending = null
+                if (selectedId == customerId) mutableCustomer.update { it?.copy(whatsappWindow = WhatsAppWindow(open = false, expiresAt = null)) }
+                return SendOutcome.WindowClosed
+            }
             return SendOutcome.Failed(customersFailureMessage(error))
         } finally {
             mutableSending.value = false
         }
     }
+
+    /** Uploads one picked file for a later [sendMedia] or template header; [onProgress] gets 0f..1f. */
+    suspend fun uploadAttachment(file: PickedAttachment, onProgress: (Float) -> Unit): UploadedAttachment {
+        val job = kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]
+        return enrollments.authorized {
+            api.uploadAttachment(it, file.fileName, file.mimeType, file.bytes, { job?.ensureActive() }) { sent -> onProgress(sent.toFloat() / file.bytes.size.coerceAtLeast(1)) }
+        }
+    }
+
+    /**
+     * Checks the number first, then creates the customer. A number that is already the caller's opens that customer;
+     * one that belongs to someone else reveals nothing about it.
+     */
+    suspend fun addCustomer(name: String, phone: String, notes: String): AddCustomerOutcome {
+        validateNewCustomer(name, phone, notes)?.let { return AddCustomerOutcome.Failed(it) }
+        val normalized = requireNotNull(normalizePhone(phone))
+        resetIfOwnerChanged()
+        try {
+            val lookup = enrollments.authorized { api.lookupCustomer(it, normalized) }
+            when (val decision = decideAfterLookup(lookup)) {
+                DuplicateDecision.BelongsToOther -> return AddCustomerOutcome.OtherHandler
+                is DuplicateDecision.OpenExisting -> return AddCustomerOutcome.Existing(decision.customerId, decision.name, normalized)
+                DuplicateDecision.Create -> Unit
+            }
+            val created = enrollments.authorized { api.createCustomer(it, createCustomerBody(name, phone, notes)) }
+            if (customers.state.value.query.isEmpty()) customers.prepend(created)
+            return AddCustomerOutcome.Created(created)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            // Someone created it between the check and the create: the server tells whose it is.
+            if (hasCode(error, CUSTOMER_EXISTS_CODE)) {
+                val id = (error as ApiFailure).customerId
+                return if (id != null) AddCustomerOutcome.Existing(id, name.trim(), normalized) else AddCustomerOutcome.OtherHandler
+            }
+            return AddCustomerOutcome.Failed(customersFailureMessage(error))
+        }
+    }
+
+    /** Saves a changed name and/or notes of one of this employee's customers; returns the stored customer. */
+    suspend fun updateCustomer(original: Customer, name: String, notes: String): Result<Customer> {
+        if (name.isBlank()) return Result.failure(IllegalArgumentException("The name can't be empty."))
+        val body = patchCustomerBody(original, name, notes) ?: return Result.success(original)
+        return try {
+            val saved = enrollments.authorized { api.updateCustomer(it, original.id, body) }
+            val merged = original.copy(name = saved.name, notes = saved.notes, whatsappWindow = saved.whatsappWindow ?: original.whatsappWindow)
+            customers.update(merged.id) { merged }
+            chats.update(merged.id) { it.copy(customerName = merged.name) }
+            if (selectedId == merged.id) mutableCustomer.value = merged
+            Result.success(merged)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            Result.failure(IllegalStateException(customersFailureMessage(error)))
+        }
+    }
+}
+
+internal sealed interface AddCustomerOutcome {
+    data class Created(val customer: Customer) : AddCustomerOutcome
+    /** The number is already one of this employee's customers. */
+    data class Existing(val customerId: String, val name: String, val phone: String) : AddCustomerOutcome
+    data object OtherHandler : AddCustomerOutcome
+    data class Failed(val message: String) : AddCustomerOutcome
+}
+
+/** A value fetched on demand and reused until it is older than [maxAgeMs]; concurrent callers see the last fetched value. */
+internal class Cached<T>(private val load: suspend () -> T) {
+    @Volatile private var value: T? = null
+    @Volatile private var loadedAt = 0L
+
+    suspend fun get(force: Boolean = false, maxAgeMs: Long = 60_000L): T {
+        val known = value
+        if (!force && known != null && System.currentTimeMillis() - loadedAt < maxAgeMs) return known
+        return load().also { value = it; loadedAt = System.currentTimeMillis() }
+    }
+
+    fun clear() { value = null }
 }

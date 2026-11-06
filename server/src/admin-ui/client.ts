@@ -62,6 +62,9 @@ export const clientJavaScript = String.raw`(() => {
       if (error.name === 'AbortError') throw error;
       throw new Error('Cannot reach the server. Check your connection and try again.');
     }
+    return readApiResponse(response);
+  }
+  async function readApiResponse(response) {
     if (response.status === 401 || response.status === 403) {
       byId('auth-notice').hidden = false;
       throw new Error('Your admin session is unavailable. Sign in again to continue.');
@@ -82,6 +85,26 @@ export const clientJavaScript = String.raw`(() => {
     }
     byId('auth-notice').hidden = true;
     return data;
+  }
+  // Uploads one file as the raw request body. Resolves with the stored attachment: { attachmentId, kind, mimeType, fileName, size }.
+  async function uploadAttachment(file, signal) {
+    let response;
+    try {
+      response = await fetch('/v1/admin/whatsapp/attachments?fileName=' + encodeURIComponent(file.name), {
+        method: 'POST',
+        body: file,
+        signal,
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json', 'Content-Type': file.type }
+      });
+    } catch (error) {
+      if (error.name === 'AbortError') throw error;
+      throw new Error('Cannot reach the server. Check your connection and try again.');
+    }
+    const data = await readApiResponse(response);
+    if (!data || typeof data.attachmentId !== 'string' || !['image', 'video', 'document'].includes(data.kind)) throw new Error('The server returned an unreadable upload result. Please try again.');
+    return { attachmentId: data.attachmentId, kind: data.kind, mimeType: typeof data.mimeType === 'string' ? data.mimeType : file.type, fileName: typeof data.fileName === 'string' && data.fileName ? data.fileName : file.name, size: Number.isFinite(data.size) ? data.size : file.size };
   }
   let directoryVersion = 0;
   let directoryController;
@@ -1285,7 +1308,7 @@ export const clientJavaScript = String.raw`(() => {
     notes.classList.add('fact-wide');
     notes.querySelector('dd').classList.add('pre');
     byId('customer-detail-facts').replaceChildren(
-      fact('Phone', customer.phone), fact('Email', customer.email || 'Not set'), fact('Source', customer.source || 'Not set'),
+      fact('Phone', customer.phone), fact('Email', customer.email || 'Not set'), fact('Source', (customer.source || 'Not set') + (customer.createdBy && customer.createdBy.name ? ' · added by ' + customer.createdBy.name : '')),
       fact('District', customer.district || 'Not set'), fact('State', customer.state || 'Not set'), fact('Country', customer.country || 'Not set'),
       fact('Handled by', customer.employees.length ? handlerNames(customer.employees) : 'Unassigned'),
       fact('WhatsApp messages', Number.isInteger(customer.messageCount) ? customer.messageCount : 0),
@@ -1625,8 +1648,44 @@ export const clientJavaScript = String.raw`(() => {
     refresh: 'M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z',
     download: 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z',
     close: 'M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
-    bolt: 'M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'
+    bolt: 'M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z',
+    paperclip: 'M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z'
   };
+  // ---- Outgoing attachments (uploaded first, then referenced by id when sending) ----
+  const ATTACH_MAX_BYTES = 16 * 1024 * 1024;
+  const ATTACH_TYPES = {
+    image: ['image/jpeg', 'image/png', 'image/webp'],
+    video: ['video/mp4'],
+    document: [
+      'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'text/plain', 'text/csv'
+    ]
+  };
+  const ATTACH_KIND_LABELS = { image: 'JPEG, PNG or WebP images', video: 'MP4 videos', document: 'PDF, Word, Excel, PowerPoint, text or CSV documents' };
+  function attachAccept(kinds) { return kinds.flatMap((kind) => ATTACH_TYPES[kind]).join(','); }
+  // Returns a message when the file cannot be sent, otherwise an empty string.
+  function attachProblem(file, kinds) {
+    const type = String(file.type || '').split(';')[0].trim().toLowerCase();
+    if (!kinds.some((kind) => ATTACH_TYPES[kind].includes(type))) return 'This file type is not supported. Choose ' + kinds.map((kind) => ATTACH_KIND_LABELS[kind]).join(' or ') + '.';
+    if (file.size <= 0) return 'This file is empty.';
+    if (file.size > ATTACH_MAX_BYTES) return 'This file is larger than 16 MB (' + waFileSize(file.size) + ').';
+    return '';
+  }
+  function attachmentThumb(attachment, className) {
+    if (attachment.kind === 'image') {
+      const image = document.createElement('img');
+      image.className = className;
+      image.alt = '';
+      image.src = '/v1/admin/whatsapp/attachments/' + encodeURIComponent(attachment.attachmentId);
+      return image;
+    }
+    const holder = element('span', undefined, className + ' wa-attach-icon');
+    holder.setAttribute('aria-hidden', 'true');
+    holder.append(waIcon('document'));
+    return holder;
+  }
   const waStatusInfo = {
     queued: { icon: 'clock', label: 'Sending' },
     sent: { icon: 'tick', label: 'Sent' },
@@ -1933,7 +1992,8 @@ export const clientJavaScript = String.raw`(() => {
     link.append(waIcon('download'));
     return link;
   }
-  function waMediaNode(media, caption, id) {
+  function waMediaNode(media, caption, id, out) {
+    const origin = out ? 'sent' : 'from customer';
     const wrap = element('div', undefined, 'wa-media wa-media-' + media.kind);
     const label = WA_MEDIA_LABELS[media.kind];
     const failed = () => {
@@ -1941,7 +2001,7 @@ export const clientJavaScript = String.raw`(() => {
       wrap.replaceChildren(element('span', label + ' unavailable', 'wa-media-gone'));
     };
     if (media.kind === 'image' || media.kind === 'sticker') {
-      const alt = caption || (media.kind === 'sticker' ? 'Sticker from customer' : 'Image from customer');
+      const alt = caption || (media.kind === 'sticker' ? 'Sticker ' + origin : 'Image ' + origin);
       const button = element('button', undefined, 'wa-media-btn');
       button.type = 'button';
       button.setAttribute('aria-label', 'View full size: ' + alt);
@@ -1961,7 +2021,7 @@ export const clientJavaScript = String.raw`(() => {
       const video = document.createElement('video');
       video.controls = true;
       video.preload = 'metadata';
-      video.setAttribute('aria-label', caption || 'Video from customer');
+      video.setAttribute('aria-label', caption || 'Video ' + origin);
       video.addEventListener('error', failed);
       video.src = media.url;
       const frame = element('div', undefined, 'wa-media-frame');
@@ -2003,7 +2063,7 @@ export const clientJavaScript = String.raw`(() => {
     if (media) {
       bubble.classList.add('wa-has-media', 'wa-has-' + media.kind);
       if (media.kind === 'sticker' && !item.body) bubble.classList.add('wa-sticker');
-      bubble.append(waMediaNode(media, item.body, item.id));
+      bubble.append(waMediaNode(media, item.body, item.id, out));
       if (item.body) bubble.append(element('div', item.body, 'wa-text'));
     } else {
       bubble.append(element('div', waMessageText(item), 'wa-text'));
@@ -2085,6 +2145,25 @@ export const clientJavaScript = String.raw`(() => {
     const form = element('form', undefined, 'wa-composer');
     form.setAttribute('aria-label', 'Send WhatsApp message');
     const templateButton = waIconButton('document', 'Send a template message', 'wa-template-btn');
+    const attachButton = waIconButton('paperclip', 'Attach a file', 'wa-attach-btn');
+    const fileInput = element('input');
+    fileInput.type = 'file';
+    fileInput.accept = attachAccept(['image', 'video', 'document']);
+    fileInput.hidden = true;
+    fileInput.tabIndex = -1;
+    fileInput.setAttribute('aria-hidden', 'true');
+    const attachChip = element('div', undefined, 'wa-attach-chip');
+    attachChip.hidden = true;
+    attachChip.setAttribute('role', 'group');
+    attachChip.setAttribute('aria-label', 'Attached file');
+    const attachThumb = element('span', undefined, 'wa-attach-thumb');
+    const attachName = element('span', undefined, 'wa-attach-name');
+    const attachMeta = element('span', undefined, 'wa-attach-meta');
+    attachMeta.setAttribute('role', 'status');
+    const attachText = element('span', undefined, 'wa-attach-text');
+    attachText.append(attachName, attachMeta);
+    const attachRemove = waIconButton('close', 'Remove attachment', 'wa-attach-remove');
+    attachChip.append(attachThumb, attachText, attachRemove);
     const input = element('textarea', undefined, 'wa-input');
     input.rows = 1;
     input.maxLength = 4096;
@@ -2094,7 +2173,7 @@ export const clientJavaScript = String.raw`(() => {
     sendButton.type = 'submit';
     const quickButton = waIconButton('bolt', 'Quick messages', 'wa-quick-btn');
     quickButton.setAttribute('aria-expanded', 'false');
-    form.append(templateButton, quickButton, input, sendButton);
+    form.append(templateButton, attachButton, quickButton, input, sendButton, fileInput);
     const quickPanel = element('div', undefined, 'wa-quick');
     quickPanel.hidden = true;
     quickPanel.tabIndex = -1;
@@ -2118,7 +2197,7 @@ export const clientJavaScript = String.raw`(() => {
     quickNotice.setAttribute('role', 'status');
     quickNotice.hidden = true;
     const composerWrap = element('div', undefined, 'wa-composer-wrap');
-    composerWrap.append(quickPanel, form);
+    composerWrap.append(quickPanel, attachChip, form);
 
     root.replaceChildren();
     if (!embedded) root.append(head);
@@ -2133,6 +2212,10 @@ export const clientJavaScript = String.raw`(() => {
     let controller;
     let pending = false;
     let attempt = null;
+    let attachment = null;
+    let uploading = false;
+    let uploadToken = 0;
+    let uploadController = null;
     let serverClosed = false;
     let stickToBottom = false;
     let bubbleCache = new Map();
@@ -2284,7 +2367,12 @@ export const clientJavaScript = String.raw`(() => {
       const textOff = pending || !canSend || state === 'closed';
       input.disabled = textOff;
       input.placeholder = state === 'closed' ? 'Use a template to message this customer' : 'Type a message';
-      sendButton.disabled = textOff || !input.value.trim();
+      sendButton.disabled = textOff || uploading || (!input.value.trim() && !attachment);
+      attachButton.disabled = textOff || uploading;
+      const attachLabel = state === 'closed' && canSend ? 'Files can only be sent within 24 hours of the customer\u2019s last message. Use a template.' : uploading ? 'Uploading the file…' : 'Attach a file';
+      attachButton.title = attachLabel;
+      attachButton.setAttribute('aria-label', attachLabel);
+      attachRemove.disabled = pending;
       templateButton.disabled = pending || !canSend;
       quickButton.disabled = textOff;
       if (quickButton.disabled) closeQuick(false);
@@ -2457,12 +2545,58 @@ export const clientJavaScript = String.raw`(() => {
         return error.name === 'AbortError' || current !== version;
       }
     }
-    async function sendText() {
-      if (pending || !customer || waSendState !== 'yes') return;
-      const text = input.value.trim();
-      if (!text) return;
+    async function chooseAttachment(file) {
+      if (!customer || attachButton.disabled) return;
+      setSendError('');
+      const problem = attachProblem(file, ['image', 'video', 'document']);
+      if (problem) { setSendError(problem); return; }
       const customerId = customer.id;
-      const key = customerId + '|' + text;
+      clearAttachment();
+      const token = ++uploadToken;
+      uploadController = new AbortController();
+      uploading = true;
+      attachName.textContent = file.name;
+      attachMeta.textContent = 'Uploading… ' + waFileSize(file.size);
+      attachThumb.replaceChildren();
+      attachChip.hidden = false;
+      attachRemove.disabled = false;
+      controls();
+      try {
+        const uploaded = await uploadAttachment(file, uploadController.signal);
+        if (token !== uploadToken || !customer || customer.id !== customerId) return;
+        attachment = uploaded;
+        attachName.textContent = uploaded.fileName;
+        attachMeta.textContent = waFileSize(uploaded.size);
+        attachThumb.replaceChildren(attachmentThumb(uploaded, 'wa-attach-img'));
+      } catch (error) {
+        if (token !== uploadToken || error.name === 'AbortError') return;
+        attachChip.hidden = true;
+        setSendError('Could not upload the file. ' + errorMessage(error));
+      } finally {
+        if (token === uploadToken) {
+          uploading = false;
+          controls();
+          if (attachment) input.focus();
+        }
+      }
+    }
+    function clearAttachment() {
+      uploadToken++;
+      if (uploadController) uploadController.abort();
+      uploadController = null;
+      uploading = false;
+      attachment = null;
+      attachChip.hidden = true;
+      attachThumb.replaceChildren();
+      controls();
+    }
+    async function sendText() {
+      if (pending || uploading || !customer || waSendState !== 'yes') return;
+      const text = input.value.trim();
+      const media = attachment;
+      if (!text && !media) return;
+      const customerId = customer.id;
+      const key = customerId + '|' + (media ? media.attachmentId + '|' : '') + text;
       if (!attempt || attempt.key !== key) attempt = { key, id: crypto.randomUUID() };
       pending = true;
       setSendError('');
@@ -2470,11 +2604,15 @@ export const clientJavaScript = String.raw`(() => {
       controls();
       let needTemplate = false;
       try {
-        await api('/customers/' + encodeURIComponent(customerId) + '/messages', { method: 'POST', body: JSON.stringify({ clientMessageId: attempt.id, text }) });
+        const body = media
+          ? { clientMessageId: attempt.id, type: 'media', attachmentId: media.attachmentId, ...(text ? { caption: text } : {}) }
+          : { clientMessageId: attempt.id, text };
+        await api('/customers/' + encodeURIComponent(customerId) + '/messages', { method: 'POST', body: JSON.stringify(body) });
         attempt = null;
         if (customer && customer.id === customerId) {
           input.value = '';
           input.rows = 1;
+          if (media) clearAttachment();
           stickToBottom = true;
           load('refresh');
           if (options.onSent) options.onSent();
@@ -2482,7 +2620,7 @@ export const clientJavaScript = String.raw`(() => {
         }
       } catch (error) {
         if (customer && customer.id === customerId) {
-          if (error.status === 409 && error.code === 'TEMPLATE_REQUIRED') {
+          if (error.status === 409 && (error.code === 'window_closed' || error.code === 'TEMPLATE_REQUIRED')) {
             serverClosed = true;
             needTemplate = true;
           } else if (error.status === 502) {
@@ -2557,6 +2695,13 @@ export const clientJavaScript = String.raw`(() => {
       });
     });
     quickButton.addEventListener('click', () => { if (quickOpen) closeQuick(true); else openQuick(); });
+    attachButton.addEventListener('click', () => { if (!attachButton.disabled) fileInput.click(); });
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = '';
+      if (file) chooseAttachment(file);
+    });
+    attachRemove.addEventListener('click', () => { clearAttachment(); input.focus(); });
     quickSearch.addEventListener('input', renderQuick);
     quickRetry.addEventListener('click', () => { quickPanel.focus(); loadQuickMessages(true); });
     composerWrap.addEventListener('keydown', (event) => {
@@ -2592,6 +2737,7 @@ export const clientJavaScript = String.raw`(() => {
         handlerCache = null;
         serverClosed = false;
         attempt = null;
+        clearAttachment();
         input.value = '';
         input.rows = 1;
         setSendError('');
@@ -2617,6 +2763,7 @@ export const clientJavaScript = String.raw`(() => {
         bubbleCache = new Map();
         newPill.hidden = true;
         attempt = null;
+        clearAttachment();
         loadStatus.textContent = '';
         setLoadError('', false);
         setSendError('');
@@ -2640,7 +2787,7 @@ export const clientJavaScript = String.raw`(() => {
   // ---- Template picker ----
   const templateDialog = byId('template-dialog');
   const templateForm = byId('template-form');
-  const templateState = { templates: null, loadedAt: 0, loading: false, query: '', selected: null, values: [], sources: [], refs: [], handlers: null, handlerId: '', handlerField: null, handlerToken: 0, target: null, sending: false, attempt: null };
+  const templateState = { templates: null, loadedAt: 0, loading: false, query: '', selected: null, values: [], sources: [], refs: [], handlers: null, handlerId: '', handlerField: null, handlerToken: 0, target: null, sending: false, attempt: null, headerOverride: null, headerUploading: false, headerError: '', headerToken: 0 };
   byId('template-close').append(waIcon('close'));
   function readTemplate(item) {
     if (!item || typeof item.name !== 'string' || typeof item.language !== 'string' || typeof item.body !== 'string' || !Array.isArray(item.variables)) return null;
@@ -2654,6 +2801,9 @@ export const clientJavaScript = String.raw`(() => {
       buttons: Array.isArray(item.buttons) ? item.buttons.filter((button) => button && typeof button.text === 'string') : [],
       variables: item.variables.filter((variable) => variable && typeof variable.key === 'string').map((variable) => ({ key: variable.key, example: typeof variable.example === 'string' ? variable.example : '' })),
       sendable: item.sendable === true,
+      headerFormat: ['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT'].includes(item.headerFormat) ? item.headerFormat : 'NONE',
+      headerImageConfigured: item.headerImageConfigured === true,
+      headerImageUrl: typeof item.headerImageUrl === 'string' ? item.headerImageUrl : '',
       reason: typeof item.reason === 'string' ? item.reason : ''
     };
   }
@@ -2669,7 +2819,9 @@ export const clientJavaScript = String.raw`(() => {
       button.dataset.language = item.language;
       button.setAttribute('aria-pressed', String(sameTemplate(item, templateState.selected)));
       if (!item.sendable) button.setAttribute('aria-disabled', 'true');
-      button.append(element('strong', item.name, 'wa-tpl-name'), element('span', [item.category, item.language].filter(Boolean).join(' · '), 'wa-tpl-sub'), element('span', item.body, 'wa-tpl-snippet'));
+      button.append(element('strong', item.name, 'wa-tpl-name'), element('span', [item.category, item.language].filter(Boolean).join(' · '), 'wa-tpl-sub'));
+      if (templateNeedsHeader(item)) button.append(element('span', item.headerFormat === 'IMAGE' ? 'Image header' : item.headerFormat === 'VIDEO' ? 'Video header' : 'Document header', 'wa-tpl-badge'));
+      button.append(element('span', item.body, 'wa-tpl-snippet'));
       if (!item.sendable) button.append(element('span', item.reason || 'This template cannot be sent from here.', 'wa-tpl-reason'));
       button.addEventListener('click', () => selectTemplate(item));
       return button;
@@ -2717,6 +2869,11 @@ export const clientJavaScript = String.raw`(() => {
   function templatePreview(template, values) {
     const node = element('div', undefined, 'wa-msg out wa-first');
     const bubble = element('div', undefined, 'wa-bubble');
+    if (templateNeedsHeader(template)) {
+      const media = element('div', undefined, 'wa-tpl-header-media');
+      media.append(templateHeaderMedia(template));
+      bubble.append(media);
+    }
     if (template.header) {
       const header = element('div', undefined, 'wa-tpl-header');
       header.append(...templateParts(template.header, template, values));
@@ -2741,10 +2898,107 @@ export const clientJavaScript = String.raw`(() => {
     }
     return node;
   }
+  function templateNeedsHeader(template) { return template.headerFormat === 'IMAGE' || template.headerFormat === 'VIDEO' || template.headerFormat === 'DOCUMENT'; }
+  function templateHeaderMissing(template) {
+    return templateNeedsHeader(template) && (templateState.headerUploading || !(templateState.headerOverride || template.headerImageConfigured));
+  }
   function templateComplete() {
     const template = templateState.selected;
-    return Boolean(template) && template.variables.every((variable, index) => String(templateState.values[index] || '').trim());
+    return Boolean(template) && !templateHeaderMissing(template) && template.variables.every((variable, index) => String(templateState.values[index] || '').trim());
   }
+  // The file shown in the header: the override for this send, else the configured default.
+  function templateHeaderMedia(template) {
+    const override = templateState.headerOverride;
+    if (override) return attachmentThumb(override, 'wa-tpl-header-img');
+    if (template.headerImageConfigured && template.headerImageUrl.startsWith('/') && !template.headerImageUrl.startsWith('//')) {
+      if (template.headerFormat !== 'IMAGE') return attachmentThumb({ kind: template.headerFormat === 'VIDEO' ? 'video' : 'document', attachmentId: '' }, 'wa-tpl-header-img');
+      const image = document.createElement('img');
+      image.className = 'wa-tpl-header-img';
+      image.alt = 'Default header image';
+      image.src = template.headerImageUrl;
+      return image;
+    }
+    return element('div', 'Header ' + template.headerFormat.toLowerCase() + ' needed', 'wa-tpl-header-missing');
+  }
+  function renderTemplateHeader() {
+    const template = templateState.selected;
+    const box = byId('template-header-box');
+    if (!template || !templateNeedsHeader(template)) { box.hidden = true; box.replaceChildren(); return; }
+    const kind = template.headerFormat.toLowerCase();
+    const noun = kind === 'image' ? 'header image' : kind === 'video' ? 'header video' : 'header file';
+    const override = templateState.headerOverride;
+    const fileInput = byId('template-header-file');
+    fileInput.accept = attachAccept([kind]);
+    let note;
+    if (templateState.headerUploading) note = 'Uploading…';
+    else if (override) note = 'Using ' + override.fileName + ' for this send only.';
+    else if (template.headerImageConfigured) note = 'Default ' + noun + ' from Config.';
+    else note = 'No default ' + noun + ' is set. Choose one for this send or set a default in Config > WhatsApp Business > Template images.';
+    const pick = element('button', override || template.headerImageConfigured ? 'Use a different ' + noun : 'Choose ' + noun, 'wa-text-btn');
+    pick.type = 'button';
+    pick.id = 'template-header-pick';
+    pick.disabled = templateState.headerUploading || templateState.sending;
+    pick.addEventListener('click', () => fileInput.click());
+    const actions = element('div', undefined, 'wa-tpl-media-actions');
+    actions.append(pick);
+    if (override) {
+      const reset = element('button', template.headerImageConfigured ? 'Use default' : 'Remove', 'wa-text-btn');
+      reset.type = 'button';
+      reset.disabled = templateState.headerUploading || templateState.sending;
+      reset.addEventListener('click', () => {
+        templateState.headerOverride = null;
+        templateState.headerError = '';
+        renderTemplateHeader();
+        updateTemplatePreview();
+        byId('template-header-pick').focus();
+      });
+      actions.append(reset);
+    }
+    const status = element('p', note, 'wa-tpl-media-note' + (!override && !template.headerImageConfigured && !templateState.headerUploading ? ' wa-tpl-media-warn' : ''));
+    status.setAttribute('role', 'status');
+    const nodes = [element('span', 'Header ' + kind, 'wa-field-label'), status, actions];
+    if (templateState.headerError) {
+      const failure = element('p', templateState.headerError, 'wa-field-hint');
+      failure.setAttribute('role', 'alert');
+      nodes.push(failure);
+    }
+    box.hidden = false;
+    box.replaceChildren(...nodes);
+  }
+  async function uploadTemplateHeader(file) {
+    const template = templateState.selected;
+    if (!template || !templateNeedsHeader(template) || templateState.sending) return;
+    const kind = template.headerFormat.toLowerCase();
+    const problem = attachProblem(file, [kind]);
+    if (problem) {
+      templateState.headerError = problem;
+      renderTemplateHeader();
+      return;
+    }
+    const token = ++templateState.headerToken;
+    templateState.headerUploading = true;
+    templateState.headerError = '';
+    renderTemplateHeader();
+    updateTemplatePreview();
+    try {
+      const uploaded = await uploadAttachment(file);
+      if (token !== templateState.headerToken) return;
+      if (uploaded.kind !== kind) throw new Error('The uploaded file is not a ' + kind + '.');
+      templateState.headerOverride = uploaded;
+    } catch (error) {
+      if (token !== templateState.headerToken) return;
+      templateState.headerError = 'Could not upload the file. ' + errorMessage(error);
+    }
+    templateState.headerUploading = false;
+    renderTemplateHeader();
+    updateTemplatePreview();
+    byId('template-header-pick').focus();
+  }
+  byId('template-header-file').addEventListener('change', (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (file) uploadTemplateHeader(file);
+  });
   function updateTemplatePreview() {
     const template = templateState.selected;
     if (!template) return;
@@ -2755,6 +3009,7 @@ export const clientJavaScript = String.raw`(() => {
     byId('template-send').disabled = templateState.sending || !templateComplete();
     byId('template-send').textContent = templateState.sending ? 'Sending…' : 'Send template';
     byId('template-fields').disabled = templateState.sending;
+    for (const control of byId('template-header-box').querySelectorAll('button')) control.disabled = templateState.sending || templateState.headerUploading;
   }
   const TEMPLATE_SOURCES = [
     ['handler-name', 'Handled by: name'],
@@ -2824,6 +3079,10 @@ export const clientJavaScript = String.raw`(() => {
     if (!template.sendable || templateState.sending) return;
     if (!sameTemplate(template, templateState.selected)) {
       templateState.selected = template;
+      templateState.headerOverride = null;
+      templateState.headerUploading = false;
+      templateState.headerError = '';
+      templateState.headerToken++;
       templateState.values = template.variables.map(() => '');
       templateState.sources = template.variables.map(defaultTemplateSource);
       templateState.refs = [];
@@ -2879,6 +3138,7 @@ export const clientJavaScript = String.raw`(() => {
     }
     for (const node of byId('template-list').children) node.setAttribute('aria-pressed', String(node.dataset.name === template.name && node.dataset.language === template.language));
     byId('template-body').dataset.view = 'form';
+    renderTemplateHeader();
     updateTemplatePreview();
     const first = byId('template-field-list').querySelector('input');
     (first || byId('template-send')).focus();
@@ -2886,6 +3146,11 @@ export const clientJavaScript = String.raw`(() => {
   function openTemplatePicker(target) {
     templateState.target = target;
     templateState.selected = null;
+    templateState.headerOverride = null;
+    templateState.headerUploading = false;
+    templateState.headerError = '';
+    templateState.headerToken++;
+    byId('template-header-box').hidden = true;
     templateState.values = [];
     templateState.sources = [];
     templateState.refs = [];
@@ -2941,20 +3206,23 @@ export const clientJavaScript = String.raw`(() => {
     if (!customerId) { message('template-error', 'Open a chat first.'); return; }
     if (!templateComplete()) { message('template-error', 'Fill in every variable before sending.'); return; }
     const params = template.variables.map((variable, index) => String(templateState.values[index]).trim());
-    const key = [customerId, template.name, template.language, JSON.stringify(params)].join('|');
+    const overrideId = templateNeedsHeader(template) && templateState.headerOverride ? templateState.headerOverride.attachmentId : '';
+    const key = [customerId, template.name, template.language, JSON.stringify(params), overrideId].join('|');
     if (!templateState.attempt || templateState.attempt.key !== key) templateState.attempt = { key, id: crypto.randomUUID() };
     templateState.sending = true;
     message('template-error', '');
     updateTemplateSend();
     let sent = false;
     try {
+      const headerAttachmentId = templateNeedsHeader(template) && templateState.headerOverride ? templateState.headerOverride.attachmentId : '';
       const body = { clientMessageId: templateState.attempt.id, template: { name: template.name, language: template.language } };
       if (params.length) body.template.params = params;
+      if (headerAttachmentId) body.template.headerAttachmentId = headerAttachmentId;
       await api('/customers/' + encodeURIComponent(customerId) + '/messages', { method: 'POST', body: JSON.stringify(body) });
       templateState.attempt = null;
       sent = true;
     } catch (error) {
-      message('template-error', error.status === 502 ? 'WhatsApp could not send the message. Try again.' : errorMessage(error));
+      message('template-error', error.status === 502 ? 'WhatsApp could not send the message. Try again.' : error.code === 'template_header_image_required' ? 'This template needs a header file. Choose one for this send or set a default in Config > WhatsApp Business > Template images.' : errorMessage(error));
     } finally {
       templateState.sending = false;
       updateTemplateSend();
@@ -3122,7 +3390,7 @@ export const clientJavaScript = String.raw`(() => {
       fact('State / district', [customer.state, customer.district].filter(Boolean).join(' / ') || 'Not set'),
       fact('Country', customer.country || 'Not set'),
       fact('Handled by', customer.employees.length ? handlerNames(customer.employees) : 'Unassigned'),
-      fact('Source', customer.source || 'Not set'),
+      fact('Source', (customer.source || 'Not set') + (customer.createdBy && customer.createdBy.name ? ' · added by ' + customer.createdBy.name : '')),
       fact('WhatsApp messages', total),
       fact('Last message', customer.lastMessageAt ? dateText(customer.lastMessageAt) : 'None'),
       fact('Last call', customer.lastCallAt ? dateText(customer.lastCallAt) : 'None'));
@@ -4827,6 +5095,161 @@ export const clientJavaScript = String.raw`(() => {
     });
   }
 
+  // -- Template images: default header file for templates with an image, video or document header --
+  const tplImg = { templates: null, images: null, loading: false, token: 0, busy: false, target: null };
+  function readTemplateImage(item) {
+    if (!item || typeof item.templateName !== 'string' || typeof item.attachmentId !== 'string') return null;
+    return {
+      templateName: item.templateName,
+      attachmentId: item.attachmentId,
+      kind: ['image', 'video', 'document'].includes(item.kind) ? item.kind : 'image',
+      fileName: typeof item.fileName === 'string' ? item.fileName : '',
+      size: Number.isFinite(item.size) ? item.size : 0
+    };
+  }
+  // Reads templates and defaults together. The list is drawn from the templates; defaults whose template is gone are still shown so they can be removed.
+  async function loadTemplateImages() {
+    if (tplImg.loading || !whatsappAvailable()) return;
+    const token = ++tplImg.token;
+    tplImg.loading = true;
+    message('tplimg-error', '');
+    message('tplimg-status', 'Loading templates…');
+    byId('tplimg-retry').hidden = true;
+    byId('tplimg-list').setAttribute('aria-busy', 'true');
+    const [templates, images] = await Promise.allSettled([api('/whatsapp/templates'), api('/whatsapp/template-images')]);
+    if (token !== tplImg.token) return;
+    tplImg.loading = false;
+    byId('tplimg-list').setAttribute('aria-busy', 'false');
+    message('tplimg-status', '');
+    const problems = [];
+    tplImg.templates = null;
+    tplImg.images = null;
+    if (templates.status === 'fulfilled') {
+      const data = templates.value;
+      if (data && Array.isArray(data.items)) tplImg.templates = data.items.map(readTemplate).filter(Boolean).filter(templateNeedsHeader);
+      else problems.push('The server returned unreadable templates. Please try again.');
+    } else {
+      const reason = templates.reason;
+      problems.push(reason && reason.status === 503 && reason.code === 'WHATSAPP_NOT_CONFIGURED' ? 'WhatsApp templates are unavailable because WhatsApp is not configured.' : 'Could not load templates. ' + errorMessage(reason));
+    }
+    if (images.status === 'fulfilled' && images.value && Array.isArray(images.value.items)) tplImg.images = images.value.items.map(readTemplateImage).filter(Boolean);
+    else problems.push('Could not load the default images. ' + (images.status === 'rejected' ? errorMessage(images.reason) : 'The server returned an unreadable list.'));
+    message('tplimg-error', problems.join(' '));
+    byId('tplimg-retry').hidden = !problems.length;
+    renderTemplateImages();
+  }
+  function tplImgRows() {
+    if (!tplImg.images) return [];
+    const rows = (tplImg.templates || []).map((template) => ({ templateName: template.name, language: template.language, format: template.headerFormat, image: tplImg.images.find((item) => item.templateName === template.name) || null }));
+    for (const image of tplImg.images) {
+      if (!rows.some((row) => row.templateName === image.templateName)) rows.push({ templateName: image.templateName, language: '', format: image.kind.toUpperCase(), image });
+    }
+    return rows;
+  }
+  function renderTemplateImages() {
+    const list = byId('tplimg-list');
+    const active = document.activeElement;
+    const keep = active && list.contains(active) && active.closest('[data-template-name]') ? { name: active.closest('[data-template-name]').dataset.templateName, action: active.dataset.action || 'choose' } : null;
+    const rows = tplImgRows();
+    if (!tplImg.images) list.replaceChildren();
+    else if (!rows.length) list.replaceChildren(emptyState('No templates with a media header', tplImg.templates ? 'Templates with an image, video or document header will appear here once Meta approves them.' : 'Templates could not be loaded, so none can be listed.'));
+    else list.replaceChildren(...rows.map(renderTemplateImageRow));
+    if (keep) focusRow('tplimg-list', 'data-template-name', keep.name, [keep.action, 'choose'], 'tplimg-refresh');
+  }
+  function renderTemplateImageRow(row) {
+    const card = element('article', undefined, 'management-card');
+    card.dataset.templateName = row.templateName;
+    const kind = row.format.toLowerCase();
+    const noun = kind === 'image' ? 'image' : kind === 'video' ? 'video' : 'file';
+    const thumb = element('span', undefined, 'tplimg-thumb');
+    if (row.image && kind === 'image') {
+      const preview = document.createElement('img');
+      preview.alt = 'Default image for ' + row.templateName;
+      preview.loading = 'lazy';
+      preview.src = '/v1/admin/whatsapp/templates/' + encodeURIComponent(row.templateName) + '/header-image?v=' + encodeURIComponent(row.image.attachmentId);
+      thumb.append(preview);
+    } else if (row.image) {
+      thumb.append(attachmentThumb({ kind, attachmentId: '' }, 'tplimg-icon'));
+    } else {
+      thumb.append(element('span', 'Not set', 'tplimg-none'));
+    }
+    const text = element('div');
+    text.append(element('h4', row.templateName + (row.language ? ' · ' + row.language : ''), 'cfg-rule-name'), element('p', row.image ? (row.image.fileName || 'Default ' + noun) + (row.image.size ? ' · ' + waFileSize(row.image.size) : '') : 'No default ' + noun + ' yet. Senders must choose one every time.', 'cfg-quick-text'));
+    const actions = element('div', undefined, 'actions');
+    const choose = button((row.image ? 'Replace ' : 'Choose ') + noun + '…', () => {
+      tplImg.target = row;
+      const input = byId('tplimg-file');
+      input.accept = attachAccept([kind]);
+      input.click();
+    }, row.image ? 'secondary' : '');
+    choose.dataset.action = 'choose';
+    choose.disabled = tplImg.busy;
+    choose.setAttribute('aria-label', (row.image ? 'Replace default ' : 'Choose default ') + noun + ' for ' + row.templateName);
+    actions.append(choose);
+    if (row.image) {
+      const remove = button('Remove', () => removeTemplateImage(row, remove), 'secondary delete-button');
+      remove.dataset.action = 'remove';
+      remove.disabled = tplImg.busy;
+      remove.setAttribute('aria-label', 'Remove default ' + noun + ' for ' + row.templateName);
+      actions.append(remove);
+    }
+    const top = element('div', undefined, 'management-top');
+    top.append(thumb, text, actions);
+    card.append(top);
+    return card;
+  }
+  function removeTemplateImage(row, opener) {
+    openConfigDelete({
+      title: 'Remove the default image?',
+      description: 'Senders will have to choose a file every time they send this template. Messages already sent are not affected.',
+      name: row.templateName + (row.language ? ' · ' + row.language : ''),
+      confirmLabel: 'Remove default',
+      cancelLabel: 'Keep default',
+      opener,
+      run: async () => {
+        await api('/whatsapp/template-images/' + encodeURIComponent(row.templateName), { method: 'DELETE', body: '{}' });
+        if (tplImg.images) tplImg.images = tplImg.images.filter((item) => item.templateName !== row.templateName);
+        templateState.templates = null;
+        renderTemplateImages();
+        message('tplimg-status', 'Removed the default for ' + row.templateName + '.');
+      },
+      after: () => focusRow('tplimg-list', 'data-template-name', row.templateName, ['choose'], 'tplimg-refresh')
+    });
+  }
+  byId('tplimg-file').addEventListener('change', async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    const row = tplImg.target;
+    tplImg.target = null;
+    if (!file || !row || tplImg.busy) return;
+    const kind = row.format.toLowerCase();
+    message('tplimg-status', '');
+    const problem = attachProblem(file, [kind]);
+    if (problem) { message('tplimg-error', problem); return; }
+    message('tplimg-error', '');
+    tplImg.busy = true;
+    renderTemplateImages();
+    message('tplimg-status', 'Uploading…');
+    try {
+      const uploaded = await uploadAttachment(file);
+      if (uploaded.kind !== kind) throw new Error('The uploaded file is not a ' + kind + '.');
+      const data = await api('/whatsapp/template-images/' + encodeURIComponent(row.templateName), { method: 'PUT', body: JSON.stringify({ attachmentId: uploaded.attachmentId }) });
+      const saved = readTemplateImage(data && data.item);
+      if (!saved) throw new Error('The server returned an unreadable result. Refresh to see the current default.');
+      tplImg.images = (tplImg.images || []).filter((item) => item.templateName !== saved.templateName).concat(saved);
+      templateState.templates = null;
+      message('tplimg-status', 'Saved the default for ' + row.templateName + '.');
+    } catch (error) {
+      message('tplimg-status', '');
+      message('tplimg-error', 'Could not save the default. ' + errorMessage(error));
+    } finally {
+      tplImg.busy = false;
+      renderTemplateImages();
+    }
+  });
+  byId('tplimg-retry').addEventListener('click', loadTemplateImages);
+  byId('tplimg-refresh').addEventListener('click', loadTemplateImages);
+
   const quickDialog = byId('quick-dialog');
   const quickEdit = { item: null, opener: null, saving: false, savedId: '' };
   function openQuickDialog(item, opener) {
@@ -4914,6 +5337,7 @@ export const clientJavaScript = String.raw`(() => {
     for (const name of ['customers', 'whatsapp']) byId(name + '-tab').hidden = !tabAvailable(name);
     document.body.dataset.customers = features.customers ? 'on' : 'off';
     byId('config-nav-whatsapp').hidden = !whatsappAvailable();
+    byId('tplimg-panel').hidden = !whatsappAvailable();
     if (!whatsappAvailable() && !byId('config-section-whatsapp').hidden) selectConfigSection('features', false);
     if (activeTab && !tabAvailable(activeTab)) { location.hash = 'call-history'; showTab(); }
   }
@@ -5540,6 +5964,7 @@ export const clientJavaScript = String.raw`(() => {
       loadAutoReplies();
       loadActivity();
       loadQuickMessages(false);
+      loadTemplateImages();
     }
   }
   let employeesLoaded = false;

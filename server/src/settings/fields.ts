@@ -82,4 +82,6 @@ export type FeatureName = keyof typeof featureKeys;
 export interface Features { customers: boolean; whatsapp: boolean }
 
 /** Run-state written by scheduled jobs; plain text, not user-editable. */
-export const jobKeys = { emailLastSent: "job.email.lastSent", retentionLastRun: "job.retention.lastRun" } as const;
+export const jobKeys = {
+  emailLastSent: "job.email.lastSent", retentionLastRun: "job.retention.lastRun", attachmentsLastRun: "job.whatsappAttachments.lastRun",
+} as const;

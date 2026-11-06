@@ -14,14 +14,17 @@ const selectMessage = `SELECT m.id, m.customer_id, m.direction, m.message_type, 
 
 export interface OutboundDraft {
   id: string; customerId: string; to: string; from: string | null;
-  type: "text" | "template"; body: string | null; templateName: string | null; employeeId: string | null;
+  type: "text" | "template" | "image" | "video" | "document"; body: string | null; templateName: string | null; employeeId: string | null;
+  /** The file the message carries (a chat attachment, or a template's header file). It is served from the private bucket. */
+  media?: { key: string; mimeType: string; fileName: string; size: number };
 }
 
-export function createWhatsAppRepository(db: D1Database, clock: Clock = () => new Date()) {
+/** `apiBase` prefixes the media URLs in returned messages: `/v1/admin` for the dashboard, `/v1/device` for phones. */
+export function createWhatsAppRepository(db: D1Database, clock: Clock = () => new Date(), apiBase = "/v1/admin") {
   const customers = createCustomerRepository(db, clock);
   async function get(id: string): Promise<WhatsAppMessage | null> {
     const row = await db.prepare(`${selectMessage} WHERE m.id = ?`).bind(id).first<MessageRow>();
-    return row ? message(row) : null;
+    return row ? message(row, apiBase) : null;
   }
   return {
     get,
@@ -49,11 +52,13 @@ export function createWhatsAppRepository(db: D1Database, clock: Clock = () => ne
       const now = timestamp(clock);
       const result = await db.prepare(
         `INSERT INTO whatsapp_messages (id, customer_id, direction, message_type, body, template_name,
-          status, from_number, to_number, sent_at, sent_by_employee_id, source, created_at)
-        VALUES (?, ?, 'out', ?, ?, ?, 'queued', ?, ?, ?, ?, 'app', ?)
+          status, from_number, to_number, sent_at, sent_by_employee_id, source, created_at,
+          media_key, media_mime, media_name, media_size)
+        VALUES (?, ?, 'out', ?, ?, ?, 'queued', ?, ?, ?, ?, 'app', ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO NOTHING`,
       ).bind(draft.id, draft.customerId, draft.type, draft.body, draft.templateName, draft.from, draft.to, now,
-        draft.employeeId, now).run();
+        draft.employeeId, now, draft.media?.key ?? null, draft.media?.mimeType ?? null, draft.media?.fileName ?? null,
+        draft.media?.size ?? null).run();
       const stored = await get(draft.id);
       if (!stored) throw new Error("Message write returned no row");
       return { message: stored, created: result.meta.changes > 0 };

@@ -1,6 +1,7 @@
 import { createApp } from "./app";
 import { istDate, sendCallSummary } from "./reporting/call-summary";
 import { purgeExpiredRecordings, retentionDays } from "./retention/recordings";
+import { purgeStaleAttachments } from "./retention/attachments";
 import { jobKeys } from "./settings/fields";
 import { readJob, writeJob } from "./settings/jobs";
 import { applySettings, loadSettings } from "./settings/service";
@@ -33,6 +34,17 @@ export default {
       }
     } catch {
       failures.push(new Error("Recording retention failed"));
+    }
+    try {
+      // Abandoned chat uploads are removed once per IST day.
+      const today = istDate(controller.scheduledTime);
+      if ((await readJob<{ date?: unknown }>(env.DB, jobKeys.attachmentsLastRun))?.date !== today) {
+        const removed = await purgeStaleAttachments(env);
+        if (removed > 0) console.log(JSON.stringify({ job: "whatsapp-attachment-cleanup", removed }));
+        await writeJob(env, jobKeys.attachmentsLastRun, { date: today });
+      }
+    } catch {
+      failures.push(new Error("WhatsApp attachment cleanup failed"));
     }
     if (failures.length) throw failures[0];
   },
