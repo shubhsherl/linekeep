@@ -30,7 +30,7 @@ import { createAdminWhatsAppMediaRoutes, createDeviceWhatsAppMediaRoutes } from 
 import { createAdminWhatsAppConfigRoutes, createDeviceWhatsAppConfigRoutes } from "./modules/whatsapp/config-routes";
 
 import { createAdminSettingsRoutes } from "./modules/settings";
-import { createAdminAppRoutes, createPublicDownloadRoutes } from "./modules/app-release";
+import { createAdminAppRoutes, createPublicDownloadRoutes } from "./modules/app-download";
 import type { Env } from "./env";
 import type { Features } from "./settings/fields";
 import { applySettings, loadSettings, resolveFeatures } from "./settings/service";

@@ -89,7 +89,7 @@ Before using remote administration, create a self-hosted Access application for 
 - `/admin` and `/admin/*`, including assets.
 - `/v1/admin` and `/v1/admin/*`, including playback/download routes.
 
-`/download` and `/download/*` (the employee APK download, see [Android app download](#android-app-download)) and `/health` must stay **outside** the Access application: employees open them without signing in. If your existing application covers the whole hostname (or `/*`), edit it so its destinations are exactly `/admin`, `/admin/*`, `/v1/admin` and `/v1/admin/*`. The Worker still returns 404 on `/download*` unless an administrator has turned sharing on.
+`/download` and `/download/*` (the employee download page, see [Android app download](#android-app-download)) and `/health` must stay **outside** the Access application: employees open them without signing in. If your existing application covers the whole hostname (or `/*`), edit it so its destinations are exactly `/admin`, `/admin/*`, `/v1/admin` and `/v1/admin/*`.
 
 Use an explicit allow policy for your administrators through your chosen identity provider. Configure an appropriate session lifetime; one hour is a reasonable starting point. Keep `/v1/device/*` outside the browser login challenge: device registration, bearer tokens and upload capabilities provide its authentication. `/health` remains public. Do not apply a whole-host Access challenge that prevents Android from reaching device routes.
 
@@ -208,13 +208,13 @@ All routes need an administrator:
 
 ## Android app download
 
-**Config → Android app** lets an administrator upload the latest release APK, download it again, and share a download page with employees.
+The server stores and serves no APK. Employees install the **Community Android build**, published in the open-source GitHub releases, and **Config → Android app** gives the admin the link and QR code to hand out.
 
-- Storage: the private `RECORDINGS` bucket under `app-releases/linekeep-<versionName>.apk`. Metadata (`versionName`, `size`, `sha256`, `uploadedAt`, `objectKey`) lives in the `app_settings` rows `app.latest` and `app.publicDownload` (`true`/`false`, default `false`). The newest three uploads are kept; uploading an existing version name replaces it. The upload is streamed to R2 and hashed on the way; the file must be 1 KB to 100 MB, declare `Content-Length` and start with the ZIP signature (`PK\x03\x04`).
-- Administrator routes (existing admin auth): `GET /v1/admin/app`, `PUT /v1/admin/app/apk?versionName=1.0.5` (raw `application/vnd.android.package-archive` or `application/octet-stream` body), `GET /v1/admin/app/apk` (attachment), `DELETE /v1/admin/app/apk` (deletes every stored APK, the metadata and turns sharing off), `PUT /v1/admin/app/sharing` (`{"publicDownload": true}`; 400 until an APK exists), `GET /v1/admin/app/qr.svg` (QR for `<origin>/download`).
-- Public routes, only while sharing is on (otherwise a plain 404): `GET /download` (a self-contained page with the version, size, SHA-256 and install steps) and `GET`/`HEAD /download/linekeep.apk` (`Content-Disposition: attachment`, `Cache-Control: no-store`, byte ranges supported).
-- Anyone with the link can download the APK while sharing is on. The generic release APK contains no server address or secrets and does nothing without an enrollment code. Keep `/download*` outside the Cloudflare Access application (see [Cloudflare Access](#cloudflare-access)).
-- Cloudflare limits the request body size by plan (100 MB on Free and Pro); the upload limit here is the same 100 MB.
+- `GET /download` (public, always on, no settings): a small self-contained page with a strict CSP and no script. It names the community build, links to the releases page, and gives four install steps (including allowing **Install unknown apps** for the browser). It says the employer provides the enrollment QR or code separately.
+- `GET`/`HEAD /download/linekeep.apk` (public): a `302` to `https://github.com/<repo>/releases/latest/download/linekeep.apk` with `Cache-Control: no-store`. The latest release must therefore carry an asset named `linekeep.apk`.
+- `GET /v1/admin/app/qr.svg` (admin only): an SVG QR code encoding `<origin>/download`.
+- The repository and asset name live in one place, `server/src/modules/app-download/community-build.ts` (`COMMUNITY_APK_REPO`, `COMMUNITY_APK_ASSET`). A fork that publishes its own APK changes them there; the page, the redirect and the Config page follow.
+- Keep `/download*` outside the Cloudflare Access application (see [Cloudflare Access](#cloudflare-access)).
 
 ## Customers and WhatsApp conversations
 

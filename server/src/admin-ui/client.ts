@@ -1,3 +1,5 @@
+import { communityReleasesUrl } from "../modules/app-download/community-build";
+
 export const clientJavaScript = String.raw`(() => {
   'use strict';
   const byId = (id) => document.getElementById(id);
@@ -5503,204 +5505,37 @@ export const clientJavaScript = String.raw`(() => {
     updateFound();
   }
 
-  // ---- Config: Android app (upload the release APK, share a download link and QR code) ----
-  const appState = { data: null, note: '' };
-  const APP_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$/;
-  const APK_MIN_BYTES = 1024;
-  const APK_TYPE = 'application/vnd.android.package-archive';
-  function versionFromFileName(name) {
-    const match = /\d+(?:\.\d+)+(?:-(?:alpha|beta|rc)[0-9.]*)?/i.exec(name.replace(/\.apk$/i, ''));
-    return match ? match[0].slice(0, 32) : '';
-  }
-  function sizeText(bytes) {
-    if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return 'Not available';
-    return bytes < 1048576 ? Math.max(1, Math.round(bytes / 1024)) + ' KB' : (bytes / 1048576).toFixed(1) + ' MB';
-  }
-  function readApp(data) {
-    const latest = data && data.latest;
-    const valid = latest && typeof latest.versionName === 'string' && typeof latest.size === 'number' && typeof latest.sha256 === 'string' && typeof latest.uploadedAt === 'string';
-    if (!data || typeof data.downloadPageUrl !== 'string' || (latest !== null && !valid)) throw new Error('The Android app details could not be read. Please refresh.');
-    return data;
-  }
-  function uploadApk(file, versionName, onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', '/v1/admin/app/apk?versionName=' + encodeURIComponent(versionName));
-      xhr.setRequestHeader('Content-Type', APK_TYPE);
-      xhr.setRequestHeader('Accept', 'application/json');
-      xhr.upload.addEventListener('progress', (event) => { if (event.lengthComputable) onProgress(event.loaded / event.total); });
-      xhr.addEventListener('error', () => reject(new Error('The upload failed. Check your connection, make sure you are still signed in, and try again.')));
-      xhr.addEventListener('abort', () => reject(new Error('The upload was cancelled.')));
-      xhr.addEventListener('load', () => {
-        if (xhr.status === 401 || xhr.status === 403) {
-          byId('auth-notice').hidden = false;
-          reject(new Error('Your admin session is unavailable. Sign in again to continue.'));
-          return;
-        }
-        let data = null;
-        try { data = JSON.parse(xhr.responseText); } catch { data = null; }
-        if (xhr.status >= 200 && xhr.status < 300 && data) { byId('auth-notice').hidden = true; resolve(data); return; }
-        const detail = data && data.error && typeof data.error.message === 'string' ? data.error.message : 'The server rejected the upload.';
-        const requestId = data && typeof data.requestId === 'string' ? ' Request ID: ' + data.requestId : '';
-        reject(new Error(detail + requestId));
-      });
-      xhr.send(file);
-    });
-  }
-  async function loadApp() {
-    try { appState.data = readApp(await api('/app')); }
-    catch (error) {
-      message('config-settings-error', 'Could not load the Android app. ' + errorMessage(error));
-      return;
-    }
-    renderAppPage();
-  }
-  function appFact(labelText, value) {
-    const row = element('div');
-    row.append(element('dt', labelText), element('dd', value));
-    return row;
-  }
+  // ---- Config: Android app (the Community Android build is published on GitHub; this page shares the link) ----
+  const COMMUNITY_RELEASES_URL = ${JSON.stringify(communityReleasesUrl)};
   function renderAppPage() {
     const ui = settingsPage('app', 'settings-app-body');
-    const data = appState.data;
-    if (!data) return;
-    const latest = data.latest;
+    const pageUrl = location.origin + '/download';
     ui.body.append(stepsBlock('Share the Android app with your team', [
-      ['Build the release APK on your computer (see ', element('code', 'android/README.md'), ', Release build) or get it from whoever builds the app. Use the release build, not a debug build.'],
-      'Click Choose file below and pick the APK.',
-      'Check the version name. It is filled in from the file name; change it if it is wrong.',
-      'Click Upload APK and wait for the progress bar to finish.',
-      'Turn on Share with employees. Anyone who has the link can then download the app.',
-      'Show the QR code to your team or send them the link.',
-      'Each employee opens the link on their Android phone, installs the app, then scans the enrollment QR code you create under Employees.'
+      'Send employees the link below, or show them the QR code.',
+      ['They open it on their Android phone and install the Community Android build, which is downloaded from the ', extLink('GitHub releases', COMMUNITY_RELEASES_URL), '. It is a generic release build with no server address built in.'],
+      'They then scan the enrollment QR code (or enter the code) that you create under Employees.'
     ]));
-
-    const current = formPanel('Current version');
-    if (!latest) {
-      current.append(element('p', 'No APK has been uploaded yet.', 'muted'));
-    } else {
-      const facts = element('dl', undefined, 'cfg-facts');
-      facts.append(appFact('Version', latest.versionName), appFact('Size', sizeText(latest.size)), appFact('Uploaded', dateText(latest.uploadedAt)));
-      current.append(facts, fixedValue(ui, 'sha256', 'SHA-256', latest.sha256, 'Employees can compare this with the checksum shown on the download page.'));
-      const download = element('a', 'Download APK', 'button secondary');
-      download.href = '/v1/admin/app/apk';
-      const remove = settingsButton(ui, 'Remove', () => {
-        openConfigDelete({
-          title: 'Remove the Android app?',
-          description: 'The APK is deleted from the server and the download link and QR code stop working. Phones that already have the app keep it. You can upload the APK again at any time.',
-          name: 'Linekeep ' + latest.versionName + ' (' + sizeText(latest.size) + ')',
-          confirmLabel: 'Remove APK',
-          cancelLabel: 'Keep APK',
-          opener: remove,
-          run: async () => { appState.data = readApp(await api('/app/apk', { method: 'DELETE' })); appState.note = 'The APK was removed and sharing is off.'; },
-          after: () => { renderAppPage(); byId('config-app-heading').focus(); }
-        });
-      }, true);
-      remove.classList.add('delete-button');
-      const row = element('div', undefined, 'actions cfg-app-actions');
-      row.append(download, remove);
-      current.append(row);
-    }
-
-    const upload = formPanel(latest ? 'Upload a new version' : 'Upload the APK', 'Uploading a version name that already exists replaces it. The newest three uploads are kept on the server.');
-    const fileLabel = element('label', 'APK file');
-    const pick = element('input');
-    pick.type = 'file';
-    pick.id = 'set-app-file';
-    pick.accept = '.apk,' + APK_TYPE;
-    fileLabel.append(pick);
-    const version = textField(ui, 'version', 'Version name', '', { placeholder: '1.0.5', hint: 'Letters, digits and . + _ - (up to 32 characters). Filled in from the file name.' });
-    let versionEdited = false;
-    version.input.addEventListener('input', () => { versionEdited = true; });
-    pick.addEventListener('change', () => {
-      const file = pick.files && pick.files[0];
-      if (file && !versionEdited) version.input.value = versionFromFileName(file.name);
-    });
-    const progress = element('progress', undefined, 'cfg-progress');
-    progress.max = 1;
-    progress.value = 0;
-    progress.hidden = true;
-    progress.setAttribute('aria-label', 'Upload progress');
-    const sharing = switchField(ui, 'sharing', 'Share with employees (public download link)', data.publicDownload);
-    sharing.input.disabled = !latest;
-    const uploadButton = settingsButton(ui, 'Upload APK', () => {
-      runSetting(ui, uploadButton, 'Uploading…', async () => {
-        const file = pick.files && pick.files[0];
-        const name = version.value();
-        if (!file) throw new Error('Choose the APK file first.');
-        if (!APP_VERSION.test(name)) throw new Error('Enter a version name of 1 to 32 letters, digits, dots, plus signs, underscores or hyphens, starting with a letter or digit.');
-        if (file.size < APK_MIN_BYTES) throw new Error('That file is too small to be an APK.');
-        if (typeof data.maxBytes === 'number' && file.size > data.maxBytes) throw new Error('That file is larger than the ' + sizeText(data.maxBytes) + ' limit.');
-        const locked = [pick, version.input, sharing.input];
-        const wasDisabled = locked.map((node) => node.disabled);
-        locked.forEach((node) => { node.disabled = true; });
-        progress.value = 0;
-        progress.hidden = false;
-        try {
-          appState.data = readApp(await uploadApk(file, name, (fraction) => {
-            progress.value = fraction;
-            note(byId(ui.status.id), 'Uploading… ' + Math.round(fraction * 100) + '%');
-          }));
-        } finally {
-          progress.hidden = true;
-          locked.forEach((node, index) => { node.disabled = wasDisabled[index]; });
-        }
-        appState.note = 'Uploaded version ' + name + '.' + (appState.data.publicDownload ? '' : ' Turn on sharing so employees can download it.');
-        renderAppPage();
-      });
-    });
-    upload.append(fileLabel, version.node, element('div', undefined, 'actions cfg-app-actions'), progress, ui.status, ui.error);
-    upload.querySelector('.actions').append(uploadButton);
-    ui.body.append(current, upload);
-
-    const share = formPanel('Sharing');
-    const warning = element('p', data.publicDownload
-      ? 'Sharing is ON. Anyone who has the link or the QR code can download the APK without signing in. Turn it off once your team has installed the app.'
-      : 'When sharing is on, anyone who has the link or the QR code can download the APK without signing in. While it is off, the link and QR code show "not found" to everyone. The release APK contains no server address or secrets.', 'notice');
-    sharing.input.addEventListener('change', async () => {
-      const want = sharing.input.checked;
-      sharing.input.disabled = true;
-      note(byId(ui.error.id), '');
-      try {
-        appState.data = readApp(await api('/app/sharing', { method: 'PUT', body: JSON.stringify({ publicDownload: want }) }));
-        appState.note = want ? 'Sharing is on.' : 'Sharing is off.';
-        renderAppPage();
-        byId('set-app-sharing').focus();
-      } catch (error) {
-        sharing.input.checked = !want;
-        sharing.input.disabled = false;
-        note(byId(ui.error.id), errorMessage(error));
-      }
-    });
-    share.append(sharing.node, warning);
-    if (!latest) share.append(element('p', 'Upload an APK to turn sharing on.', 'hint'));
-    ui.body.append(share);
-
-    if (latest) {
-      const link = formPanel('Link and QR code', data.publicDownload ? 'Employees who open the link or scan the QR code see the download page.' : 'These work only while sharing is on.');
-      link.append(fixedValue(ui, 'link', 'Download page link', data.downloadPageUrl));
-      const qr = element('img', undefined, 'cfg-qr');
-      qr.src = '/v1/admin/app/qr.svg';
-      qr.alt = 'QR code for the download page link';
-      qr.width = 220;
-      qr.height = 220;
-      const save = element('a', 'Download QR as SVG', 'button secondary');
-      save.href = '/v1/admin/app/qr.svg';
-      save.download = 'linekeep-download-qr.svg';
-      const row = element('div', undefined, 'actions cfg-app-actions');
-      row.append(save);
-      link.append(qr, row);
-      ui.body.append(link);
-    }
-    note(byId(ui.status.id), appState.note);
-    appState.note = '';
+    const link = formPanel('Link and QR code', 'Anyone with the link or the QR code can open the download page. It needs no sign-in and shows no company data.');
+    link.append(fixedValue(ui, 'link', 'Download page link', pageUrl));
+    const qr = element('img', undefined, 'cfg-qr');
+    qr.src = '/v1/admin/app/qr.svg';
+    qr.alt = 'QR code for the download page link';
+    qr.width = 220;
+    qr.height = 220;
+    const save = element('a', 'Download QR as SVG', 'button secondary');
+    save.href = '/v1/admin/app/qr.svg';
+    save.download = 'linekeep-download-qr.svg';
+    const row = element('div', undefined, 'actions cfg-app-actions');
+    row.append(save, extLink('Open the GitHub releases page', COMMUNITY_RELEASES_URL));
+    link.append(qr, row);
+    ui.body.append(link);
   }
 
   function enterConfig() {
     settingsState.importedNote = '';
     loadSettings();
     loadFeatures();
-    loadApp();
+    renderAppPage();
     if (whatsappAvailable()) {
       loadAutoReplies();
       loadActivity();

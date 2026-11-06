@@ -649,7 +649,6 @@ dialog.cfg-dialog { width: min(640px, calc(100% - 28px)); }
 .cfg-fixed code { padding: 8px 10px; border: 1px dashed var(--border, #c9d3cc); border-radius: 6px; background: var(--surface-muted, #f1f4f1); overflow-wrap: anywhere; user-select: all; }
 .cfg-secret .actions button { min-height: 28px; padding: 2px 10px; font-size: 12px; font-weight: 500; }
 .cfg-qr { display: block; width: 220px; height: 220px; max-width: 100%; margin: 8px 0; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-.cfg-progress { width: 100%; height: 10px; }
 .cfg-app-actions { margin: 8px 0; }
 .cfg-file { width: fit-content; max-width: 100%; }
 .cfg-file input[type=file] { min-height: 0; padding: 4px 0; border: 0; background: transparent; }
