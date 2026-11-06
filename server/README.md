@@ -185,6 +185,25 @@ The unified feed shows calls with inline audio and explicit **Unlinked recording
 
 **Delete call log** keeps audio as unlinked recordings; **Delete recording** removes its R2 bytes but keeps history. Both remove the selected item from the unified feed and leave phone originals untouched. History tombstones retain matching/deduplication metadata to prevent replay restoration and false associations: this is not full data erasure. Recording deletion invalidates previous playback capabilities while preserving legacy tombstone API semantics. See the [deletion contract](../handoffs/SERVER_AGENT.md#approved-linekeep-identity-and-independent-deletion--2026-09-27).
 
+## Settings in the dashboard (Config)
+
+WhatsApp, push notifications, the daily email and the Customers/WhatsApp switches are configured by admins in the dashboard's **Config** tab; each page lists its setup steps. Values live in D1 (`app_settings`, migration `0017_settings.sql`). Secrets (WhatsApp token, app secret and verify token, Mailgun API key, Firebase service account) are encrypted with AES-256-GCM before they are stored: the key is derived (HKDF-SHA256) from `TOKEN_HASH_SECRET`, every value has its own random IV and the setting's name is bound to the ciphertext. Secrets are write-only: no endpoint returns them. Saving a secret fails with `503 NOT_CONFIGURED` while `TOKEN_HASH_SECRET` is missing, and **rotating `TOKEN_HASH_SECRET` makes saved secrets unreadable** (they show as not set; enter them again).
+
+Precedence per value: the database, then the Worker variable or secret of the same name (`WHATSAPP_*`, `FCM_SERVICE_ACCOUNT`, `FIREBASE_CLIENT_CONFIG`, `MAILGUN_*`, `EMAIL_IDS`, `CALL_SUMMARY_ENABLED`, `CALL_SUMMARY_SEND_TIME`, `WHATSAPP_APP_ID`), then unset. Existing deployments therefore keep working unchanged; **Import from deployment** copies the variables into the encrypted store. A middleware lays the effective values over `context.env`, from a ~15 s per-isolate cache that a save invalidates (another isolate can take up to 15 s to notice).
+
+All routes need an administrator:
+
+| Route | Purpose |
+|---|---|
+| `GET /v1/admin/settings` | Current settings; secrets only as `{set, source: "database"\|"deployment"\|"none"}`, plus `deployment.importable` |
+| `PUT /v1/admin/settings/{features\|whatsapp\|email\|push}` | Partial update: absent = unchanged, `null` = clear, a string replaces a secret; `whatsapp.verifyToken: {"generate": true}` returns `generatedVerifyToken` once |
+| `POST /v1/admin/settings/import-deployment` | Copy deployment values that are not yet in the database; returns `{imported}` |
+| `POST /v1/admin/settings/whatsapp/test` | Check the token and phone number id against Meta's Graph API |
+| `POST /v1/admin/settings/email/test` | Send a test email to the recipients |
+| `GET /v1/admin/features` | `{customers, whatsapp}` for tab visibility |
+
+**Feature switches.** Customers and WhatsApp are off on a new install; while off, their admin and device routes answer `404 feature_disabled` and the WhatsApp webhook answers 404. WhatsApp needs Customers. The migration switches them on when customers or WhatsApp data already exist, and an install that already has `WHATSAPP_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` variables keeps both on until someone turns them off, so deploying does not interrupt a working setup. Push token registration is not gated.
+
 ## Customers and WhatsApp conversations
 
 Migration `0008_customers.sql` adds `customers`, `customer_employees` and `whatsapp_messages`, plus two virtual columns and a partial index on `call_logs` so a customer's calls are found by phone key without scanning history. See the [customer contract](../handoffs/SERVER_AGENT.md#customers-whatsapp-chats-and-employee-assignment--2026-10-06-approved-by-project-owner). Phone numbers are normalized once (`normalizePhone` in `src/data/customers.ts`) to `+<digits>`; the last 10 digits (`phone_key`) are unique among non-archived customers and are compared with the last 10 digits of `call_logs.remote_number`. Only common separators (space, `+ - ( ) . /`) are stripped from call-log numbers; numbers containing other characters or fewer than 10 digits never match.
@@ -193,7 +212,7 @@ Administrators manage customers and read chats and calls at `/v1/admin/customers
 
 ## Push notifications
 
-Employees' phones are notified (Firebase Cloud Messaging, free) when a customer assigned to them sends a WhatsApp message and when a customer is newly assigned to them. Removing someone from a customer never notifies. The push carries only the customer's name, never the message text. Push is off until both secrets exist:
+Employees' phones are notified (Firebase Cloud Messaging, free) when a customer assigned to them sends a WhatsApp message and when a customer is newly assigned to them. Removing someone from a customer never notifies. The push carries only the customer's name, never the message text. Push is off until the service account and client config exist. The easiest way is **Config → Push** in the dashboard; the commands below set them as Worker secrets instead, which act as the fallback:
 
 1. Create a Firebase project (console.firebase.google.com, Google Analytics off) and register an Android app with package `com.microorganics.calltracker`.
 2. In Google Cloud IAM for that project create a service account with the **Firebase Cloud Messaging API Admin** role and download a JSON key.
@@ -213,9 +232,9 @@ echo '{"apiKey":"<current_key>","appId":"<mobilesdk_app_id>","projectId":"<proje
 
 ## Daily email summaries
 
-The same Worker can send a Mailgun email at **6 PM IST every day**, using Cloudflare Cron `30 12 * * *` (UTC). No GitHub Actions runner or additional public endpoint is required. Reporting is disabled by default in the public configuration template.
+The same Worker can send a Mailgun email **once a day at a time you choose in IST (default 6 PM)**. Cloudflare cron triggers are fixed in `wrangler.jsonc`, so the cron runs **every 30 minutes** (`*/30 * * * *`) and the Worker sends only when the current IST half-hour slot equals the configured send time (rounded down to :00 or :30) and that day has not been sent yet; the last date and status are kept in `app_settings`. Changing the time in **Config → Daily email** therefore needs no redeploy. No GitHub Actions runner or additional public endpoint is required. Reporting is disabled by default in the public configuration template.
 
-Each email covers calls **starting from midnight up to, but not including, 6 PM IST that day**, as uploaded when the job executes. This is a **today-so-far snapshot**, not a complete-day report: calls after the cutoff and uploads arriving after generation are not carried into tomorrow's email. Delayed execution uses the scheduled event's date, not the current execution date.
+Each email covers calls **starting from midnight up to, but not including, the send time (6 PM by default) IST that day**, as uploaded when the job executes. This is a **today-so-far snapshot**, not a complete-day report: calls after the send time and uploads arriving after generation are not carried into tomorrow's email. Delayed execution uses the scheduled event's date, not the current execution date.
 
 The HTML and plain-text report includes overall and per-employee totals, connected calls (logged duration greater than zero), calls without duration, distinct stored-number counts, total duration and all eight Android call types. Only undeleted call history is counted; audio never adds duplicate calls. Attribution uses each log's historical employee, including employees no longer assigned to the device. Unique-contact counts represent distinct stored number strings, not deduplicated people. Individual phone-number fields, raw call rows and recordings are not emailed. A no-call day still produces a zero-call report.
 
@@ -231,19 +250,20 @@ npx wrangler secret put EMAIL_IDS --env dev
 
 `EMAIL_IDS` follows the reference GitHub workflow's configuration: either `admin@example.com,manager@example.com` or `["admin@example.com","manager@example.com"]`. Supply plain email addresses, at most 1,000. Invalid lists fail without sending a partial report. Recipients appear together in the email's **To** field and can see each other's addresses. GitHub cannot return an existing repository secret's value; copy it from your own configuration or set a new approved list.
 
-In your ignored `wrangler.jsonc`, set these on the intended environment only:
+The recipients, Mailgun settings, send time and on/off switch can be entered in **Config → Daily email** (stored values win over the secrets above). To enable it from configuration instead, set these on the intended environment only in your ignored `wrangler.jsonc` (an install that still has the old once-a-day cron `30 12 * * *` keeps sending at 18:00 IST, but cannot change the time without the new cron):
 
 ```jsonc
-"triggers": { "crons": ["30 12 * * *"] },
+"triggers": { "crons": ["*/30 * * * *"] },
 "vars": {
   // Retain the environment's existing variables.
-  "CALL_SUMMARY_ENABLED": "true"
+  "CALL_SUMMARY_ENABLED": "true",
+  "CALL_SUMMARY_SEND_TIME": "18:00" // IST, optional
 }
 ```
 
 The sender is `Linekeep Reports <postmaster@MAILGUN_DOMAIN>`. Optionally set `MAILGUN_FROM_EMAIL` to another authorized sender and `MAILGUN_REGION` to `eu` for an EU domain; the default region is `us`. These can also be provisioned as Worker secrets. Do not copy Cratio login credentials or an unused email provider's key into Linekeep.
 
-Deploy with `npm run deploy` for development. Configure production separately with `--env production` only when intended; enabling development does not enable production. Cron changes can take up to 15 minutes to propagate. To stop sending, set `CALL_SUMMARY_ENABLED` to `"false"` and redeploy. Set that environment's `triggers.crons` to `[]` as well if you want to remove its scheduled invocations.
+Deploy with `npm run deploy` for development. Configure production separately with `--env production` only when intended; enabling development does not enable production. Cron changes can take up to 15 minutes to propagate. To stop sending, turn it off in Config or set `CALL_SUMMARY_ENABLED` to `"false"` and redeploy. Set that environment's `triggers.crons` to `[]` as well if you want to remove its scheduled invocations.
 
 ### Verification and delivery status
 
@@ -253,7 +273,7 @@ Cloudflare **Cron Events** shows scheduled invocation outcomes. A successful req
 
 ## Recording retention
 
-Optional and **off by default**. Set `RECORDING_RETENTION_DAYS` (a whole number of days, for example `"30"`) in the Worker's `vars` and the daily Cron job also deletes recording audio older than that: the R2 object is removed first, then the call is tombstoned as `deleted`, exactly like **Delete recording** (playback then reports it as deleted). Age is the call's recorded time, falling back to when the server received it, so old recordings uploaded late from a phone are removed too. Call logs, customers and chats are never touched. Each run handles at most 750 recordings and logs only counts; a remainder continues the next day, and an R2 failure leaves rows untouched so they retry. The same setting also makes the server **refuse to accept** audio whose recorded time is already older than the period: `POST /v1/device/uploads/prepare` answers `409`, stores nothing, and the Android app treats that as permanent ("stopped for this source") so it does not retry or waste uploads; audio without a recorded time is treated as new. Unset, `0` or a non-number disables both the job and the refusal. Pending and failed uploads are not touched. Test it on a development environment first (`node --test src/retention/recordings.test.mjs`).
+Optional and **off by default**. Set `RECORDING_RETENTION_DAYS` (a whole number of days, for example `"30"`) in the Worker's `vars` and the Worker also deletes recording audio older than that, once per IST day (at the first half-hourly cron tick after midnight; the last run is kept in `app_settings`): the R2 object is removed first, then the call is tombstoned as `deleted`, exactly like **Delete recording** (playback then reports it as deleted). Age is the call's recorded time, falling back to when the server received it, so old recordings uploaded late from a phone are removed too. Call logs, customers and chats are never touched. Each run handles at most 750 recordings and logs only counts; a remainder continues the next day, and an R2 failure leaves rows untouched so they retry. The same setting also makes the server **refuse to accept** audio whose recorded time is already older than the period: `POST /v1/device/uploads/prepare` answers `409`, stores nothing, and the Android app treats that as permanent ("stopped for this source") so it does not retry or waste uploads; audio without a recorded time is treated as new. Unset, `0` or a non-number disables both the job and the refusal. Pending and failed uploads are not touched. Test it on a development environment first (`node --test src/retention/recordings.test.mjs`).
 
 ## Fixture workflow and focused checks
 

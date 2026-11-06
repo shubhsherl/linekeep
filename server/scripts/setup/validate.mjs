@@ -93,52 +93,11 @@ export function parseSubdomain(raw) {
     : fail("workers.dev subdomains are 1-63 lowercase letters, digits or hyphens.");
 }
 
-const CRON_FIELDS = [
-  { name: "minute", min: 0, max: 59 },
-  { name: "hour", min: 0, max: 23 },
-  { name: "day of month", min: 1, max: 31 },
-  { name: "month", min: 1, max: 12, names: ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] },
-  { name: "day of week", min: 0, max: 7, names: ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] },
-];
-
-export function parseCron(raw) {
-  const v = text(raw).replace(/\s+/g, " ");
-  const fields = v.split(" ");
-  if (fields.length !== 5) return fail("A cron expression has exactly 5 fields: minute hour day-of-month month day-of-week.");
-  for (const [i, field] of fields.entries()) {
-    const spec = CRON_FIELDS[i];
-    const num = (token) => {
-      if (/^\d+$/.test(token)) {
-        const n = Number(token);
-        return n >= spec.min && n <= spec.max;
-      }
-      return spec.names?.includes(token.toUpperCase()) ?? false;
-    };
-    for (const item of field.split(",")) {
-      const [range, step, extra] = item.split("/");
-      if (extra !== undefined || (step !== undefined && !/^[1-9]\d*$/.test(step))) return fail(`Invalid ${spec.name} field "${field}".`);
-      if (range === "*" || (spec.name === "day of month" || spec.name === "day of week") && range === "?") continue;
-      const bounds = range.split("-");
-      if (bounds.length > 2 || !bounds.every(num)) return fail(`Invalid ${spec.name} field "${field}".`);
-    }
-  }
-  return ok(fields.join(" "));
-}
-
-/** "18:00" (IST, 24h) -> minute/hour in UTC cron. IST is UTC+5:30 with no DST. */
-export function istTimeToCron(raw) {
+/** "18:00" or "5:15" (IST, 24h) -> "HH:MM". The Worker sends at the half-hour slot it falls in (18:10 sends at 18:00). */
+export function parseIstTime(raw) {
   const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(text(raw));
   if (!m) return fail("Enter a 24-hour IST time such as 18:00.");
-  const utc = (Number(m[1]) * 60 + Number(m[2]) - 330 + 1440) % 1440;
-  return ok(`${utc % 60} ${Math.floor(utc / 60)} * * *`);
-}
-
-/** Inverse for daily crons ("m h * * *") so the UTC cron can be shown in IST. Null for other shapes. */
-export function cronToIst(cron) {
-  const m = /^(\d{1,2}) (\d{1,2}) \* \* \*$/.exec(cron);
-  if (!m || Number(m[1]) > 59 || Number(m[2]) > 23) return null;
-  const ist = (Number(m[2]) * 60 + Number(m[1]) + 330) % 1440;
-  return `${String(Math.floor(ist / 60)).padStart(2, "0")}:${String(ist % 60).padStart(2, "0")}`;
+  return ok(`${m[1].padStart(2, "0")}:${m[2]}`);
 }
 
 export function parseApiToken(raw) {

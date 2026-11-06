@@ -9,7 +9,7 @@ import { parseFirebaseField, parseGoogleServices, parseServiceAccount } from "./
 import { buildMetaCalls, describeMetaCalls, PLACEHOLDERS, registerWebhook, webhookUrl } from "./setup/whatsapp.mjs";
 import { run } from "./setup/run.mjs";
 import {
-  cronToIst, istTimeToCron, parseBucketName, parseCron, parseD1Name, parseDays, parseDomain, parseEmail, parseEmailList,
+  parseBucketName, parseD1Name, parseDays, parseDomain, parseEmail, parseEmailList, parseIstTime,
   parseCredential, parseEnvName, parseMegabytes, parseMetaId, parseSessionDuration, parseWorkerName,
 } from "./setup/validate.mjs";
 import { WRANGLER_ENTRY, createMasker } from "./setup/wrangler.mjs";
@@ -183,14 +183,10 @@ test("validators", () => {
   assert.deepEqual(parseEmailList("a@x.com, b@x.com,a@x.com").value, ["a@x.com", "b@x.com"]);
   assert.equal(parseEmailList("").ok, false);
   assert.equal(parseEmailList("a@x.com,nope").ok, false);
-  assert.equal(parseCron("30 12 * * *").ok, true);
-  assert.equal(parseCron("*/15 0-6 1,15 JAN-MAR MON").ok, true);
-  for (const bad of ["30 12 * *", "60 12 * * *", "30 24 * * *", "a b c d e", "*/0 * * * *", "1 2 3 4 5 6"]) assert.equal(parseCron(bad).ok, false, bad);
-  assert.equal(istTimeToCron("18:00").value, DEFAULT_CRON);
-  assert.equal(istTimeToCron("00:00").value, "30 18 * * *");
-  assert.equal(istTimeToCron("5:15").value, "45 23 * * *");
-  assert.equal(istTimeToCron("25:00").ok, false);
-  assert.equal(cronToIst("30 12 * * *"), "18:00");
+  assert.equal(parseIstTime("18:00").value, "18:00");
+  assert.equal(parseIstTime("5:15").value, "05:15");
+  for (const bad of ["25:00", "18:60", "6pm", "", "18"]) assert.equal(parseIstTime(bad).ok, false, bad);
+  assert.equal(DEFAULT_CRON, "*/30 * * * *");
   assert.equal(parseDomain("mg.example.com").ok, true);
   for (const bad of ["example", "https://mg.example.com", "mg.example.com/x", "-a.com"]) assert.equal(parseDomain(bad).ok, false, bad);
   assert.equal(parseWorkerName("linekeep-api-dev").ok, true);
@@ -212,7 +208,7 @@ test("validators", () => {
 const base = (features, extra = {}) => ({
   env: "production", workerName: "linekeep-api-production", d1Name: "linekeep-production", r2Name: "linekeep-recordings-production",
   maxRecordingMb: 100, features: { access: false, email: false, retention: false, ...features },
-  access: { emails: [ADMIN], sessionDuration: "1h", oneTimePin: true }, email: { domain: "mg.example.com", region: "us", cron: DEFAULT_CRON, recipients: [BOSS], from: null },
+  access: { emails: [ADMIN], sessionDuration: "1h", oneTimePin: true }, email: { domain: "mg.example.com", region: "us", timeIst: "18:00", recipients: [BOSS], from: null },
   retention: { days: 30 }, ...extra,
 });
 const ids = { accountId: "acc1", d1Id: "11111111-2222-3333-4444-555555555555", accessIssuer: "https://team.cloudflareaccess.com", accessAudience: "aud-1" };
@@ -235,6 +231,7 @@ test("config builder per feature combination", () => {
     assert.equal(env.vars.ENVIRONMENT, "production");
     assert.equal(env.vars.MAX_RECORDING_BYTES, "104857600");
     assert.equal(env.vars.CALL_SUMMARY_ENABLED, email ? "true" : "false");
+    assert.equal(env.vars.CALL_SUMMARY_SEND_TIME, email ? "18:00" : undefined, label);
     assert.equal("ACCESS_TEAM_DOMAIN" in env.vars, access, label);
     assert.equal("ACCESS_AUDIENCE" in env.vars, access, label);
     assert.equal("RECORDING_RETENTION_DAYS" in env.vars, retention, label);

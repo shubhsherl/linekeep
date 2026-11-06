@@ -23,8 +23,9 @@
   "env": {
     "dev": {
       "name": "linekeep-api-dev",
-      // 6 PM IST. Sending remains disabled until secrets and opt-in are configured.
-      "triggers": { "crons": ["30 12 * * *"] },
+      // Every 30 minutes. The Worker decides what is due: the daily email goes out at the IST time set in
+      // Config (default 18:00), so changing it needs no redeploy. Sending stays off until it is turned on.
+      "triggers": { "crons": ["*/30 * * * *"] },
       "vars": {
         "ENVIRONMENT": "development",
         "MAX_RECORDING_BYTES": "104857600",
@@ -44,7 +45,7 @@
     },
     "production": {
       "name": "linekeep-api-production",
-      "triggers": { "crons": ["30 12 * * *"] },
+      "triggers": { "crons": ["*/30 * * * *"] },
       "vars": {
         "ENVIRONMENT": "production",
         "MAX_RECORDING_BYTES": "104857600",

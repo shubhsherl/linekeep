@@ -27,7 +27,17 @@ const errors = {
   503: { code: "NOT_CONFIGURED", message: "Feature is not configured" },
 } as const;
 
+/** An error with its own stable code and a message safe to show an administrator (never values or secrets). */
+export class ApiError extends Error {
+  constructor(readonly status: 400 | 404 | 409 | 502 | 503, readonly code: string, message: string) {
+    super(message);
+  }
+}
+
 export const handleError: ErrorHandler<AppBindings> = (error, context) => {
+  if (error instanceof ApiError) {
+    return context.json({ requestId: context.get("requestId"), error: { code: error.code, message: error.message } }, error.status);
+  }
   const status =
     error instanceof HTTPException
       ? error.status

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createDatabase, loadModule } from "../../data/test-support.mjs";
+import { createDatabase, enableFeatures, loadModule } from "../../data/test-support.mjs";
 
 const { createApp } = await loadModule("../app.ts");
 const { createIdentityRepository } = await loadModule("./identity.ts");
@@ -12,6 +12,7 @@ const tokenSecret = "synthetic-unread-token-secret-not-for-deployment";
 
 async function fixture(t) {
   const DB = await createDatabase(t);
+  await enableFeatures(DB);
   await DB.prepare("UPDATE whatsapp_settings SET value = '2026-01-01T00:00:00.000Z' WHERE key = 'unread_since'").run();
   const identity = createIdentityRepository(DB, tokenSecret);
   const alice = await identity.createEmployee({ name: "Alice" });

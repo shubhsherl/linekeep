@@ -23,7 +23,7 @@ Linekeep is a self-hosted Android call-history and recording workspace. The Andr
 
 - Keeps customers (name, phone, location, notes, who handles them) and links their calls to them. Employees see only the customers assigned to them.
 - Connects your own WhatsApp Business number through Meta's Cloud API: a WhatsApp-style inbox with live updates, per-person unread counts, pictures, voice notes and documents stored privately, and sending of text and approved templates with variable pickers and a live preview.
-- A **Config** tab for automatic replies to matching messages and shared quick messages, and a customer sidebar you can open from the call log, the chat list or the customer list.
+- A **Config** tab where admins turn features on, enter the WhatsApp, Mailgun and Firebase credentials (stored encrypted in the database, write-only in the UI) with step-by-step instructions on each page, set the daily email time, and manage automatic replies to matching messages and shared quick messages, and a customer sidebar you can open from the call log, the chat list or the customer list.
 - Push notifications (Firebase Cloud Messaging) tell an employee when a customer assigned to them writes, or when a customer is newly assigned to them.
 
 **Access and transparency**
@@ -152,7 +152,7 @@ WhatsApp is off until you configure it; call history works without it. `npm run 
 4. For real customers: a **privacy policy URL** (you can host `docs/PRIVACY.md`), an app icon and category, then switch the app to **Live**. Until it is Live, Meta only delivers webhooks for people with a role on the app.
 5. **Message templates** approved in WhatsApp Manager to start conversations, and a payment method on the WhatsApp account for paid template messages.
 
-The script stores the tokens as Worker secrets (never in the repository), generates the webhook verify token, and can register the webhook with Meta for you. See [WhatsApp and push notifications](docs/SETUP.md) for the details and [server/README.md](server/README.md) for the manual steps. Push notifications additionally need a Firebase project (free), a service-account key, and your Firebase app identifiers; the app fetches those from your server, so the same APK works for every deployment.
+You can also skip this at setup time and enter everything later under **Config** in the dashboard. The script stores the tokens as Worker secrets (never in the repository), generates the webhook verify token, and can register the webhook with Meta for you. See [WhatsApp and push notifications](docs/SETUP.md) for the details and [server/README.md](server/README.md) for the manual steps. Push notifications additionally need a Firebase project (free), a service-account key, and your Firebase app identifiers; the app fetches those from your server, so the same APK works for every deployment.
 
 Linekeep sends only messages you or your rules trigger, from your own number, and WhatsApp's business policies and opt-out rules apply. Customers' messages and files are stored in your private bucket.
 

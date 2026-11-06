@@ -8,6 +8,8 @@ export interface Env {
   LOCAL_ADMIN_SECRET?: string;
   TOKEN_HASH_SECRET?: string;
   CALL_SUMMARY_ENABLED?: string;
+  /** IST "HH:MM" the daily summary is sent (rounded down to :00/:30); unset means 18:00. */
+  CALL_SUMMARY_SEND_TIME?: string;
   EMAIL_IDS?: string;
   RECORDING_RETENTION_DAYS?: string;
   MAILGUN_API_KEY?: string;
@@ -20,6 +22,8 @@ export interface Env {
   WHATSAPP_APP_SECRET?: string;
   WHATSAPP_VERIFY_TOKEN?: string;
   WHATSAPP_GRAPH_VERSION?: string;
+  /** The Meta app id; informational (shown in Config), not needed to send. */
+  WHATSAPP_APP_ID?: string;
   /** JSON key of the Firebase service account that sends push notifications; unset turns push off. */
   FCM_SERVICE_ACCOUNT?: string;
   /** The Firebase app's public client identifiers as JSON {apiKey, appId, projectId, senderId}; handed to enrolled phones. */

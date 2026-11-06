@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import test from "node:test";
 
-import { createDatabase, loadModule } from "../../data/test-support.mjs";
+import { createDatabase, enableFeatures, loadModule } from "../../data/test-support.mjs";
 
 const { createApp } = await loadModule("../app.ts");
 const { createIdentityRepository } = await loadModule("./identity.ts");
@@ -16,6 +16,7 @@ const whatsapp = {
 
 async function fixture(t, extraEnv = whatsapp) {
   const DB = await createDatabase(t);
+  await enableFeatures(DB);
   const identity = createIdentityRepository(DB, "synthetic-whatsapp-token-secret-not-for-deployment");
   const alice = await identity.createEmployee({ name: "Alice" });
   const device = await identity.redeemInvitation(

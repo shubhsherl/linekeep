@@ -4,7 +4,7 @@ import test from "node:test";
 import { Miniflare } from "miniflare";
 import { unstable_splitSqlQuery } from "wrangler";
 
-import { createDatabase, loadModule } from "../../data/test-support.mjs";
+import { createDatabase, enableFeatures, loadModule } from "../../data/test-support.mjs";
 
 const { createApp } = await loadModule("../app.ts");
 const { createIdentityRepository } = await loadModule("./identity.ts");
@@ -25,6 +25,7 @@ function entry(index, extra = {}) {
 
 async function fixture(t, throughMigration) {
   const DB = await createDatabase(t, throughMigration);
+  if (!throughMigration) await enableFeatures(DB);
   let now = new Date(start);
   const identity = createIdentityRepository(DB, tokenSecret, () => now);
   const employee = await identity.createEmployee({ name: "History employee" });

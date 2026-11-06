@@ -279,12 +279,41 @@ export const adminHtml = `<!doctype html>
       <div class="cfg-layout">
         <nav class="cfg-nav" aria-label="Configuration sections">
           <ul id="config-nav" class="cfg-nav-list" role="list">
-            <li><button class="cfg-nav-item" type="button" data-section="whatsapp" aria-current="page">WhatsApp</button></li>
+            <li><button class="cfg-nav-item" type="button" data-section="features" aria-current="page">Features</button></li>
+            <li><button class="cfg-nav-item" type="button" data-section="whatsapp-business">WhatsApp Business</button></li>
+            <li id="config-nav-whatsapp" hidden><button class="cfg-nav-item" type="button" data-section="whatsapp">Auto replies &amp; quick messages</button></li>
+            <li><button class="cfg-nav-item" type="button" data-section="email">Daily email report</button></li>
+            <li><button class="cfg-nav-item" type="button" data-section="push">Push notifications</button></li>
           </ul>
         </nav>
         <div class="cfg-content">
-          <section id="config-section-whatsapp" class="cfg-section" aria-labelledby="config-whatsapp-heading">
-            <h2 id="config-whatsapp-heading" class="cfg-section-title" tabindex="-1">WhatsApp</h2>
+          <section id="config-import-banner" class="notice cfg-import" aria-labelledby="config-import-title" hidden>
+            <h3 id="config-import-title">Some settings are still stored as Worker secrets</h3>
+            <p class="muted">Import them into Linekeep so you can manage them here. They are encrypted before they are stored. Once imported, the old Worker secrets can be deleted from the Cloudflare dashboard or with <code>wrangler secret delete</code>.</p>
+            <p id="config-import-fields" class="hint"></p>
+            <div class="actions"><button id="config-import-button" type="button">Import from deployment</button></div>
+            <p id="config-import-status" class="cfg-status" role="status" aria-live="polite"></p>
+            <p id="config-import-error" class="error-text" role="alert" hidden></p>
+          </section>
+          <p id="config-settings-error" class="error-text" role="alert" hidden></p>
+          <section id="config-section-features" class="cfg-section" aria-labelledby="config-features-heading">
+            <h2 id="config-features-heading" class="cfg-section-title" tabindex="-1">Features</h2>
+            <div id="settings-features-body" class="cfg-body"></div>
+          </section>
+          <section id="config-section-whatsapp-business" class="cfg-section" aria-labelledby="config-whatsapp-business-heading" hidden>
+            <h2 id="config-whatsapp-business-heading" class="cfg-section-title" tabindex="-1">WhatsApp Business</h2>
+            <div id="settings-whatsapp-body" class="cfg-body"></div>
+          </section>
+          <section id="config-section-email" class="cfg-section" aria-labelledby="config-email-heading" hidden>
+            <h2 id="config-email-heading" class="cfg-section-title" tabindex="-1">Daily email report</h2>
+            <div id="settings-email-body" class="cfg-body"></div>
+          </section>
+          <section id="config-section-push" class="cfg-section" aria-labelledby="config-push-heading" hidden>
+            <h2 id="config-push-heading" class="cfg-section-title" tabindex="-1">Push notifications</h2>
+            <div id="settings-push-body" class="cfg-body"></div>
+          </section>
+          <section id="config-section-whatsapp" class="cfg-section" aria-labelledby="config-whatsapp-heading" hidden>
+            <h2 id="config-whatsapp-heading" class="cfg-section-title" tabindex="-1">Auto replies and quick messages</h2>
             <section class="panel cfg-block" aria-labelledby="autoreply-heading">
               <div class="section-heading"><h3 id="autoreply-heading" tabindex="-1">Auto replies</h3><button id="autoreply-add" type="button">Add rule</button></div>
               <p class="muted">When a customer’s message matches a rule, Linekeep replies automatically. The first matching rule in the list is used. Each rule replies at most once per customer within its cooldown.</p>

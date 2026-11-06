@@ -72,7 +72,7 @@ Paste the token when asked (the input is hidden), or run it as `CLOUDFLARE_API_T
 3. **Asks what you want:**
    - environment name (`production` for real data, `dev` for a trial), Worker name, database name, bucket name, maximum recording size;
    - **Admin protection with Cloudflare Access** (strongly recommended): admin emails, session length, and whether to add the One-time PIN login method;
-   - **Daily email summary**: Mailgun domain, region, sender, recipients and send time (shown in IST; default 6 PM IST);
+   - **Daily email summary**: Mailgun domain, region, sender, recipients and send time (IST; default 6 PM). The cron runs every 30 minutes and the Worker sends at that time;
    - **Recording retention**: delete recording audio older than N days (call logs are kept);
    - **WhatsApp Business** and **Push notifications**: each prints what you must have prepared first and asks whether to set it up now. See [below](#whatsapp-and-push-notifications).
 
@@ -97,6 +97,8 @@ Useful flags:
 The hashing secret `TOKEN_HASH_SECRET` is generated for you and stored only in Cloudflare. **Never change it after phones are enrolled:** that invalidates every device credential and invitation.
 
 ### WhatsApp and push notifications
+
+The values you give setup become Worker secrets. They keep working as the fallback, and **you can change them later in the dashboard's Config tab** (WhatsApp and Push pages) without running setup again. Customers and WhatsApp stay switched off until turned on in Config, except that an install configured here with WhatsApp secrets starts with them on.
 
 Both are optional and can be added later by running `npm run setup` again (existing resources are reused). In the feature list they appear as **WhatsApp Business** and **Push notifications to employees' phones**. Setup prints the prerequisites below before it asks for any value and then asks **Set up WhatsApp now? (y/N)** (and the same for push), so you can still back out. With `--yes`, selecting the feature in the answers file counts as yes; `"whatsapp": { "setup": false }` or `"push": { "setup": false }` skips it.
 
@@ -169,7 +171,7 @@ If scanning is unavailable, open **Advanced → Connection** and enter the serve
 ## 7. Day-two operations
 
 - **Add an admin:** Cloudflare Zero Trust → Access → Applications → your Linekeep application → Policies → add the email. If those people have no Cloudflare account, enable the One-time PIN login method under Zero Trust → Settings → Authentication.
-- **Change daily-email recipients:** `npx wrangler secret put EMAIL_IDS --env <env>` with a comma-separated list.
+- **Change WhatsApp, push or daily-email settings (recipients, send time, on/off):** open the dashboard's **Config** tab; each page has step-by-step instructions. Values saved there are encrypted in the database and override what setup stored as Worker secrets, which stay as the fallback (**Import from deployment** copies them over). Customers and WhatsApp are switched on in Config too.
 - **Enable or change retention:** set `RECORDING_RETENTION_DAYS` in your private `wrangler.jsonc` and deploy. See [Recording retention](../server/README.md#recording-retention).
 - **Recover a phone after reinstall:** use **Recover enrollment** on the existing device and issue a recovery code. If the app shows *Connection rejected*, it offers to remove the old connection so you can scan a new code.
 - **Backups and deletion:** see [Retention, billing, and rollback](../server/README.md#retention-billing-and-rollback).

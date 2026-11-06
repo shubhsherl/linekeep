@@ -163,3 +163,32 @@ export async function downloadMedia(config: WhatsAppConfig, mediaId: string): Pr
   const mimeType = typeof info.mime_type === "string" ? info.mime_type : file.headers.get("Content-Type") ?? "application/octet-stream";
   return { body: file.body, mimeType: mimeType.slice(0, 127), size: length > 0 ? length : declared };
 }
+
+export interface PhoneNumberCheck { ok: boolean; displayPhoneNumber?: string; verifiedName?: string; error?: string }
+
+/**
+ * Asks Graph for the sending number with the configured token. The message is chosen here from Meta's status and
+ * error code, never copied from the response, so it cannot echo the token or anything else private.
+ */
+export async function checkPhoneNumber(config: Pick<WhatsAppConfig, "token" | "phoneNumberId" | "version">): Promise<PhoneNumberCheck> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://graph.facebook.com/${config.version}/${config.phoneNumberId}?fields=display_phone_number,verified_name`,
+      { headers: { Authorization: `Bearer ${config.token}` }, redirect: "manual", signal: AbortSignal.timeout(10_000) },
+    );
+  } catch {
+    return { ok: false, error: "Could not reach Meta's Graph API. Try again in a moment." };
+  }
+  const parsed = await response.json().catch(() => null) as
+    { display_phone_number?: unknown; verified_name?: unknown; error?: { code?: unknown } } | null;
+  if (response.ok) {
+    const text = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 200 ? value : undefined;
+    return { ok: true, displayPhoneNumber: text(parsed?.display_phone_number), verifiedName: text(parsed?.verified_name) };
+  }
+  const code = typeof parsed?.error?.code === "number" ? parsed.error.code : null;
+  if (code === 190 || response.status === 401) return { ok: false, error: "Meta rejected the access token: it is invalid or has expired." };
+  if (code === 100 || response.status === 404) return { ok: false, error: "Meta could not find this phone number id, or the token cannot access it." };
+  if (code === 10 || code === 200 || response.status === 403) return { ok: false, error: "The token does not have permission for this phone number (needs whatsapp_business_management)." };
+  return { ok: false, error: `Meta's Graph API returned an error (HTTP ${response.status}${code === null ? "" : `, code ${code}`}).` };
+}

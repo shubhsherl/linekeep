@@ -225,7 +225,7 @@ export const clientJavaScript = String.raw`(() => {
     row.dataset.callLogId = call.id;
     row.dataset.kind = call.kind;
     const caller = element('div', undefined, 'caller-cell');
-    const linked = isCall && !options.readOnly && call.customer && typeof call.customer.id === 'string' && typeof call.customer.name === 'string' ? call.customer : null;
+    const linked = isCall && features.customers && !options.readOnly && call.customer && typeof call.customer.id === 'string' && typeof call.customer.name === 'string' ? call.customer : null;
     const heading = element('h3', linked ? undefined : isCall ? call.callerName || 'Unknown caller' : 'Unlinked recording');
     if (linked) {
       const customerButton = button(linked.name, () => openDrawer(linked, customerButton), 'link-button');
@@ -1647,6 +1647,7 @@ export const clientJavaScript = String.raw`(() => {
     byId('whatsapp-unread-text').textContent = chats > 0 ? chats + ' ' + (chats === 1 ? 'chat' : 'chats') + ' with unread messages' : '';
   }
   async function refreshUnread() {
+    if (!featuresLoaded || !features.customers || !features.whatsapp) return;
     const current = ++unreadVersion;
     try {
       const data = await api('/whatsapp/unread');
@@ -1710,6 +1711,7 @@ export const clientJavaScript = String.raw`(() => {
   }
   async function pollLive() {
     clearTimeout(liveTimer);
+    if (!featuresLoaded || !features.customers || !features.whatsapp) return;
     liveTimer = 0;
     if (document.hidden || liveBusy) return;
     liveBusy = true;
@@ -3024,7 +3026,9 @@ export const clientJavaScript = String.raw`(() => {
     onSent: () => chatList.load(true),
     isDisplayed: () => activeTab === 'whatsapp' && Boolean(selectedChat) && !byId('chat-conversation').hidden && (!window.matchMedia('(max-width: 720px)').matches || chatLayout.dataset.view === 'thread')
   });
-  api('/whatsapp/status').then((data) => { waSendState = data && data.canSend === true ? 'yes' : 'no'; }, () => { waSendState = 'no'; }).then(() => { for (const conversation of waConversations) conversation.controls(); });
+  function loadSendState() {
+    return api('/whatsapp/status').then((data) => { waSendState = data && data.canSend === true ? 'yes' : 'no'; }, () => { waSendState = 'no'; }).then(() => { for (const conversation of waConversations) conversation.controls(); });
+  }
   function openChat(chat, item) {
     selectedChat = chat.customer;
     for (const node of byId('whatsapp-list').children) node.setAttribute('aria-current', String(node === item));
@@ -4245,14 +4249,7 @@ export const clientJavaScript = String.raw`(() => {
   // Sidebar: a list of sections, each with a content block id config-section-NAME.
   const configNavItems = Array.from(byId('config-nav').querySelectorAll('button[data-section]'));
   for (const item of configNavItems) {
-    item.addEventListener('click', () => {
-      for (const other of configNavItems) {
-        const active = other === item;
-        if (active) other.setAttribute('aria-current', 'page'); else other.removeAttribute('aria-current');
-        byId('config-section-' + other.dataset.section).hidden = !active;
-      }
-      byId('config-' + item.dataset.section + '-heading').focus();
-    });
+    item.addEventListener('click', () => selectConfigSection(item.dataset.section, true));
   }
 
   // Shared confirmation dialog for the Config tab.
@@ -4891,21 +4888,620 @@ export const clientJavaScript = String.raw`(() => {
     }
   });
 
+  // ---- Config: features, integrations and import (values come from /v1/admin/settings; secrets are write-only) ----
+  const features = { customers: true, whatsapp: true };
+  let featuresLoaded = false;
+  const settingsState = { data: null, generatedToken: '', importedNote: '' };
+  const SAVED_TEXT = { database: 'Saved (database)', deployment: 'Saved (deployment)' };
+  const PUSH_PACKAGE = 'com.microorganics.calltracker';
+  function whatsappAvailable() { return features.customers && features.whatsapp; }
+  function tabAvailable(name) {
+    if (name === 'customers') return features.customers;
+    if (name === 'whatsapp') return whatsappAvailable();
+    return true;
+  }
+  function selectConfigSection(name, focus) {
+    for (const item of configNavItems) {
+      const active = item.dataset.section === name;
+      if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
+      byId('config-section-' + item.dataset.section).hidden = !active;
+    }
+    if (focus) byId('config-' + name + '-heading').focus();
+  }
+  function applyFeatures() {
+    for (const name of ['customers', 'whatsapp']) byId(name + '-tab').hidden = !tabAvailable(name);
+    document.body.dataset.customers = features.customers ? 'on' : 'off';
+    byId('config-nav-whatsapp').hidden = !whatsappAvailable();
+    if (!whatsappAvailable() && !byId('config-section-whatsapp').hidden) selectConfigSection('features', false);
+    if (activeTab && !tabAvailable(activeTab)) { location.hash = 'call-history'; showTab(); }
+  }
+  async function loadFeatures() {
+    try {
+      const data = await api('/features');
+      features.customers = data.customers === true;
+      features.whatsapp = data.whatsapp === true;
+    } catch { return; }
+    featuresLoaded = true;
+    applyFeatures();
+    if (whatsappAvailable()) { loadSendState(); refreshUnread(); if (!liveTimer) pollLive(); }
+  }
+
+  function note(node, text) {
+    if (!node) return;
+    node.textContent = text;
+    node.hidden = !text;
+  }
+  function extLink(text, href) {
+    const link = element('a', text);
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    return link;
+  }
+  function stepsBlock(title, items) {
+    const box = element('section', undefined, 'panel cfg-block cfg-steps');
+    box.setAttribute('aria-label', title);
+    box.append(element('h3', title));
+    const list = element('ol');
+    for (const item of items) {
+      const li = element('li');
+      li.append(...(Array.isArray(item) ? item : [item]));
+      list.append(li);
+    }
+    box.append(list);
+    return box;
+  }
+  function formPanel(title, intro) {
+    const box = element('section', undefined, 'panel cfg-block');
+    box.append(element('h3', title));
+    if (intro) box.append(element('p', intro, 'muted'));
+    return box;
+  }
+  function settingsPage(name, bodyId) {
+    const body = byId(bodyId);
+    body.replaceChildren();
+    const ui = { name, body, busy: false, buttons: [] };
+    ui.status = element('p', undefined, 'cfg-status');
+    ui.status.id = 'settings-' + name + '-status';
+    ui.status.setAttribute('role', 'status');
+    ui.status.setAttribute('aria-live', 'polite');
+    ui.error = element('p', undefined, 'error-text');
+    ui.error.id = 'settings-' + name + '-error';
+    ui.error.setAttribute('role', 'alert');
+    ui.error.hidden = true;
+    return ui;
+  }
+  function settingsButton(ui, text, onClick, secondary) {
+    const b = element('button', text, secondary ? 'secondary' : undefined);
+    b.type = 'button';
+    if (onClick) b.addEventListener('click', onClick);
+    ui.buttons.push(b);
+    return b;
+  }
+  async function runSetting(ui, button, pending, work) {
+    if (ui.busy) return;
+    ui.busy = true;
+    const label = button.textContent;
+    for (const b of ui.buttons) b.disabled = true;
+    button.textContent = pending;
+    note(ui.error, '');
+    note(ui.status, '');
+    try { await work(); }
+    catch (error) { note(byId(ui.error.id) || ui.error, errorMessage(error)); }
+    finally {
+      ui.busy = false;
+      for (const b of ui.buttons) b.disabled = false;
+      button.textContent = label;
+    }
+  }
+  function textField(ui, key, labelText, value, options = {}) {
+    const label = element('label', labelText);
+    const input = element(options.multiline ? 'textarea' : 'input');
+    input.id = 'set-' + ui.name + '-' + key;
+    input.name = key;
+    if (!options.multiline) input.type = options.type || 'text';
+    input.value = value || '';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    if (options.placeholder) input.placeholder = options.placeholder;
+    if (options.inputMode) input.inputMode = options.inputMode;
+    if (options.pattern) { input.pattern = options.pattern; input.title = options.title || ''; }
+    if (options.step) input.step = options.step;
+    if (options.rows) input.rows = options.rows;
+    label.append(input);
+    if (options.hint) {
+      const hint = element('span', options.hint, 'hint');
+      hint.id = input.id + '-hint';
+      input.setAttribute('aria-describedby', hint.id);
+      label.append(hint);
+    }
+    return { node: label, input, value: () => input.value.trim() };
+  }
+  function selectField(ui, key, labelText, value, choices) {
+    const label = element('label', labelText);
+    const select = element('select');
+    select.id = 'set-' + ui.name + '-' + key;
+    for (const [v, text] of choices) {
+      const option = element('option', text);
+      option.value = v;
+      select.append(option);
+    }
+    select.value = value;
+    label.append(select);
+    return { node: label, input: select, value: () => select.value };
+  }
+  function switchField(ui, key, labelText, checked) {
+    const label = element('label', undefined, 'cfg-switch');
+    const input = element('input');
+    input.type = 'checkbox';
+    input.id = 'set-' + ui.name + '-' + key;
+    input.checked = checked === true;
+    label.append(input, element('span', labelText));
+    return { node: label, input, value: () => input.checked };
+  }
+  // Write-only secret: never shows or prefills a stored value. value() is undefined (unchanged), a string (replace) or null (clear).
+  function secretField(ui, key, labelText, info, options = {}) {
+    const id = 'set-' + ui.name + '-' + key;
+    const wrap = element('div', undefined, 'cfg-secret');
+    const labelNode = element('label', labelText);
+    labelNode.htmlFor = id;
+    const stateNode = element('span', undefined, 'cfg-secret-state');
+    stateNode.setAttribute('role', 'status');
+    stateNode.setAttribute('aria-live', 'polite');
+    const input = element(options.multiline ? 'textarea' : 'input');
+    input.id = id;
+    input.name = key;
+    if (!options.multiline) input.type = 'password';
+    else input.rows = 5;
+    input.autocomplete = options.multiline ? 'off' : 'new-password';
+    input.spellcheck = false;
+    if (options.placeholder) input.placeholder = options.placeholder;
+    if (options.hint) {
+      const hint = element('span', options.hint, 'hint');
+      hint.id = id + '-hint';
+      input.setAttribute('aria-describedby', hint.id);
+      wrap.hintNode = hint;
+    }
+    const row = element('div', undefined, 'actions');
+    const field = { mode: info.set ? 'keep' : 'replace' };
+    function make(text, mode) {
+      const b = element('button', text, 'secondary');
+      b.type = 'button';
+      b.addEventListener('click', () => {
+        field.mode = mode;
+        if (mode !== 'replace') input.value = '';
+        render();
+        if (mode === 'replace') input.focus();
+      });
+      ui.buttons.push(b);
+      return b;
+    }
+    function render() {
+      row.replaceChildren();
+      const isSet = info.set === true;
+      input.hidden = field.mode !== 'replace';
+      if (field.mode === 'keep') {
+        stateNode.textContent = SAVED_TEXT[info.source] || 'Saved';
+        const replace = make('Replace', 'replace');
+        replace.setAttribute('aria-label', 'Replace ' + labelText);
+        row.append(replace);
+        if (info.source !== 'deployment') {
+          const clear = make('Clear', 'clear');
+          clear.setAttribute('aria-label', 'Clear ' + labelText);
+          row.append(clear);
+        }
+      } else if (field.mode === 'clear') {
+        stateNode.textContent = 'Will be cleared when you save';
+        row.append(make('Undo', 'keep'));
+      } else {
+        stateNode.textContent = isSet ? 'Enter the new value' : 'Not set';
+        if (isSet) row.append(make('Cancel', 'keep'));
+      }
+      for (const extra of options.extra || []) row.append(extra);
+    }
+    wrap.append(labelNode, stateNode, input);
+    if (wrap.hintNode) wrap.append(wrap.hintNode);
+    if (options.file) {
+      const pick = element('input');
+      pick.type = 'file';
+      pick.accept = options.file.accept;
+      pick.setAttribute('aria-label', options.file.label);
+      pick.addEventListener('change', async () => {
+        const file = pick.files && pick.files[0];
+        pick.value = '';
+        if (!file) return;
+        try {
+          if (file.size > 100000) throw new Error('That file is too large.');
+          input.value = await file.text();
+          field.mode = 'replace';
+          render();
+          input.dispatchEvent(new Event('input'));
+        } catch (error) { note(ui.error, errorMessage(error)); }
+      });
+      const fileRow = element('label', options.file.label, 'cfg-file');
+      fileRow.append(pick);
+      wrap.append(fileRow);
+    }
+    wrap.append(row);
+    render();
+    return {
+      node: wrap,
+      input,
+      value: () => {
+        if (field.mode === 'clear') return null;
+        if (field.mode === 'replace' && input.value.trim()) return input.value.trim();
+        return undefined;
+      }
+    };
+  }
+  function copyField(ui, key, labelText, value, hint) {
+    const label = element('label', labelText);
+    const input = element('input');
+    input.id = 'set-' + ui.name + '-' + key;
+    input.readOnly = true;
+    input.value = value;
+    label.append(input);
+    const state = element('span', undefined, 'cfg-copy-state');
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    const button = element('button', 'Copy', 'secondary');
+    button.type = 'button';
+    button.setAttribute('aria-label', 'Copy ' + labelText);
+    button.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(value); state.textContent = 'Copied.'; }
+      catch { input.focus(); input.select(); state.textContent = 'Press Ctrl+C or Cmd+C to copy the selected text.'; }
+    });
+    const row = element('div', undefined, 'cfg-copy');
+    row.append(label, button, state);
+    if (hint) row.append(element('span', hint, 'hint'));
+    return row;
+  }
+  function fieldGrid(...nodes) {
+    const grid = element('div', undefined, 'filter-grid cfg-grid');
+    grid.append(...nodes.map((n) => n.node || n));
+    return grid;
+  }
+  function actionRow(ui, ...buttons) {
+    const row = element('div', undefined, 'actions cfg-save');
+    row.append(...buttons);
+    return row;
+  }
+  function settingsForm(ui, onSubmit) {
+    const form = element('form');
+    form.id = 'settings-' + ui.name + '-form';
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const submit = form.querySelector('button[type=submit]');
+      runSetting(ui, submit, 'Saving…', async () => { await onSubmit(); });
+    });
+    return form;
+  }
+  function saveButton(ui) {
+    const b = element('button', 'Save');
+    b.type = 'submit';
+    ui.buttons.push(b);
+    return b;
+  }
+  function blankToNull(value) { return value === '' ? null : value; }
+
+  async function putSettings(name, payload, reloadAll) {
+    const res = await api('/settings/' + name, { method: 'PUT', body: JSON.stringify(payload) });
+    await loadSettings(reloadAll ? undefined : name);
+    return res;
+  }
+  async function loadSettings(only) {
+    let data;
+    try { data = await api('/settings'); }
+    catch (error) {
+      message('config-settings-error', 'Could not load settings. ' + errorMessage(error));
+      return;
+    }
+    message('config-settings-error', '');
+    settingsState.data = data;
+    renderSettings(only);
+  }
+  function settingsSection(name) {
+    return settingsState.data && settingsState.data.settings ? settingsState.data.settings[name] || {} : {};
+  }
+  function renderSettings(only) {
+    renderImportBanner();
+    const pages = { features: renderFeaturesPage, whatsapp: renderWhatsappPage, email: renderEmailPage, push: renderPushPage };
+    for (const [name, render] of Object.entries(pages)) if (!only || only === name) render();
+  }
+
+  function renderImportBanner() {
+    const deployment = settingsState.data && settingsState.data.deployment;
+    const list = deployment && Array.isArray(deployment.importable) ? deployment.importable : [];
+    const banner = byId('config-import-banner');
+    banner.hidden = !list.length && !settingsState.importedNote;
+    byId('config-import-fields').textContent = list.length ? 'Found: ' + list.join(', ') : '';
+    byId('config-import-fields').hidden = !list.length;
+    byId('config-import-button').hidden = !list.length;
+    note(byId('config-import-status'), settingsState.importedNote);
+  }
+  byId('config-import-button').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    if (button.disabled) return;
+    button.disabled = true;
+    message('config-import-error', '');
+    try {
+      const result = await api('/settings/import-deployment', { method: 'POST' });
+      const count = Array.isArray(result.imported) ? result.imported.length : 0;
+      settingsState.importedNote = 'Imported ' + count + (count === 1 ? ' setting' : ' settings') + '. The old Worker secrets can now be deleted; they are no longer needed.';
+      await loadSettings();
+      loadFeatures();
+    } catch (error) {
+      message('config-import-error', errorMessage(error));
+    } finally { button.disabled = false; }
+  });
+
+  function renderFeaturesPage() {
+    const ui = settingsPage('features', 'settings-features-body');
+    const current = settingsSection('features');
+    ui.body.append(stepsBlock('How to turn features on', [
+      'Turn on Customers to keep a customer directory and link calls to customers.',
+      'Turn on WhatsApp Business to chat with customers. It needs Customers, so it is switched off whenever Customers is off.',
+      'Click Save. Then open WhatsApp Business in the left menu to connect your number.'
+    ]));
+    const customers = switchField(ui, 'customers', 'Customers', current.customers);
+    const whatsapp = switchField(ui, 'whatsapp', 'WhatsApp Business', current.whatsapp);
+    function sync() {
+      if (!customers.input.checked) whatsapp.input.checked = false;
+      whatsapp.input.disabled = !customers.input.checked;
+    }
+    customers.input.addEventListener('change', sync);
+    sync();
+    const form = settingsForm(ui, async () => {
+      await putSettings('features', { customers: customers.value(), whatsapp: customers.value() && whatsapp.value() }, true);
+      await loadFeatures();
+      note(byId(ui.status.id), 'Saved.');
+    });
+    const panel = formPanel('Features');
+    panel.append(customers.node, whatsapp.node, element('p', 'WhatsApp Business requires Customers.', 'hint'));
+    form.append(panel, actionRow(ui, saveButton(ui)), ui.status, ui.error);
+    ui.body.append(form);
+  }
+
+  function renderWhatsappPage() {
+    const ui = settingsPage('whatsapp', 'settings-whatsapp-body');
+    const current = settingsSection('whatsapp');
+    const callback = location.origin + '/v1/webhooks/whatsapp';
+    if (!whatsappAvailable()) ui.body.append(element('p', 'WhatsApp Business is turned off. Turn it on under Features to use these settings.', 'notice'));
+    ui.body.append(stepsBlock('Set up WhatsApp Business', [
+      ['Open ', extLink('developers.facebook.com', 'https://developers.facebook.com/apps'), ', create an app of type Business and add the WhatsApp product.'],
+      'In WhatsApp > API Setup, add your phone number to a WhatsApp Business Account and verify it with the code Meta sends.',
+      'In Meta Business Settings > Users > System users, add a system user, assign it your app and WhatsApp account, then click Generate token. Set expiry to Never and tick whatsapp_business_management and whatsapp_business_messaging. Paste the token below.',
+      'Copy the Phone number ID and WhatsApp Business Account ID from WhatsApp > API Setup, and the App ID and App secret from App settings > Basic. Paste them below.',
+      'Click Generate verify token below. In WhatsApp > Configuration, click Edit under Webhook, paste the callback URL and the verify token, then click Verify and save.',
+      'Under Webhook fields, subscribe to messages.',
+      'Click Save, then Test connection. Before real customers can message you, add a privacy policy URL, app icon and category in App settings > Basic and switch the app to Live.'
+    ]));
+    const phone = textField(ui, 'phoneNumberId', 'Phone number ID', current.phoneNumberId, { inputMode: 'numeric', pattern: '[0-9]+', title: 'Digits only' });
+    const waba = textField(ui, 'wabaId', 'WhatsApp Business Account ID', current.wabaId, { inputMode: 'numeric', pattern: '[0-9]+', title: 'Digits only' });
+    const app = textField(ui, 'appId', 'App ID', current.appId, { inputMode: 'numeric', pattern: '[0-9]+', title: 'Digits only' });
+    const version = textField(ui, 'graphVersion', 'Graph API version', current.graphVersion, { placeholder: 'v23.0', pattern: 'v[0-9]+\\.[0-9]+', title: 'For example v23.0' });
+    const token = secretField(ui, 'token', 'Access token', current.token || {}, { hint: 'System user token. Stored encrypted and never shown again.' });
+    const appSecret = secretField(ui, 'appSecret', 'App secret', current.appSecret || {}, { hint: 'Used to verify that webhooks come from Meta.' });
+    const generate = settingsButton(ui, 'Generate verify token', null, true);
+    generate.id = 'settings-whatsapp-generate';
+    const verify = secretField(ui, 'verifyToken', 'Verify token', current.verifyToken || {}, { hint: 'Any secret string. Generate one, or paste your own.', extra: [generate] });
+    function payload() {
+      const body = {
+        phoneNumberId: blankToNull(phone.value()),
+        wabaId: blankToNull(waba.value()),
+        appId: blankToNull(app.value()),
+        graphVersion: blankToNull(version.value())
+      };
+      for (const [key, field] of [['token', token], ['appSecret', appSecret], ['verifyToken', verify]]) {
+        const value = field.value();
+        if (value !== undefined) body[key] = value;
+      }
+      return body;
+    }
+    const form = settingsForm(ui, async () => {
+      await putSettings('whatsapp', payload());
+      note(byId(ui.status.id), 'Saved.');
+    });
+    generate.addEventListener('click', () => runSetting(ui, generate, 'Generating…', async () => {
+      const body = payload();
+      body.verifyToken = { generate: true };
+      const res = await putSettings('whatsapp', body);
+      const generated = res.generatedVerifyToken || (res.settings && res.settings.whatsapp && res.settings.whatsapp.generatedVerifyToken) || '';
+      settingsState.generatedToken = typeof generated === 'string' ? generated : '';
+      renderWhatsappPage();
+      note(byId('settings-whatsapp-status'), 'Saved with a new verify token. Copy it now; it is shown only once.');
+    }));
+    const test = settingsButton(ui, 'Test connection', () => runSetting(ui, test, 'Testing…', async () => {
+      const result = await api('/settings/whatsapp/test', { method: 'POST' });
+      if (result.ok) {
+        const parts = [result.verifiedName, result.displayPhoneNumber].filter((v) => typeof v === 'string' && v);
+        note(byId(ui.status.id), 'Connected' + (parts.length ? ': ' + parts.join(' · ') : '.'));
+      } else {
+        note(byId(ui.error.id), 'Connection failed. ' + (typeof result.error === 'string' && result.error ? result.error : 'Check the token and Phone number ID.'));
+      }
+    }), true);
+    test.id = 'settings-whatsapp-test';
+    const credentials = formPanel('Meta app and phone number');
+    credentials.append(fieldGrid(phone, waba, app, version), token.node, appSecret.node);
+    const webhook = formPanel('Webhook', 'Meta calls this address when a customer sends you a message.');
+    webhook.append(copyField(ui, 'callback', 'Callback URL', callback));
+    webhook.append(verify.node);
+    if (settingsState.generatedToken) {
+      const box = element('div', undefined, 'notice cfg-generated');
+      box.append(element('p', 'New verify token. Copy it into Meta now; it will not be shown again.'));
+      box.append(copyField(ui, 'generated', 'Generated verify token', settingsState.generatedToken));
+      webhook.append(box);
+    }
+    form.append(credentials, webhook, actionRow(ui, saveButton(ui), test), ui.status, ui.error);
+    ui.body.append(form);
+  }
+
+  function parseRecipients(text) { return text.split(/[\s,;]+/).filter(Boolean); }
+  function renderEmailPage() {
+    const ui = settingsPage('email', 'settings-email-body');
+    const current = settingsSection('email');
+    ui.body.append(stepsBlock('Set up the daily email report', [
+      ['Only Mailgun is supported. Create an account at ', extLink('mailgun.com', 'https://www.mailgun.com/'), ' and go to Sending > Domains > Add new domain. A subdomain such as mg.example.com works well.'],
+      'Add the DNS records Mailgun shows to your domain and wait until the domain is Verified.',
+      'Go to Settings > API security > Add new key and choose a Sending key. Copy it straight away because Mailgun shows it once. Paste it below.',
+      'Enter the domain, a From address on that domain, and the region (US or EU) where you created the domain.',
+      'Add the recipients and the send time, switch on Enabled, click Save, then Send test email.'
+    ]));
+    const enabled = switchField(ui, 'enabled', 'Send the daily report', current.enabled);
+    const domain = textField(ui, 'domain', 'Mailgun domain', current.domain, { placeholder: 'mg.example.com' });
+    const from = textField(ui, 'fromEmail', 'From email', current.fromEmail, { type: 'email', placeholder: 'reports@mg.example.com' });
+    const region = selectField(ui, 'region', 'Mailgun region', current.region === 'eu' ? 'eu' : 'us', [['us', 'US'], ['eu', 'EU']]);
+    const apiKey = secretField(ui, 'apiKey', 'Mailgun sending API key', current.apiKey || {}, { hint: 'Stored encrypted and never shown again.' });
+    const recipients = textField(ui, 'recipients', 'Recipients', Array.isArray(current.recipients) ? current.recipients.join('\n') : '', { multiline: true, rows: 3, hint: 'Separate addresses with commas or new lines.' });
+    const time = textField(ui, 'sendTime', 'Send time (India time, IST)', current.sendTime, { type: 'time', step: '1800', hint: 'The report covers calls from midnight to the send time, in 30-minute steps.' });
+    const form = settingsForm(ui, async () => {
+      const list = parseRecipients(recipients.input.value);
+      const body = {
+        enabled: enabled.value(),
+        domain: blankToNull(domain.value()),
+        fromEmail: blankToNull(from.value()),
+        region: region.value(),
+        recipients: list,
+        sendTime: blankToNull(time.value())
+      };
+      const key = apiKey.value();
+      if (key !== undefined) body.apiKey = key;
+      await putSettings('email', body);
+      note(byId(ui.status.id), 'Saved.');
+    });
+    const test = settingsButton(ui, 'Send test email', () => runSetting(ui, test, 'Sending…', async () => {
+      const result = await api('/settings/email/test', { method: 'POST' });
+      if (result.ok) note(byId(ui.status.id), 'Test email sent.');
+      else note(byId(ui.error.id), 'Test email failed. ' + (typeof result.error === 'string' && result.error ? result.error : 'Check the settings and try again.'));
+    }), true);
+    test.id = 'settings-email-test';
+    const panel = formPanel('Mailgun');
+    panel.append(enabled.node, fieldGrid(domain, from, region), apiKey.node);
+    const schedule = formPanel('Report');
+    schedule.append(recipients.node, fieldGrid(time));
+    const last = current.lastSent;
+    const lastText = last && typeof last === 'object' ? 'Last report: ' + String(last.date) + ' · ' + String(last.status) : 'No report has been sent yet.';
+    schedule.append(element('p', lastText, 'hint'));
+    form.append(panel, schedule, actionRow(ui, saveButton(ui), test), ui.status, ui.error);
+    ui.body.append(form);
+  }
+
+  function parseGoogleServices(text) {
+    let json;
+    try { json = JSON.parse(text); } catch { throw new Error('That file is not valid JSON.'); }
+    const info = json && json.project_info;
+    const clients = Array.isArray(json && json.client) ? json.client : [];
+    const match = clients.find((c) => c && c.client_info && c.client_info.android_client_info && c.client_info.android_client_info.package_name === PUSH_PACKAGE);
+    if (!match) throw new Error('This file has no Android app for ' + PUSH_PACKAGE + '. Add that app in Firebase and download google-services.json again.');
+    const key = Array.isArray(match.api_key) && match.api_key[0] ? match.api_key[0].current_key : undefined;
+    const values = { apiKey: key, appId: match.client_info.mobilesdk_app_id, projectId: info && info.project_id, senderId: info && info.project_number };
+    for (const value of Object.values(values)) if (typeof value !== 'string' || !value) throw new Error('google-services.json is missing some values. Download it again from Firebase.');
+    return values;
+  }
+  function serviceAccountProject(text) {
+    try {
+      const json = JSON.parse(text);
+      return json && json.type === 'service_account' && typeof json.project_id === 'string' ? json.project_id : null;
+    } catch { return null; }
+  }
+  function renderPushPage() {
+    const ui = settingsPage('push', 'settings-push-body');
+    const current = settingsSection('push');
+    const client = current.clientConfig || {};
+    const account = current.serviceAccount || {};
+    ui.body.append(stepsBlock('Set up push notifications', [
+      ['In the ', extLink('Firebase console', 'https://console.firebase.google.com/'), ', click Add project and finish the wizard.'],
+      ['In Project overview click Add app > Android and enter the package name ', element('code', PUSH_PACKAGE), '. Register the app and skip the remaining steps.'],
+      'Download google-services.json. Choose that file below (it is read in your browser and never uploaded) or paste the four values yourself.',
+      'In Project settings > Service accounts click Generate new private key. Choose the downloaded JSON file below or paste its text.',
+      'Click Save. The project ID found in the key must match the Project ID above.'
+    ]));
+    const apiKey = textField(ui, 'apiKey', 'API key', client.apiKey);
+    const appId = textField(ui, 'appId', 'App ID', client.appId, { placeholder: '1:1234567890:android:abc123' });
+    const projectId = textField(ui, 'projectId', 'Project ID', client.projectId);
+    const senderId = textField(ui, 'senderId', 'Sender ID (project number)', client.senderId, { inputMode: 'numeric' });
+    const pickLabel = element('label', 'Fill from google-services.json', 'cfg-file');
+    const pick = element('input');
+    pick.type = 'file';
+    pick.id = 'settings-push-google-services';
+    pick.accept = '.json,application/json';
+    pickLabel.append(pick);
+    const found = element('p', undefined, 'cfg-status');
+    found.id = 'settings-push-project';
+    found.setAttribute('role', 'status');
+    found.setAttribute('aria-live', 'polite');
+    const serviceAccount = secretField(ui, 'serviceAccount', 'Service account key (JSON)', account, {
+      multiline: true,
+      hint: 'Stored encrypted and never shown again.',
+      file: { accept: '.json,application/json', label: 'Choose service account JSON file' }
+    });
+    function updateFound() {
+      const text = serviceAccount.input.value;
+      const project = text.trim() ? serviceAccountProject(text) : null;
+      let line = '';
+      if (text.trim()) line = project ? 'Project ID found in the key: ' + project : 'This does not look like a service account key.';
+      else if (account.set && typeof account.projectId === 'string') line = 'Project ID of the saved key: ' + account.projectId;
+      const known = project || (text.trim() ? null : account.projectId);
+      if (known && projectId.value() && known !== projectId.value()) line += ' It does not match the Project ID above (' + projectId.value() + ').';
+      found.textContent = line;
+      found.hidden = !line;
+    }
+    serviceAccount.input.addEventListener('input', updateFound);
+    projectId.input.addEventListener('input', updateFound);
+    pick.addEventListener('change', async () => {
+      const file = pick.files && pick.files[0];
+      pick.value = '';
+      if (!file) return;
+      note(ui.error, '');
+      try {
+        if (file.size > 100000) throw new Error('That file is too large.');
+        const values = parseGoogleServices(await file.text());
+        apiKey.input.value = values.apiKey;
+        appId.input.value = values.appId;
+        projectId.input.value = values.projectId;
+        senderId.input.value = values.senderId;
+        updateFound();
+        note(byId(ui.status.id), 'Filled from google-services.json. Click Save to keep these values.');
+      } catch (error) { note(byId(ui.error.id), errorMessage(error)); }
+    });
+    const form = settingsForm(ui, async () => {
+      const values = { apiKey: apiKey.value(), appId: appId.value(), projectId: projectId.value(), senderId: senderId.value() };
+      const body = { clientConfig: Object.values(values).every((v) => !v) ? null : values };
+      const secret = serviceAccount.value();
+      if (secret !== undefined) body.serviceAccount = secret;
+      await putSettings('push', body);
+      note(byId(ui.status.id), 'Saved.');
+    });
+    const clientPanel = formPanel('Android app', 'These identifiers are not secret. They are sent to the app so it can connect to your Firebase project.');
+    clientPanel.append(pickLabel, fieldGrid(apiKey, appId, projectId, senderId));
+    const accountPanel = formPanel('Service account');
+    accountPanel.append(serviceAccount.node, found);
+    form.append(clientPanel, accountPanel, actionRow(ui, saveButton(ui)), ui.status, ui.error);
+    ui.body.append(form);
+    updateFound();
+  }
+
   function enterConfig() {
-    loadAutoReplies();
-    loadActivity();
-    loadQuickMessages(false);
+    settingsState.importedNote = '';
+    loadSettings();
+    loadFeatures();
+    if (whatsappAvailable()) {
+      loadAutoReplies();
+      loadActivity();
+      loadQuickMessages(false);
+    }
   }
   let employeesLoaded = false;
   let activeTab = null;
   const tabNames = ['call-history', 'analytics', 'customers', 'whatsapp', 'employees', 'config'];
   const tabTitles = { 'call-history': 'Call history', analytics: 'Call analytics', customers: 'Customers', whatsapp: 'WhatsApp chats', employees: 'Employees', config: 'Config' };
-  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', analytics: 'Call volume, talk time, connect rates and busy hours across your team.', customers: 'Customers, who handles them, and their chats and calls.', whatsapp: 'Stored WhatsApp conversations with customers.', employees: 'Manage people, enrolled devices and handovers.', config: 'Automatic WhatsApp replies and quick messages.' };
+  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', analytics: 'Call volume, talk time, connect rates and busy hours across your team.', customers: 'Customers, who handles them, and their chats and calls.', whatsapp: 'Stored WhatsApp conversations with customers.', employees: 'Manage people, enrolled devices and handovers.', config: 'Features, WhatsApp, daily email, push notifications and automatic replies.' };
   function showTab() {
     const hashTab = location.hash.slice(1).split('?')[0];
-    const selected = tabNames.includes(hashTab) ? hashTab : 'call-history';
+    const selected = tabNames.includes(hashTab) && tabAvailable(hashTab) ? hashTab : 'call-history';
     if (selected !== activeTab) {
       closePlayer();
+      if (activeTab === 'config') settingsState.generatedToken = '';
       if (activeTab === 'call-history') cancelCallHistory();
       if (activeTab === 'analytics') cancelAnalytics();
       if (invitationExpiresAt || invitationPending) clearInvitation('The displayed code was cleared when leaving this view. Invitation history remains available.');
@@ -4954,8 +5550,9 @@ export const clientJavaScript = String.raw`(() => {
     byId(name + '-tab').addEventListener('keydown', (event) => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', ' '].includes(event.key)) return;
       event.preventDefault();
-      const index = tabNames.indexOf(name);
-      const target = event.key === 'Home' ? tabNames[0] : event.key === 'End' ? tabNames[tabNames.length - 1] : event.key === ' ' ? name : tabNames[(index + (event.key === 'ArrowRight' ? 1 : tabNames.length - 1)) % tabNames.length];
+      const available = tabNames.filter(tabAvailable);
+      const index = available.indexOf(name);
+      const target = event.key === 'Home' ? available[0] : event.key === 'End' ? available[available.length - 1] : event.key === ' ' ? name : available[(index + (event.key === 'ArrowRight' ? 1 : available.length - 1)) % available.length];
       location.hash = target;
       showTab();
       byId(target + '-tab').focus();
@@ -4965,6 +5562,5 @@ export const clientJavaScript = String.raw`(() => {
   byId('call-history-timezone-note').textContent = 'Dates and times use ' + Intl.DateTimeFormat().resolvedOptions().timeZone + '. Number searches match literal text. Employee choices include the full directory.';
   loadDirectory();
   showTab();
-  refreshUnread();
-  pollLive();
+  loadFeatures();
 })();`;

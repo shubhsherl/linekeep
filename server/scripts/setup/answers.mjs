@@ -1,6 +1,6 @@
 import { DEFAULT_CRON } from "./config.mjs";
 import {
-  istTimeToCron, parseBucketName, parseCron, parseD1Name, parseDays, parseDomain, parseEmail, parseEmailList,
+  parseBucketName, parseD1Name, parseDays, parseDomain, parseEmail, parseEmailList, parseIstTime,
   parseCredential, parseEnvName, parseMegabytes, parseMetaId, parseRegion, parseSessionDuration, parseTeamName, parseWorkerName,
 } from "./validate.mjs";
 import {
@@ -192,25 +192,13 @@ export async function collectAnswers(ctx, features, { organization } = {}) {
       key: "email.recipients", fileValue: m.recipients, parse: parseEmailList, prompt: "Summary recipients (comma separated)",
       explain: "\nRecipients appear together in the To field and can see each other's addresses.",
     });
-    let cron;
-    if (m.cron !== undefined) {
-      const r = parseCron(m.cron);
-      if (!r.ok) throw new Error(`Invalid answer "email.cron": ${r.error}`);
-      cron = r.value;
-    } else {
-      const time = await field(ctx, {
-        key: "email.timeIst", fileValue: m.timeIst, def: "18:00",
-        parse: (v) => {
-          const r = istTimeToCron(v);
-          return r.ok ? { ok: true, value: r.value } : r;
-        },
-        prompt: "Send time in IST (24h HH:MM)",
-        explain: "\nThe job runs on a UTC cron; the IST time you give is converted (IST = UTC+5:30). Default 18:00 IST = 30 12 * * * UTC.",
-      });
-      cron = time;
-    }
+    const timeIst = await field(ctx, {
+      key: "email.timeIst", fileValue: m.timeIst, def: "18:00", parse: parseIstTime,
+      prompt: "Send time in IST (24h HH:MM)",
+      explain: "\nThe Worker checks every 30 minutes and sends at the half hour this time falls in (18:10 sends at 18:00). You can change it later in the dashboard's Config.",
+    });
     answers.email = {
-      domain, region, cron, recipients,
+      domain, region, timeIst, recipients,
       from: sender === `postmaster@${domain}` ? null : sender,
     };
     if (!ctx.dryRun) {
@@ -228,7 +216,7 @@ export async function collectAnswers(ctx, features, { organization } = {}) {
   if (features.retention) {
     const days = await field(ctx, {
       key: "retention.days", fileValue: file.retention?.days, def: 30, parse: parseDays, prompt: "Delete recordings older than how many days",
-      explain: `\nRetention deletes recording AUDIO only (from R2). Call logs, customers and chats are kept. It runs in the daily cron (${DEFAULT_CRON} UTC unless email sets another time).`,
+      explain: `\nRetention deletes recording AUDIO only (from R2). Call logs, customers and chats are kept. It runs once a day from the Worker's cron (${DEFAULT_CRON}).`,
     });
     answers.retention = { days };
   }

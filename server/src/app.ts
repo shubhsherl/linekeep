@@ -29,11 +29,21 @@ import { createDevicePushRoutes } from "./modules/push";
 import { createAdminWhatsAppMediaRoutes, createDeviceWhatsAppMediaRoutes } from "./modules/whatsapp/media";
 import { createAdminWhatsAppConfigRoutes, createDeviceWhatsAppConfigRoutes } from "./modules/whatsapp/config-routes";
 
+import { createAdminSettingsRoutes } from "./modules/settings";
 import type { Env } from "./env";
+import type { Features } from "./settings/fields";
+import { applySettings, loadSettings, resolveFeatures } from "./settings/service";
 
 export type AppBindings = {
   Bindings: Env & { ACCESS_TEAM_DOMAIN?: string; ACCESS_AUDIENCE?: string };
-  Variables: { requestId: string; adminAuthorized?: boolean; adminId?: string };
+  Variables: {
+    requestId: string;
+    adminAuthorized?: boolean;
+    adminId?: string;
+    /** The deployment's own variables, before dashboard settings are laid over `context.env`. */
+    deploymentEnv?: Env;
+    features?: Features;
+  };
 };
 
 export function createApp() {
@@ -94,6 +104,18 @@ export function createApp() {
         : limitJsonBody;
     return limit(context, next);
   });
+  // Dashboard settings (database first, then deployment variables) become `context.env`, so every module keeps
+  // reading WHATSAPP_*, FCM_*, MAILGUN_* … as before. One cached lookup per request. Uploads and call-log
+  // batches read none of these settings, so the highest-volume device paths skip it.
+  app.use("/v1/*", async (context, next) => {
+    if (context.req.path.startsWith("/v1/device/uploads/") || context.req.path.startsWith("/v1/device/call-logs")) return next();
+    const deployment = context.env;
+    const snapshot = await loadSettings(deployment);
+    context.set("deploymentEnv", deployment);
+    context.set("features", resolveFeatures(deployment, snapshot));
+    context.env = applySettings(deployment, snapshot);
+    return next();
+  });
   app.route("/v1/webhooks", createWhatsAppWebhookRoutes());
   app.route("/v1/device", createDeviceIdentityRoutes());
   app.route("/v1/device/uploads", createRecordingRoutes());
@@ -109,6 +131,7 @@ export function createApp() {
   app.route("/v1/admin", createAdminWhatsAppConfigRoutes(requireAdmin));
   app.route("/v1/admin", createAdminWhatsAppMediaRoutes(requireAdmin));
   app.route("/v1/admin", createAdminAnalyticsRoutes(requireAdmin));
+  app.route("/v1/admin", createAdminSettingsRoutes(requireAdmin));
   app.route("/", createLocalAdminRoutes());
   app.use("/admin", requireAdminPage);
   app.use("/admin/*", requireAdminPage);

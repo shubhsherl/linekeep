@@ -159,7 +159,67 @@ test("native Worker cron sends successfully and never forwards credentials throu
   assert.equal((await worker.scheduled(event)).outcome, "ok");
   assert.deepEqual(messages[0].getAll("to"), ["owner@example.com", "manager@example.com"]);
   assert.ok(messages[0].get("text").includes("TOTAL: total 0, connected 0 (0m00s)"));
+  // The same day's slot again is a no-op; the next day's slot sends (and is refused by the redirecting provider).
+  assert.equal((await worker.scheduled(event)).outcome, "ok");
+  assert.equal(messages.length, 1);
   redirect = true;
-  assert.equal((await worker.scheduled(event)).outcome, "exception");
+  const nextDay = { cron: "*/30 * * * *", scheduledTime: new Date(scheduledTime + 24 * 60 * 60 * 1000) };
+  assert.equal((await worker.scheduled(nextDay)).outcome, "exception");
   assert.deepEqual(destinations, ["api.mailgun.net", "api.mailgun.net"]);
+});
+
+const { sendSlot, istSlot } = await loadModule("../reporting/call-summary.ts");
+
+test("send time rounds down to the half-hour slot the cron can hit, defaulting to 18:00", () => {
+  assert.equal(sendSlot(undefined), "18:00");
+  assert.equal(sendSlot("garbage"), "18:00");
+  assert.equal(sendSlot("09:10"), "09:00");
+  assert.equal(sendSlot("09:30"), "09:30");
+  assert.equal(sendSlot("23:59"), "23:30");
+  assert.equal(istSlot(Date.parse("2026-09-28T12:30:00.000Z")), "18:00");
+  assert.equal(istSlot(Date.parse("2026-09-28T18:29:59.000Z")), "23:30");
+  assert.equal(istSlot(Date.parse("2026-09-28T18:30:00.000Z")), "00:00");
+});
+
+test("the report window ends at the configured send slot", async (t) => {
+  const morning = reportWindow(Date.parse("2026-09-28T03:30:00.000Z"), "09:10");
+  assert.deepEqual(morning, { date: "2026-09-28", start: "2026-09-27T18:30:00.000Z", end: "2026-09-28T03:30:00.000Z" });
+  const summary = await loadCallSummary(await createDatabase(t), Date.parse("2026-09-28T03:30:00.000Z"), "09:10");
+  assert.ok(renderCallSummary(summary).text.includes("12:00 AM–9:00 AM IST"));
+  assert.ok(renderCallSummary(await loadCallSummary(await createDatabase(t), scheduledTime)).text.includes("12:00 AM–6:00 PM IST"));
+});
+
+test("the half-hourly cron sends once, at the configured slot, and records the day", async (t) => {
+  const DB = await createDatabase(t);
+  const sent = [];
+  t.mock.method(globalThis, "fetch", async () => { sent.push(1); return Response.json({ id: "x" }); });
+  const env = {
+    DB, CALL_SUMMARY_ENABLED: "true", EMAIL_IDS: "owner@example.com", MAILGUN_DOMAIN: "example.com",
+    MAILGUN_API_KEY: "synthetic-mailgun-key", CALL_SUMMARY_SEND_TIME: "09:10",
+  };
+  const at = (time) => Date.parse(`2026-09-28T${time}:00.000Z`);
+  // 09:00 IST is 03:30Z. Other half-hours of the day are not due.
+  for (const time of ["03:00", "04:00", "12:30"]) assert.equal((await sendCallSummary(at(time), env)).status, "not-due", time);
+  assert.equal(sent.length, 0);
+  assert.equal((await sendCallSummary(at("03:30"), env)).status, "accepted");
+  assert.deepEqual(JSON.parse((await DB.prepare("SELECT value FROM app_settings WHERE key = 'job.email.lastSent'").first()).value),
+    { date: "2026-09-28", status: "sent" });
+  assert.equal((await sendCallSummary(at("03:30"), env)).status, "already-sent");
+  assert.equal(sent.length, 1);
+  // Old installs keep working: no send time set means 18:00 IST (12:30Z), i.e. the former single daily cron.
+  // One email per day, so this is the next day.
+  const { CALL_SUMMARY_SEND_TIME, ...legacy } = env;
+  assert.equal((await sendCallSummary(at("12:30") + 24 * 60 * 60_000, legacy)).status, "accepted");
+});
+
+test("a failed send is recorded as failed and may be retried in the same slot", async (t) => {
+  const DB = await createDatabase(t);
+  let status = 500;
+  t.mock.method(globalThis, "fetch", async () => new Response("{}", { status }));
+  const env = { DB, CALL_SUMMARY_ENABLED: "true", EMAIL_IDS: "owner@example.com", MAILGUN_DOMAIN: "example.com", MAILGUN_API_KEY: "synthetic-mailgun-key" };
+  await assert.rejects(sendCallSummary(scheduledTime, env));
+  assert.deepEqual(JSON.parse((await DB.prepare("SELECT value FROM app_settings WHERE key = 'job.email.lastSent'").first()).value),
+    { date: "2026-09-28", status: "failed" });
+  status = 200;
+  assert.equal((await sendCallSummary(scheduledTime, env)).status, "accepted");
 });

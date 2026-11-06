@@ -1,5 +1,6 @@
 // PURE: builds the private wrangler.jsonc content. Never receives or emits secret values.
-export const DEFAULT_CRON = "30 12 * * *"; // 6 PM IST
+// Every 30 minutes: the Worker decides what is due, so the email time can change later without a redeploy.
+export const DEFAULT_CRON = "*/30 * * * *";
 export const COMPATIBILITY_DATE = "2026-09-24";
 
 export function environmentFor(envName) {
@@ -7,9 +8,8 @@ export function environmentFor(envName) {
 }
 
 export function effectiveCron(answers) {
-  if (answers.features.email) return answers.email.cron;
-  if (answers.features.retention) return DEFAULT_CRON; // retention runs inside the scheduled handler
-  return null;
+  // The scheduled handler sends the email at the configured IST time and runs retention once a day.
+  return answers.features.email || answers.features.retention ? DEFAULT_CRON : null;
 }
 
 export function buildEnvBlock(answers, ids) {
@@ -18,6 +18,7 @@ export function buildEnvBlock(answers, ids) {
     MAX_RECORDING_BYTES: String(answers.maxRecordingMb * 1024 * 1024),
     CALL_SUMMARY_ENABLED: answers.features.email ? "true" : "false",
   };
+  if (answers.features.email) vars.CALL_SUMMARY_SEND_TIME = answers.email.timeIst; // IST; changeable later in Config
   if (answers.features.retention) vars.RECORDING_RETENTION_DAYS = String(answers.retention.days);
   if (answers.features.access && ids.accessIssuer && ids.accessAudience) {
     vars.ACCESS_TEAM_DOMAIN = ids.accessIssuer;

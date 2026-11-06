@@ -1,7 +1,6 @@
 // PURE: normalized answers -> ordered steps. No I/O.
 import { effectiveCron } from "./config.mjs";
 import { PUSH_SECRET_NAMES } from "./push.mjs";
-import { cronToIst } from "./validate.mjs";
 import { describeMetaCalls, webhookUrl } from "./whatsapp.mjs";
 
 export const ACCESS_PATHS = ["/admin", "/admin/*", "/v1/admin", "/v1/admin/*"];
@@ -93,9 +92,9 @@ export function describeAnswers(answers) {
     `R2 bucket:          ${answers.r2Name}  (private; never made public)`,
     `Max recording:      ${answers.maxRecordingMb} MB`,
     `Admin protection:   ${f.access ? `Cloudflare Access for ${answers.access.emails.map(maskEmail).join(", ")}, session ${answers.access.sessionDuration}, one-time PIN ${answers.access.oneTimePin ? "on" : "off"}` : "OFF (admin returns 401 until Access is configured)"}`,
-    `Daily email:        ${f.email ? `Mailgun ${answers.email.domain} (${answers.email.region}), ${answers.email.recipients.length} recipient(s), cron "${answers.email.cron}" UTC${cronToIst(answers.email.cron) ? ` = ${cronToIst(answers.email.cron)} IST` : ""}` : "off"}`,
+    `Daily email:        ${f.email ? `Mailgun ${answers.email.domain} (${answers.email.region}), ${answers.email.recipients.length} recipient(s), sent daily at ${answers.email.timeIst} IST (changeable later in Config)` : "off"}`,
     `Recording retention: ${f.retention ? `delete audio older than ${answers.retention.days} days (call logs kept)` : "off"}`,
-    `Cron trigger:       ${effectiveCron(answers) ? `"${effectiveCron(answers)}" (UTC)` : "none"}`,
+    `Cron trigger:       ${effectiveCron(answers) ? `"${effectiveCron(answers)}" (UTC, every 30 minutes; the Worker decides what is due)` : "none"}`,
     `WhatsApp Business:  ${f.whatsapp ? "on (Meta WhatsApp Cloud API; webhook /v1/webhooks/whatsapp; 5 Worker secrets)" : "off"}`,
     `Push notifications: ${f.push ? `on (Firebase project ${answers.push.projectId}; 2 Worker secrets)` : "off"}`,
   ];

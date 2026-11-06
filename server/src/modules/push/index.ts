@@ -2,24 +2,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import { createPushRepository } from "../../data/push";
+import { pushClientConfig } from "../../push/client-config";
 import { requireDevice, type DeviceBindings } from "../identity";
-
-const clientConfig = z.strictObject({
-  apiKey: z.string().regex(/^[\w-]{20,100}$/),
-  appId: z.string().regex(/^\d+:\d+:android:[0-9a-f]+$/),
-  projectId: z.string().regex(/^[a-z][a-z0-9-]{4,}$/),
-  senderId: z.string().regex(/^\d{5,20}$/),
-});
-
-/** The public Firebase identifiers for phones, or null when push is not set up or the setting is malformed. */
-export function pushClientConfig(raw: string | undefined) {
-  try {
-    const parsed = clientConfig.safeParse(raw ? JSON.parse(raw) : null);
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
 
 const registration = z.strictObject({ token: z.string().min(20).max(4096) });
 

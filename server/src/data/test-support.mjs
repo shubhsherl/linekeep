@@ -62,3 +62,9 @@ export async function createDatabase(context, throughMigration) {
   }
   return db;
 }
+
+/** Turns the Customers and WhatsApp dashboard features on, as the 0017 migration does for installs that already use them. */
+export async function enableFeatures(db) {
+  await db.batch(["feature.customers", "feature.whatsapp"].map((key) => db.prepare(
+    "INSERT OR REPLACE INTO app_settings (key, value, encrypted, updated_at) VALUES (?, 'true', 0, '2026-01-01T00:00:00.000Z')").bind(key)));
+}

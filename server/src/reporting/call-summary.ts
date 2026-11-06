@@ -1,6 +1,7 @@
-import { z } from "zod";
-
 import type { Env } from "../env";
+import { jobKeys } from "../settings/fields";
+import { readJob, writeJob } from "../settings/jobs";
+import { mailConfiguration, sendMail } from "./mail";
 
 const hour = 60 * 60 * 1000;
 const istOffset = 5.5 * hour;
@@ -27,20 +28,40 @@ type SummaryRow = {
   employees: number;
 } & Record<(typeof callTypes)[number][0], number>;
 
+const defaultSendTime = "18:00";
+
+/** "HH:MM" IST rounded down to the :00/:30 slot the half-hourly cron can hit; unset or malformed means 18:00. */
+export function sendSlot(sendTime: string | undefined): string {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(sendTime?.trim() ?? "");
+  if (!match) return sendSlot(defaultSendTime);
+  return `${match[1]}:${Number(match[2]) >= 30 ? "30" : "00"}`;
+}
+
+/** The IST half-hour slot (HH:00 or HH:30) containing this instant. */
+export function istSlot(time: number): string {
+  const ist = new Date(time + istOffset).toISOString();
+  return `${ist.slice(11, 13)}:${Number(ist.slice(14, 16)) >= 30 ? "30" : "00"}`;
+}
+
+export function istDate(time: number): string {
+  return new Date(time + istOffset).toISOString().slice(0, 10);
+}
+
 // IST has no daylight-saving transitions. Use the event's date, not execution time:
-// a delayed invocation must still report the original day's fixed 6 PM cutoff.
-export function reportWindow(scheduledTime: number) {
-  const date = new Date(scheduledTime + istOffset).toISOString().slice(0, 10);
+// a delayed invocation must still report the original day, ending at the configured send slot (default 6 PM).
+export function reportWindow(scheduledTime: number, sendTime: string = defaultSendTime) {
+  const date = istDate(scheduledTime);
+  const slot = sendSlot(sendTime);
   const start = Date.parse(`${date}T00:00:00.000Z`) - istOffset;
   return {
     date,
     start: new Date(start).toISOString(),
-    end: new Date(start + 18 * hour).toISOString(),
+    end: new Date(start + (Number(slot.slice(0, 2)) * 60 + Number(slot.slice(3))) * 60_000).toISOString(),
   };
 }
 
-export async function loadCallSummary(db: D1Database, scheduledTime: number) {
-  const window = reportWindow(scheduledTime);
+export async function loadCallSummary(db: D1Database, scheduledTime: number, sendTime: string = defaultSendTime) {
+  const window = reportWindow(scheduledTime, sendTime);
   const metrics = `COUNT(*) AS total,
     COUNT(CASE WHEN duration_seconds > 0 THEN 1 END) AS connected,
     COUNT(DISTINCT NULLIF(remote_number, '')) AS uniqueContacts,
@@ -94,9 +115,16 @@ function cells(row: SummaryRow) {
   };
 }
 
+/** The window's end as a 12-hour IST clock time such as "6:00 PM". */
+function clock12(window: { start: string; end: string }): string {
+  const minutes = (Date.parse(window.end) - Date.parse(window.start)) / 60_000;
+  const hour24 = Math.floor(minutes / 60);
+  return `${hour24 % 12 || 12}:${String(minutes % 60).padStart(2, "0")} ${hour24 < 12 ? "AM" : "PM"}`;
+}
+
 export function renderCallSummary(summary: Awaited<ReturnType<typeof loadCallSummary>>) {
   const subject = `Linekeep Daily Call Summary - ${summary.window.date}`;
-  const coverage = `${summary.window.date} · 12:00 AM–6:00 PM IST`;
+  const coverage = `${summary.window.date} · 12:00 AM–${clock12(summary.window)} IST`;
   const note = "Snapshot of call logs uploaded when this report was generated; later calls and uploads are not carried over. " +
     "Connected = logged duration above zero (time shown under the count). Unique = distinct stored numbers. " +
     "Other = blocked, voicemail, answered elsewhere and unknown. Deleted logs and recordings are not counted.";
@@ -137,55 +165,44 @@ export function renderCallSummary(summary: Awaited<ReturnType<typeof loadCallSum
   return { subject, text, html };
 }
 
-function mailConfiguration(env: Env) {
+export type CallSummaryResult =
+  | { status: "disabled" }
+  | { status: "not-due" }
+  | { status: "already-sent" }
+  | { status: "accepted"; date: string; calls: number };
+
+/**
+ * Sends the daily summary when this run's IST half-hour slot is the configured send time (default 18:00) and today's
+ * summary has not gone out yet. The cron fires every 30 minutes, so changing the time needs no redeploy.
+ */
+export async function sendCallSummary(scheduledTime: number, env: Env): Promise<CallSummaryResult> {
+  if (env.CALL_SUMMARY_ENABLED !== "true") return { status: "disabled" };
+  const sendTime = sendSlot(env.CALL_SUMMARY_SEND_TIME);
+  if (istSlot(scheduledTime) !== sendTime) return { status: "not-due" };
+  const config = mailConfiguration(env);
+  if (!config) throw new Error("Invalid call-summary email configuration; check EMAIL_IDS and MAILGUN settings");
+  const date = istDate(scheduledTime);
+  const last = await readJob<{ date?: unknown; status?: unknown }>(env.DB, jobKeys.emailLastSent);
+  if (last?.date === date && last.status === "sent") return { status: "already-sent" };
   try {
-    const raw = env.EMAIL_IDS?.trim() ?? "";
-    const recipients = z.array(z.email()).min(1).max(1000).parse(
-      raw.startsWith("[") ? JSON.parse(raw) : raw.split(",").map((email) => email.trim()),
-    );
-    const domain = z.string().max(253).regex(
-      /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/,
-    ).parse(env.MAILGUN_DOMAIN);
-    return {
-      recipients: [...new Set(recipients)],
-      domain,
-      key: z.string().trim().min(1).parse(env.MAILGUN_API_KEY),
-      sender: z.email().parse(env.MAILGUN_FROM_EMAIL ?? `postmaster@${domain}`),
-      region: z.enum(["us", "eu"]).parse(env.MAILGUN_REGION ?? "us"),
-    };
-  } catch {
-    // Zod/provider errors can include private values. Never propagate them to logs.
-    throw new Error("Invalid call-summary email configuration; check EMAIL_IDS and MAILGUN settings");
+    const summary = await loadCallSummary(env.DB, scheduledTime, sendTime);
+    await sendMail(config, { fromName: "Linekeep Reports", ...renderCallSummary(summary) });
+    await writeJob(env, jobKeys.emailLastSent, { date, status: "sent" });
+    return { status: "accepted", date, calls: summary.total.total };
+  } catch (error) {
+    await writeJob(env, jobKeys.emailLastSent, { date, status: "failed" }).catch(() => undefined);
+    throw error;
   }
 }
 
-export async function sendCallSummary(scheduledTime: number, env: Env) {
-  if (env.CALL_SUMMARY_ENABLED !== "true") return { status: "disabled" } as const;
+/** A test message to the configured recipients; not recorded as the day's summary. */
+export async function sendTestEmail(env: Env): Promise<void> {
   const config = mailConfiguration(env);
-  const summary = await loadCallSummary(env.DB, scheduledTime);
-  const report = renderCallSummary(summary);
-  const body = new FormData();
-  body.set("from", `Linekeep Reports <${config.sender}>`);
-  for (const recipient of config.recipients) body.append("to", recipient);
-  body.set("subject", report.subject);
-  body.set("text", report.text);
-  body.set("html", report.html);
-  body.set("o:tracking", "no");
-  body.set("o:tracking-clicks", "no");
-  body.set("o:tracking-opens", "no");
-  const host = config.region === "eu" ? "api.eu.mailgun.net" : "api.mailgun.net";
-  const response = await fetch(`https://${host}/v3/${config.domain}/messages`, {
-    method: "POST",
-    headers: { Authorization: `Basic ${btoa(`api:${config.key}`)}` },
-    body,
-    redirect: "manual",
-    signal: AbortSignal.timeout(30_000),
-  }).catch(() => {
-    throw new Error("Call-summary email request failed");
+  if (!config) throw new Error("Email is not fully configured");
+  const subject = "Linekeep test email";
+  const text = "This is a test email from Linekeep. Your daily call summary will be sent to this address.";
+  await sendMail(config, {
+    fromName: "Linekeep Reports", subject, text,
+    html: `<!doctype html><html lang="en"><body style="font-family:Arial,Helvetica,sans-serif;color:#102a43"><p>${text}</p></body></html>`,
   });
-  await response.body?.cancel();
-  if (response.status !== 200) {
-    throw new Error(`Call-summary email was not accepted (HTTP ${response.status})`);
-  }
-  return { status: "accepted", date: summary.window.date, calls: summary.total.total } as const;
 }

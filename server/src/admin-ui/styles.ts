@@ -629,6 +629,31 @@ dialog.cfg-dialog { width: min(640px, calc(100% - 28px)); }
   .cfg-param-row { grid-template-columns: minmax(0, 1fr); }
   .cfg-block .section-heading > button { flex: 1 1 auto; }
 }
+/* Config: settings pages */
+.tabs a[hidden], .cfg-nav-list li[hidden] { display: none; }
+.cfg-body { display: grid; gap: 16px; min-width: 0; }
+.cfg-body form { display: grid; gap: 16px; min-width: 0; }
+.cfg-steps ol { margin: 6px 0 0; padding-left: 22px; display: grid; gap: 6px; font-size: 13px; }
+.cfg-steps li { overflow-wrap: anywhere; }
+.cfg-steps a, .cfg-import a { color: var(--accent); }
+.cfg-import { display: grid; gap: 8px; }
+.cfg-import h3, .cfg-import p { margin: 0; }
+.cfg-block > .cfg-grid { margin: 8px 0; }
+.cfg-block > label, .cfg-block > .cfg-secret, .cfg-block > .cfg-copy, .cfg-block > .cfg-switch { margin: 8px 0; }
+.cfg-secret { display: grid; gap: 4px; min-width: 0; }
+.cfg-secret > label { font-size: 12px; font-weight: 500; color: var(--muted); }
+.cfg-secret-state { font-size: 13px; color: var(--c-29424d); }
+.cfg-secret-state:empty, .cfg-copy-state:empty { display: none; }
+.cfg-secret .actions button { min-height: 28px; padding: 2px 10px; font-size: 12px; font-weight: 500; }
+.cfg-file { width: fit-content; max-width: 100%; }
+.cfg-file input[type=file] { min-height: 0; padding: 4px 0; border: 0; background: transparent; }
+.cfg-copy { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 4px 8px; }
+.cfg-copy > .hint, .cfg-copy-state { grid-column: 1 / -1; }
+.cfg-copy-state { font-size: 12px; color: var(--muted); }
+.cfg-generated { display: grid; gap: 6px; }
+.cfg-generated p { margin: 0; }
+.cfg-save { margin-top: 0; }
+.cfg-block code { overflow-wrap: anywhere; }
 /* Composer quick messages */
 .wa-composer-wrap { position: relative; }
 .wa-quick { position: absolute; z-index: 3; left: 8px; bottom: calc(100% + 4px); display: flex; flex-direction: column; gap: 6px; width: min(360px, calc(100% - 16px)); max-height: min(340px, 60vh); padding: 8px; border: 1px solid var(--wa-line); border-radius: 12px; background: var(--wa-in); box-shadow: 0 2px 10px var(--c-142b4526); }

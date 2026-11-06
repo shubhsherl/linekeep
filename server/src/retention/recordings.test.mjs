@@ -159,3 +159,20 @@ test("job cost does not grow with the number of recordings already deleted", asy
   for (const call of expired) assert.equal((await f.status(call.id)).upload_status, "deleted");
   assert.ok(rowsRead < 100, `read ${rowsRead} rows to delete 5 recordings among 400 tombstones`);
 });
+
+const { default: worker } = await loadModule("../index.ts");
+
+test("the half-hourly cron purges recordings at most once per IST day", async (t) => {
+  const f = await fixture(t);
+  const env = f.env("30");
+  const first = await f.add({ recordedAt: days(60) });
+  // 00:00 IST on 2026-10-18 is 2026-10-17T18:30:00Z.
+  const midnight = Date.parse("2026-10-17T18:30:00.000Z");
+  await worker.scheduled({ scheduledTime: midnight }, env);
+  assert.equal((await f.status(first.id)).upload_status, "deleted");
+  const second = await f.add({ recordedAt: days(60) });
+  await worker.scheduled({ scheduledTime: midnight + 30 * 60_000 }, env);
+  assert.equal((await f.status(second.id)).upload_status, "complete");
+  await worker.scheduled({ scheduledTime: midnight + 24 * 60 * 60_000 }, env);
+  assert.equal((await f.status(second.id)).upload_status, "deleted");
+});

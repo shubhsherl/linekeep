@@ -16,6 +16,7 @@ import {
 import type { Env } from "../../env";
 import { defer } from "../../http/defer";
 import { notifyAssigned } from "../../push/notify";
+import { requireFeature } from "../../settings/gate";
 import { createWhatsAppReadRepository } from "../../data/whatsapp-reads";
 import { requireDevice, type DeviceBindings } from "../identity";
 import {
@@ -171,7 +172,8 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
   const routes = new Hono<AppBindings>();
   // Scoped to this module's paths: the router is mounted beside other /v1/admin modules.
   for (const path of ["/customers", "/customers/*", "/whatsapp/*"]) {
-    routes.use(path, noStoreAdmin, authorize);
+    // Registered first, so this also gates the other /whatsapp/* admin routers (config, media) mounted after it.
+    routes.use(path, noStoreAdmin, authorize, requireFeature(path.startsWith("/whatsapp") ? "whatsapp" : "customers"));
   }
   routes.route("/", customerReadRoutes<AppBindings>(
     () => undefined, (url) => adminListQuery.parse(queryValues(url)),
@@ -289,7 +291,7 @@ export function createDeviceCustomerRoutes() {
     routes.use(path, async (context, next) => {
       context.header("Cache-Control", "no-store");
       await next();
-    }, requireDevice);
+    }, requireDevice, requireFeature(path.startsWith("/whatsapp") ? "whatsapp" : "customers"));
   }
   routes.route("/", customerReadRoutes<DeviceBindings>(
     (context) => ({ employeeId: context.get("device").employeeId }),

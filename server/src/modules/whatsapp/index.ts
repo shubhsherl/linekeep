@@ -9,6 +9,7 @@ import type { Env } from "../../env";
 import { fetchTemplates, renderTemplate, type WhatsAppTemplate } from "../../whatsapp/templates";
 import { defer } from "../../http/defer";
 import { notifyNewMessage } from "../../push/notify";
+import { requireFeature } from "../../settings/gate";
 import { runAutoReply } from "./auto-reply";
 import { storeInboundMedia } from "./media";
 import {
@@ -100,6 +101,8 @@ export async function sendToCustomer(
  */
 export function createWhatsAppWebhookRoutes() {
   const routes = new Hono<AppBindings>();
+  // A turned-off WhatsApp answers nothing, so Meta cannot verify or deliver to a webhook that should not exist.
+  routes.use("*", requireFeature("whatsapp"));
   routes.get("/whatsapp", (context) => {
     const expected = context.env.WHATSAPP_VERIFY_TOKEN?.trim();
     const challenge = context.req.query("hub.challenge");
