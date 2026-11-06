@@ -12,12 +12,45 @@ Linekeep is a self-hosted Android call-history and recording workspace. The Andr
 
 ## What it does
 
+**Calls**
+
 - Synchronizes available call history and readable recordings after explicit sharing consent, with durable local state and recovery after offline periods.
 - Combines call logs and recordings in an administrator feed, including cached caller names and call-specific line information when available.
 - Associates recordings conservatively: ambiguous audio stays visibly unlinked rather than being attached to the wrong call.
-- Provides separate **Delete call log** and **Delete recording** actions.
+- Provides separate **Delete call log** and **Delete recording** actions, an optional retention job for old recordings, and call analytics (volume, talk time, connect rate, busy hours) with an IST day boundary.
+
+**Customers and WhatsApp (optional)**
+
+- Keeps customers (name, phone, location, notes, who handles them) and links their calls to them. Employees see only the customers assigned to them.
+- Connects your own WhatsApp Business number through Meta's Cloud API: a WhatsApp-style inbox with live updates, per-person unread counts, pictures, voice notes and documents stored privately, and sending of text and approved templates with variable pickers and a live preview.
+- A **Config** tab for automatic replies to matching messages and shared quick messages, and a customer sidebar you can open from the call log, the chat list or the customer list.
+- Push notifications (Firebase Cloud Messaging) tell an employee when a customer assigned to them writes, or when a customer is newly assigned to them.
+
+**Access and transparency**
+
 - Uses one-use enrollment and recovery codes, individually revocable device credentials, and Cloudflare Access for administrators.
 - Keeps a visible launcher, a named status notification, and a Quick Settings entry. There is no covert activation or permission evasion.
+
+## Screenshots
+
+Synthetic data only. Dashboard:
+
+| Call history | Call analytics |
+| --- | --- |
+| ![Call history with customers linked from the feed](docs/screenshots/admin-call-history.png) | ![Call analytics for a week](docs/screenshots/admin-analytics.png) |
+| **WhatsApp inbox** | **Customer sidebar** |
+| ![WhatsApp chat with an image, a template and unread badges](docs/screenshots/admin-whatsapp.png) | ![Customer details in a sidebar](docs/screenshots/admin-customer-sidebar.png) |
+| **Config: auto replies and quick messages** | |
+| ![Automatic replies configuration](docs/screenshots/admin-config.png) | |
+
+Employee app:
+
+<p>
+  <img src="docs/screenshots/app-home.png" width="200" alt="Home screen after enrolling">
+  <img src="docs/screenshots/app-chats.png" width="200" alt="Chats with unread badges">
+  <img src="docs/screenshots/app-conversation.png" width="200" alt="A conversation with an image and a template">
+  <img src="docs/screenshots/app-customers.png" width="200" alt="Assigned customers">
+</p>
 
 Android can defer background work; immediate delivery is not guaranteed. Linekeep does not capture VoIP calls, transcribe audio, read contacts, enforce installation, or prevent permission removal. It is not currently distributed through Google Play.
 
@@ -75,7 +108,7 @@ npm ci
 npm run setup
 ```
 
-Follow the **[step-by-step setup guide](docs/SETUP.md)** for prerequisites, the exact API-token permissions, what the script asks, and how to enroll your first phone. Prefer to do it by hand? The guide links the [manual steps](server/README.md#cloudflare-deployment). Use separate resources, Access applications and secrets for each environment; never point production at development data.
+The script also asks whether to set up **WhatsApp** and **push notifications**; see [WhatsApp setup](#whatsapp-business-optional) for what to prepare first. Follow the **[step-by-step setup guide](docs/SETUP.md)** for prerequisites, the exact API-token permissions, what the script asks, and how to enroll your first phone. Prefer to do it by hand? The guide links the [manual steps](server/README.md#cloudflare-deployment). Use separate resources, Access applications and secrets for each environment; never point production at development data.
 
 ### 3. Build the Android app
 
@@ -107,12 +140,29 @@ A build may optionally pre-seed a default server with `-Plinekeep.apiBaseUrl=htt
 
 For a reinstall or cleared app data, use **Recover enrollment** on the existing device in the administrator UI. A recovery code retains the enrollment and history; redemption rotates the device credential and invalidates the previous installation. Permissions and folder access must be granted again.
 
+## WhatsApp Business (optional)
+
+WhatsApp is off until you configure it; call history works without it. `npm run setup` asks "Set up WhatsApp now?" and, before asking for anything, prints this checklist.
+
+**You need**
+
+1. A Meta developer account and a **Business app** with the WhatsApp product, connected to your Meta Business (developers.facebook.com).
+2. A **WhatsApp Business Account** with a registered phone number. A number cannot be active in the consumer WhatsApp app and the Cloud API at once; the app's free test number is fine for trying it. A number already managed by another provider can be moved if the WhatsApp account is owned by your business.
+3. A **system user token that never expires** (Business Settings → System users, assign the app and the WhatsApp account with full control, permissions `whatsapp_business_management` and `whatsapp_business_messaging`), plus the **App ID** and **App secret** (App settings → Basic) and the **WABA ID** and **Phone number ID** (WhatsApp → API Setup).
+4. For real customers: a **privacy policy URL** (you can host `docs/PRIVACY.md`), an app icon and category, then switch the app to **Live**. Until it is Live, Meta only delivers webhooks for people with a role on the app.
+5. **Message templates** approved in WhatsApp Manager to start conversations, and a payment method on the WhatsApp account for paid template messages.
+
+The script stores the tokens as Worker secrets (never in the repository), generates the webhook verify token, and can register the webhook with Meta for you. See [WhatsApp and push notifications](docs/SETUP.md) for the details and [server/README.md](server/README.md) for the manual steps. Push notifications additionally need a Firebase project (free), a service-account key, and your Firebase app identifiers; the app fetches those from your server, so the same APK works for every deployment.
+
+Linekeep sends only messages you or your rules trigger, from your own number, and WhatsApp's business policies and opt-out rules apply. Customers' messages and files are stored in your private bucket.
+
 ## Retention and deletion
 
 Choose and operate a retention policy before uploading real data. Recording audio can be deleted automatically after N days by the optional [retention job](server/README.md#recording-retention) (off by default; call logs are kept and there is no automatic schedule for them). R2 lifecycle rules alone do not coordinate deletion with D1 metadata.
 
 - **Delete call log** removes the history entry from the feed and leaves its recordings as unlinked audio.
 - **Delete recording** removes the server's audio and leaves the call log. Previous playback capabilities no longer retrieve the deleted audio.
+- WhatsApp messages and their pictures and files are kept until you remove them; the recording retention job does not touch them and the dashboard has no delete action for them yet, so erasure requests for chats are a manual database and bucket operation.
 - Neither action deletes originals from the phone or copies someone already downloaded.
 - Internal metadata/tombstones remain to prevent ordinary synchronization from restoring deleted entries and to preserve conservative matching. These actions are **not a full-data-erasure API**.
 
@@ -124,6 +174,7 @@ Linekeep is the new display name of Calltracker. Existing users must keep the **
 
 ## Documentation and contributing
 
+- [Privacy policy](docs/PRIVACY.md), [data deletion instructions](docs/DATA_DELETION.md) and [terms](docs/TERMS.md): a draft you can adapt for your own deployment and Meta's app review.
 - **[Step-by-step setup guide](docs/SETUP.md)** (prerequisites, API token, guided script)
 - [Backend setup and administration](server/README.md)
 - [Android build and device behavior](android/README.md)
