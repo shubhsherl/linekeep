@@ -267,6 +267,8 @@ class CalltrackerMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val push = parsePushPayload(message.data) ?: return
+        // The foreground poller may be backed off; a push means something changed, so it checks right away.
+        if (AppVisibility.foreground) app.customers.nudgeLiveUpdates()
         if (!shouldPostPush(push, AppVisibility.foreground, app.customers.openConversationId)) return
         PushNotifications.post(this, push)
     }

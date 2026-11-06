@@ -78,6 +78,11 @@ class CalltrackerApplication : Application() {
                 }
         }
     }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        ThumbnailCache.onTrimMemory(level)
+    }
 }
 
 internal object SyncScheduler {
@@ -87,6 +92,7 @@ internal object SyncScheduler {
     private var observed = emptySet<String>()
     private var debounce: Runnable? = null
     private var firstChange = 0L
+    private var urgentChange = false
     private var subscriptionListener: SubscriptionManager.OnSubscriptionsChangedListener? = null
     private val callCompletionReceiver = ComponentName(BuildConfig.APPLICATION_ID, CallCompletionReceiver::class.java.name)
     private fun prefs(context: Context) = context.getSharedPreferences("sync-scheduler-v3", Context.MODE_PRIVATE)
@@ -126,10 +132,10 @@ internal object SyncScheduler {
         if (desired != observed || observer == null) {
             observer?.let { app.contentResolver.unregisterContentObserver(it) }
             val listener = object : ContentObserver(handler) {
-                override fun onChange(selfChange: Boolean) = changed(app)
-                override fun onChange(selfChange: Boolean, uri: Uri?) = changed(app)
-                override fun onChange(selfChange: Boolean, uri: Uri?, flags: Int) = changed(app)
-                override fun onChange(selfChange: Boolean, uris: MutableCollection<Uri>, flags: Int) = changed(app)
+                override fun onChange(selfChange: Boolean) = changed(app, urgent = true)
+                override fun onChange(selfChange: Boolean, uri: Uri?) = changed(app, signalsCallLog(listOf(uri?.toString())))
+                override fun onChange(selfChange: Boolean, uri: Uri?, flags: Int) = changed(app, signalsCallLog(listOf(uri?.toString())))
+                override fun onChange(selfChange: Boolean, uris: MutableCollection<Uri>, flags: Int) = changed(app, signalsCallLog(uris.map { it.toString() }))
             }
             val allowed = desired.filterTo(sortedSetOf()) { uri ->
                 runCatching { app.contentResolver.registerContentObserver(Uri.parse(uri), true, listener) }.isSuccess
@@ -170,15 +176,18 @@ internal object SyncScheduler {
         }
     }
 
-    private fun changed(app: CalltrackerApplication) {
+    private fun changed(app: CalltrackerApplication, urgent: Boolean) {
         // Called on the main handler. A continuous provider stream cannot postpone this indefinitely.
         val now = SystemClock.elapsedRealtime()
         if (firstChange == 0L) firstChange = now
+        if (urgent) urgentChange = true
         debounce?.let(handler::removeCallbacks)
         val task = Runnable {
             firstChange = 0L
             debounce = null
-            app.scope.launch { enqueue(app) }
+            val coalesce = !urgentChange
+            urgentChange = false
+            app.scope.launch { enqueue(app, coalesce = coalesce) }
         }
         debounce = task
         handler.postDelayed(task, minOf(1_000L, maxOf(0L, 5_000L - (now - firstChange))))
@@ -189,8 +198,8 @@ internal object SyncScheduler {
         val signature = state.getString("uris", "").orEmpty()
         if (signature.isEmpty()) return
         val slot = state.getInt("triggerSlot", 0)
-        val constraints = Constraints.Builder().setTriggerContentUpdateDelay(1, TimeUnit.SECONDS)
-            .setTriggerContentMaxDelay(5, TimeUnit.SECONDS)
+        val constraints = Constraints.Builder().setTriggerContentUpdateDelay(3, TimeUnit.SECONDS)
+            .setTriggerContentMaxDelay(15, TimeUnit.SECONDS)
         signature.lines().forEach { constraints.addContentUriTrigger(Uri.parse(it), true) }
         val work = OneTimeWorkRequestBuilder<ContentTriggerWorker>().setConstraints(constraints.build())
             .setInputData(workDataOf("slot" to slot, "signature" to signature)).build()
@@ -199,7 +208,7 @@ internal object SyncScheduler {
     }
 
     @Synchronized
-    fun consumeTrigger(context: Context, slot: Int, signature: String) {
+    fun consumeTrigger(context: Context, slot: Int, signature: String, urgent: Boolean) {
         val state = prefs(context)
         if (state.getString("uris", "") != signature || state.getInt("triggerSlot", 0) != slot) return
         // A distinct successor can be registered while this short dispatcher is still running.
@@ -208,16 +217,22 @@ internal object SyncScheduler {
         // An older dispatcher in that slot may still be returning success. It has already
         // handed off its work under this lock, so replacing it cannot cancel a transfer.
         armTrigger(context, replaceConsumed = true)
-        enqueue(context)
+        enqueue(context, coalesce = !urgent)
     }
 
+    /**
+     * Queues one local discovery run. [coalesce] is for content-observer signals: MediaStore reports every photo,
+     * download and thumbnail on the phone, often in bursts, so such a signal waits [COALESCE_SECONDS] and every
+     * signal in that window shares the one pending run. Call ends, setup changes, recovery and "Sync now" run at once.
+     */
     @Synchronized
-    fun enqueue(context: Context, manual: Boolean = false) {
+    fun enqueue(context: Context, manual: Boolean = false, coalesce: Boolean = false) {
         val kind = if (manual) "manual" else "event-${prefs(context).getInt("captureSlot", 0)}"
-        val work = OneTimeWorkRequestBuilder<DiscoveryWorker>()
+        val request = OneTimeWorkRequestBuilder<DiscoveryWorker>()
             .setInputData(workDataOf("kind" to kind, "manual" to manual))
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
-        WorkManager.getInstance(context).enqueueUniqueWork("local-discovery-$kind", ExistingWorkPolicy.KEEP, work).result.get()
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+        if (coalesce) request.setInitialDelay(COALESCE_SECONDS, TimeUnit.SECONDS)
+        WorkManager.getInstance(context).enqueueUniqueWork("local-discovery-$kind", ExistingWorkPolicy.KEEP, request.build()).result.get()
     }
 
     @Synchronized
@@ -322,7 +337,10 @@ internal object SyncScheduler {
 /** System-scheduled content URI work wakes a dead process without holding a foreground service open. */
 class ContentTriggerWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
-        SyncScheduler.consumeTrigger(applicationContext, inputData.getInt("slot", 0), inputData.getString("signature").orEmpty())
+        SyncScheduler.consumeTrigger(
+            applicationContext, inputData.getInt("slot", 0), inputData.getString("signature").orEmpty(),
+            urgent = signalsCallLog(triggeredContentUris.map { it.toString() }),
+        )
         return Result.success()
     }
 }

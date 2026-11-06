@@ -9,9 +9,14 @@ import androidx.core.content.FileProvider
 import java.io.File
 import java.io.IOException
 
-internal const val THUMBNAIL_EDGE_PX = 660
-internal const val VIEWER_EDGE_PX = 2048
+/** Chat thumbnails are drawn 220 dp wide. */
+private const val THUMBNAIL_WIDTH_DP = 220
+private const val THUMBNAIL_MAX_EDGE_PX = 900
 private const val SHARE_DIRECTORY = "shared-media"
+
+/** Longest edge, in pixels, a chat thumbnail needs on a screen with this density (660 at 3x). */
+internal fun thumbnailEdgePx(density: Float): Int =
+    Math.ceil((THUMBNAIL_WIDTH_DP * density).toDouble()).toInt().coerceIn(THUMBNAIL_WIDTH_DP, THUMBNAIL_MAX_EDGE_PX)
 
 /** Largest power-of-two divisor that keeps the longest edge at or above [maxEdge]. */
 internal fun sampleSizeFor(width: Int, height: Int, maxEdge: Int): Int {
@@ -21,12 +26,31 @@ internal fun sampleSizeFor(width: Int, height: Int, maxEdge: Int): Int {
     return sample
 }
 
+/**
+ * Largest power-of-two divisor for which the decoded image is still at least as large as the image fitted into
+ * [maxWidth] x [maxHeight]. A 4000x3000 photo on a 1080x2400 screen decodes at 2000x1500, not at 4000x3000.
+ */
+internal fun fitSampleSize(width: Int, height: Int, maxWidth: Int, maxHeight: Int): Int {
+    if (width <= 0 || height <= 0 || maxWidth <= 0 || maxHeight <= 0) return 1
+    val ratio = maxOf(width / maxWidth, height / maxHeight)
+    var sample = 1
+    while (sample * 2 <= ratio) sample *= 2
+    return sample
+}
+
 /** Decodes [bytes] at reduced size so a large photo never needs its full bitmap in memory; null when undecodable. */
-internal fun decodeSampled(bytes: ByteArray, maxEdge: Int): Bitmap? {
+internal fun decodeSampled(bytes: ByteArray, maxEdge: Int): Bitmap? =
+    decodeWith(bytes) { width, height -> sampleSizeFor(width, height, maxEdge) }
+
+/** Decodes [bytes] to fit a [maxWidth] x [maxHeight] area (a full-screen viewer); null when undecodable. */
+internal fun decodeFitted(bytes: ByteArray, maxWidth: Int, maxHeight: Int): Bitmap? =
+    decodeWith(bytes) { width, height -> fitSampleSize(width, height, maxWidth, maxHeight) }
+
+private inline fun decodeWith(bytes: ByteArray, sampleSize: (width: Int, height: Int) -> Int): Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-    val options = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxEdge) }
+    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight) }
     return try {
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
     } catch (_: OutOfMemoryError) {
@@ -34,14 +58,21 @@ internal fun decodeSampled(bytes: ByteArray, maxEdge: Int): Bitmap? {
     }
 }
 
-/** In-memory thumbnails only, bounded to 16 MiB; nothing is written to disk. */
+/** A sixteenth of the app's heap limit, between 4 and 16 MiB: 8 MiB on a 128 MiB heap. */
+internal fun thumbnailCacheBytes(maxHeapBytes: Long): Int = (maxHeapBytes / 16).coerceIn(4L * 1024 * 1024, 16L * 1024 * 1024).toInt()
+
+/** Android's own "memory is getting short" levels start at TRIM_MEMORY_RUNNING_LOW (10); the UI-hidden level is 20. */
+internal fun shouldDropThumbnails(trimLevel: Int): Boolean = trimLevel >= 10
+
+/** In-memory thumbnails only, bounded by [thumbnailCacheBytes]; nothing is written to disk. Emptied when Android trims memory. */
 internal object ThumbnailCache {
-    private val cache = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
+    private val cache = object : LruCache<String, Bitmap>(thumbnailCacheBytes(Runtime.getRuntime().maxMemory())) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
     fun get(key: String): Bitmap? = cache.get(key)
     fun put(key: String, bitmap: Bitmap) { cache.put(key, bitmap) }
     fun clear() = cache.evictAll()
+    fun onTrimMemory(level: Int) { if (shouldDropThumbnails(level)) cache.evictAll() }
 }
 
 internal fun mediaMimeType(media: MessageMedia): String =

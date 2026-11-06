@@ -271,38 +271,52 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     /**
      * Polls the tiny version endpoint until cancelled (callers run it only while the app is started). On a
      * change it refreshes just what is on screen: the open conversation's newest page, or the chat list when
-     * [chatsVisible]; unread totals always. Other loaded chat lists are refreshed when next shown. Errors double
-     * the interval up to 60 s; success resets it. The first successful poll only records the version.
+     * [chatsVisible]; unread totals always. Other loaded chat lists are refreshed when next shown. While nothing
+     * changes the interval stretches per [policy]; a change, [nudgeLiveUpdates] or a restart of this loop (a new
+     * screen, the app coming to the foreground) brings it back to the base. Errors double the interval up to 60 s;
+     * a successful answer resets that. The first successful poll only records the version.
      */
-    suspend fun runLiveUpdates(baseMs: Long, chatsVisible: Boolean) {
-        var wait = baseMs
+    suspend fun runLiveUpdates(policy: PollPolicy, chatsVisible: Boolean) {
+        var unchanged = 0
+        var failures = 0
+        nudges.tryReceive()
         while (true) {
-            wait = try {
-                pollVersion(chatsVisible)
-                baseMs
+            try {
+                val changed = pollVersion(chatsVisible)
+                failures = 0
+                unchanged = if (changed) 0 else unchanged + 1
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                minOf(wait * 2, 60_000L)
+                failures++
             }
-            kotlinx.coroutines.delay(wait)
+            if (kotlinx.coroutines.withTimeoutOrNull(nextPollDelay(policy, unchanged, failures)) { nudges.receive() } != null) unchanged = 0
         }
     }
 
-    private suspend fun pollVersion(chatsVisible: Boolean) {
+    private val nudges = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+
+    /** Something the employee did or a push says a message may have changed: poll now and restart the back-off. */
+    fun nudgeLiveUpdates() {
+        nudges.trySend(Unit)
+    }
+
+    /** True when the server's version moved since the last poll (or this is the first one). */
+    private suspend fun pollVersion(chatsVisible: Boolean): Boolean {
         resetIfOwnerChanged()
         val version = enrollments.authorized { api.whatsAppVersion(it) }
         val previous = lastVersion
         if (previous == null) {
             lastVersion = version
-            return
+            return true
         }
-        if (previous == version) return
+        if (previous == version) return false
         coroutineScope {
             if (selectedId != null) launch { messages.mergeNewest() }
             if (chatsVisible && selectedId == null) launch { chats.mergeNewest() } else chatsStale = true
             launch { refreshUnreadOrThrow() }
         }
         lastVersion = version
+        return true
     }
 
     private suspend fun refreshUnreadOrThrow() {
@@ -368,6 +382,7 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     }
 
     suspend fun refreshConversation() {
+        nudgeLiveUpdates()
         val customerId = selectedId ?: return
         coroutineScope {
             launch { messages.refresh() }
@@ -499,6 +514,7 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
             if (selectedId == customerId) {
                 if (sent != null) messages.prepend(sent) else messages.refresh()
             }
+            nudgeLiveUpdates()
             return SendOutcome.Sent
         } catch (error: Exception) {
             if (error is CancellationException) throw error

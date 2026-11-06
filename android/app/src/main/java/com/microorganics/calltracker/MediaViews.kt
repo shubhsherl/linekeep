@@ -172,6 +172,7 @@ private sealed interface ThumbState {
 @Composable
 private fun ImageThumbnail(message: WhatsAppMessage, media: MessageMedia, customers: CustomersRepository, onClick: () -> Unit) {
     val key = message.id + media.url
+    val edge = thumbnailEdgePx(LocalContext.current.resources.displayMetrics.density)
     var attempt by remember(key) { mutableStateOf(0) }
     var state by remember(key) { mutableStateOf<ThumbState>(ThumbnailCache.get(key)?.let { ThumbState.Ready(it) } ?: ThumbState.Loading) }
     LaunchedEffect(key, attempt) {
@@ -179,7 +180,7 @@ private fun ImageThumbnail(message: WhatsAppMessage, media: MessageMedia, custom
         state = ThumbState.Loading
         state = try {
             val bytes = customers.mediaBytes(media.url)
-            val bitmap = withContext(Dispatchers.Default) { decodeSampled(bytes, THUMBNAIL_EDGE_PX) }
+            val bitmap = withContext(Dispatchers.Default) { decodeSampled(bytes, edge) }
             if (bitmap == null) ThumbState.Failed else {
                 ThumbnailCache.put(key, bitmap)
                 ThumbState.Ready(bitmap)
@@ -267,11 +268,12 @@ private sealed interface ViewerState {
 @Composable
 private fun ImageViewer(message: WhatsAppMessage, media: MessageMedia, customers: CustomersRepository, controller: MediaController, close: () -> Unit) {
     val context = LocalContext.current
+    val screen = context.resources.displayMetrics
     var state by remember(media.url) { mutableStateOf<ViewerState>(ViewerState.Loading) }
     LaunchedEffect(media.url) {
         state = try {
             val bytes = customers.mediaBytes(media.url)
-            val bitmap = withContext(Dispatchers.Default) { decodeSampled(bytes, VIEWER_EDGE_PX) }
+            val bitmap = withContext(Dispatchers.Default) { decodeFitted(bytes, screen.widthPixels, screen.heightPixels) }
             if (bitmap == null) ViewerState.Failed("Image unavailable") else ViewerState.Ready(bytes, bitmap)
         } catch (error: Exception) {
             if (error is CancellationException) throw error

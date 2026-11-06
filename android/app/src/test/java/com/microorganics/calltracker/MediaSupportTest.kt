@@ -1,6 +1,8 @@
 package com.microorganics.calltracker
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaSupportTest {
@@ -11,6 +13,43 @@ class MediaSupportTest {
         assertEquals(1, sampleSizeFor(1000, 800, 660))
         assertEquals(2, sampleSizeFor(1400, 900, 660))
         assertEquals(4, sampleSizeFor(5000, 4000, 660))
+    }
+
+    @Test fun thumbnailEdgeFollowsScreenDensityWithinBounds() {
+        assertEquals(660, thumbnailEdgePx(3f))
+        assertEquals(440, thumbnailEdgePx(2f))
+        assertEquals(330, thumbnailEdgePx(1.5f))
+        assertEquals(880, thumbnailEdgePx(4f))
+        assertEquals(900, thumbnailEdgePx(6f))
+        assertEquals(220, thumbnailEdgePx(0.5f))
+    }
+
+    @Test fun lowerDensityScreensDecodeSmallerThumbnails() {
+        assertEquals(4, sampleSizeFor(4000, 3000, thumbnailEdgePx(3f)))
+        assertEquals(8, sampleSizeFor(4000, 3000, thumbnailEdgePx(2f)))
+    }
+
+    @Test fun viewerDecodeFitsTheScreenInsteadOfTheFullPhoto() {
+        // 4032x3000 on a 1080x2400 screen: 3.7x wider than the screen, so a 2x reduction still covers it.
+        assertEquals(2, fitSampleSize(4032, 3000, 1080, 2400))
+        // 720x1600 phone: a 5x reduction is not allowed, 4x is.
+        assertEquals(4, fitSampleSize(4032, 3000, 720, 1600))
+        assertEquals(1, fitSampleSize(1600, 1200, 1080, 2400))
+        assertEquals(8, fitSampleSize(12000, 2000, 1080, 2400))
+        assertEquals(1, fitSampleSize(4032, 3000, 0, 0))
+    }
+
+    @Test fun thumbnailCacheIsBoundedByTheHeapLimit() {
+        assertEquals(8 * 1024 * 1024, thumbnailCacheBytes(128L * 1024 * 1024))
+        assertEquals(16 * 1024 * 1024, thumbnailCacheBytes(512L * 1024 * 1024))
+        assertEquals(4 * 1024 * 1024, thumbnailCacheBytes(32L * 1024 * 1024))
+    }
+
+    @Test fun thumbnailsAreDroppedOnceAndroidReportsMemoryPressure() {
+        assertFalse(shouldDropThumbnails(5))
+        assertTrue(shouldDropThumbnails(10))
+        assertTrue(shouldDropThumbnails(20))
+        assertTrue(shouldDropThumbnails(80))
     }
 
     @Test fun fileNameUsesServerNameOrFallsBackToIdAndExtension() {

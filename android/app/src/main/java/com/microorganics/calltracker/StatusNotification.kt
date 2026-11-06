@@ -49,11 +49,21 @@ internal object StatusNotification {
         else ForegroundInfo(2, notification)
     }
 
+    private const val NOTIFICATION_ID = 1
+
+    /** What the visible notification currently says; guarded by the lock on [show]. */
+    private var lastShown: String? = null
+
+    private fun stillPosted(manager: NotificationManager): Boolean =
+        try { manager.activeNotifications.any { it.id == NOTIFICATION_ID } } catch (_: Exception) { false }
+
+    /**
+     * Status changes are frequent (every scan, every sync step), the visible text rarely is. An unchanged text is not
+     * rebuilt or re-posted while the notification is still showing; if it is gone, it is posted again.
+     */
+    @Synchronized
     fun show(context: Context, status: DeviceStatus) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        manager.createNotificationChannel(NotificationChannel(channelId, context.getString(R.string.status_channel_name), NotificationManager.IMPORTANCE_LOW))
-        if (!status.loaded || !enabled(context)) return
-        val settings = settingsIntent(context)
         val detail = buildString {
             append(status.message)
             status.heartbeatMessage?.let { append("\n").append(it) }
@@ -63,24 +73,33 @@ internal object StatusNotification {
             append("\nPending recordings: ").append(status.pendingUploads)
             append("\nLast upload: ").append(status.lastSuccessfulUploadAt ?: "Never")
         }
+        val summary = if (status.unauthorized || status.storageUnavailable) status.message else status.recordingWaitMessage ?: status.message
+        val syncAction = status.deviceId != null && !status.unauthorized && !status.storageUnavailable
+        val shown = "$syncAction\u0000$summary\u0000$detail"
+        if (status.loaded && shown == lastShown && stillPosted(manager)) return
+        manager.createNotificationChannel(NotificationChannel(channelId, context.getString(R.string.status_channel_name), NotificationManager.IMPORTANCE_LOW))
+        if (!status.loaded || !enabled(context)) return
+        val settings = settingsIntent(context)
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_linekeep_mark)
             .setContentTitle(context.getString(R.string.notification_status))
-            .setContentText(if (status.unauthorized || status.storageUnavailable) status.message
-                else status.recordingWaitMessage ?: status.message)
+            .setContentText(summary)
             .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setContentIntent(settings)
             .addAction(0, "Settings", settings)
-        if (status.deviceId != null && !status.unauthorized && !status.storageUnavailable) {
+        if (syncAction) {
             val sync = PendingIntent.getBroadcast(context, 1,
                 Intent(context, SyncReceiver::class.java).setAction("com.microorganics.calltracker.SYNC"),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             builder.addAction(0, "Sync now", sync)
         }
-        try { manager.notify(1, builder.build()) } catch (_: SecurityException) {
+        try {
+            manager.notify(NOTIFICATION_ID, builder.build())
+            lastShown = shown
+        } catch (_: SecurityException) {
             // Permission can be revoked between the check and notify; the launcher stays available.
         }
     }

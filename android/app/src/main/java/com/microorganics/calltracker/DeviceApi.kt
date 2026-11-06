@@ -267,15 +267,29 @@ internal class DeviceApi(private val server: () -> String?) {
             if (status !in 200..299) throw failure(status, connection)
             if (connection.contentLengthLong > MAX_MEDIA_BYTES) throw MediaTooLarge()
             return connection.inputStream.use { input ->
-                val out = java.io.ByteArrayOutputStream(connection.contentLength.coerceIn(8 * 1024, MAX_MEDIA_BYTES.toInt()))
-                val buffer = ByteArray(16 * 1024)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    if (out.size() + count > MAX_MEDIA_BYTES) throw MediaTooLarge()
-                    out.write(buffer, 0, count)
+                val declared = connection.contentLength
+                if (declared > 0) {
+                    // Known size: one exact array, no growing buffer and no final copy (a 25 MB file otherwise peaks near 75 MB).
+                    val bytes = ByteArray(declared)
+                    var filled = 0
+                    while (filled < declared) {
+                        val count = input.read(bytes, filled, declared - filled)
+                        if (count < 0) throw IOException("Media download was cut short")
+                        filled += count
+                    }
+                    if (input.read() >= 0) throw IOException("Media is longer than announced")
+                    bytes
+                } else {
+                    val out = java.io.ByteArrayOutputStream(8 * 1024)
+                    val buffer = ByteArray(16 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (out.size() + count > MAX_MEDIA_BYTES) throw MediaTooLarge()
+                        out.write(buffer, 0, count)
+                    }
+                    out.toByteArray()
                 }
-                out.toByteArray()
             }
         } finally {
             connection.disconnect()

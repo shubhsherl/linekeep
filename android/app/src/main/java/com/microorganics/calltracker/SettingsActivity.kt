@@ -514,11 +514,12 @@ private fun DeviceScreen(
     var conversationName by remember { mutableStateOf("") }
     var conversationPhone by remember { mutableStateOf("") }
     LaunchedEffect(destination, conversationId) { if (chatsVisible(destination) && conversationId == null) customers.refreshUnread() }
-    // Foreground-only polling of the version marker: 5 s while a conversation is open, otherwise 15 s.
+    // Foreground-only polling of the version marker: every 5 s while a conversation is open, otherwise every 15 s, stretching
+    // while nothing changes (see PollPolicy). The loop restarts, back at the base interval, on every screen or lifecycle change.
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(destination, conversationId, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            customers.runLiveUpdates(if (conversationId != null) 5_000L else 15_000L, chatsVisible = chatsVisible(destination))
+            customers.runLiveUpdates(if (conversationId != null) PollPolicy.CONVERSATION else PollPolicy.BROWSING, chatsVisible = chatsVisible(destination))
         }
     }
     val openConversation = { id: String, name: String, phone: String ->
