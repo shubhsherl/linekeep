@@ -89,8 +89,46 @@ Linekeep stays named in Android Settings and the launcher and exposes an ongoing
 
 The **Customers** and **Chats** tabs read the customers assigned to this phone's current employee and their stored WhatsApp conversations through the device bearer token (`GET /v1/device/customers`, `.../customers/{id}`, `.../customers/{id}/messages`, `.../whatsapp/chats`, `.../whatsapp/status`). Customers are searchable, lists page with a cursor and refresh by pulling down, and a customer opens a detail view with facts, an optional dial button (standard dialer; no call permission) and the thread. An unassigned customer returns 404 and is treated as no longer available; a 401 revokes the enrollment like any other device request.
 
-- **Memory only.** Customer lists, facts and messages are never written to disk, Room or logs. They are dropped when the process ends, the enrolled employee changes, access is revoked or a conversation is closed. Message bodies are rendered as literal text; media is labelled, not downloaded.
+- **Memory only.** Customer lists, facts and messages are never written to disk, Room or logs. They are dropped when the process ends, the enrolled employee changes, access is revoked or a conversation is closed. Message bodies are rendered as literal text; media thumbnails are held in memory only.
+- **Media viewing and saving.** Images and stickers show as thumbnails (fetched with the device token from `/v1/device/whatsapp/messages/{id}/media`, at most 25 MB); tapping opens a full-screen viewer with Save (system file picker, no storage permission) and Share (cache file via a `FileProvider`), and video, audio and documents offer Save or Open.
+- **Automatic refresh.** While the app is in the foreground it polls `GET /v1/device/whatsapp/version` every 5 s with a conversation open and every 15 s otherwise (doubling up to 60 s after errors) and refreshes only the visible chat list, the open conversation's newest page and the unread totals when it changes.
+- **Unread badges.** Chats show a count badge and bold text for customer messages this employee has not read, and the **Chats** tab shows the number of unread chats. Read state is per employee and independent of the administrator: opening a loaded conversation calls `POST /v1/device/whatsapp/chats/{customerId}/read` (failures are ignored and retried on the next open or refresh), totals come from `GET /v1/device/whatsapp/unread`, and nothing is stored on the phone.
 - **Sending is disabled until the server has a WhatsApp transport.** The composer checks `GET /v1/device/whatsapp/status` when a conversation opens. While `canSend` is `false` it stays disabled with "Sending WhatsApp messages from this app is not set up yet. Ask your manager." If the server later reports `canSend: true`, the app sends with a generated `clientMessageId` (reused when the same text is retried), shows a sending state and keeps the typed text on failure; a `503 WHATSAPP_NOT_CONFIGURED` response shows the same not-set-up message. No manifest permission was added.
+
+## Push notifications
+
+The phone can alert the employee when a customer assigned to them sends a WhatsApp message and when a customer is newly assigned (never on unassignment). Pushes are Firebase Cloud Messaging **data-only, high-priority** messages with `type` (`message` or `assigned`), `customerId`, `customerName`, `title` and `body`. The app builds the notification itself on the **Chats and assignments** channel; the tag is the customer ID, so a newer message for the same chat replaces the older one. Tapping it opens Linekeep's main screen directly on that customer's conversation (Chats tab for messages, Customers tab for assignments), so it works even when the launcher icon is hidden. A message for the conversation currently open in the foreground is not shown (live polling already displays it). Customer names appear in notifications; the lock screen hides them (private visibility). Home's **Sharing & access** card shows a one-line hint when notifications are off. On Android 13+ the existing **Grant permissions** flow requests the notification permission.
+
+The token is stored in plain app preferences (it is not a secret) and sent with `PUT /v1/device/push-token` after enrollment, on every app start while enrolled (skipped when this exact token is already registered for this enrollment) and on token refresh. Failures are silent and retried on the next start. **Remove old connection and scan again** sends a best-effort `DELETE /v1/device/push-token`, deletes the local copy and invalidates the FCM token.
+
+Push is configured from the server, so one generic APK serves every deployment. After enrollment and on every app start while enrolled and authorized, the app calls `GET /v1/device/push-config` with its device token. The server answers `{"requestId": "...", "push": {"apiKey", "appId", "projectId", "senderId"} | null}`; these four values are public client identifiers, not secrets. They are stored in plain app preferences and used to initialize FirebaseApp manually (no `google-services` plugin or JSON file), both at the next process start (so a killed app still receives pushes) and immediately when this process has no FirebaseApp yet, after which the token registration above runs in the same pass.
+
+- Resolution order at start: stored server options, then the optional Gradle fallback below, else push is disabled (no registration, no crash).
+- If the call fails, whatever is stored is kept. If the server answers `push: null` after options were stored, the app removes them, clears the registered FCM token locally and stops registering.
+- If the server switches to a different Firebase project while FirebaseApp already runs with the old one, the new options are stored and take effect at the next process start without a crash.
+- **Remove old connection and scan again** also clears the stored Firebase options.
+
+### Optional build-time fallback for custom builds
+
+A custom build can still bake the four values in. They are used only when the server has not supplied any. Supply them in precedence order: Gradle property `-P`, environment variable, then `android/local.properties` (ignored by Git). If any of them is empty, the fallback is off.
+
+| Gradle property / `local.properties` key | Environment variable | `google-services.json` field | Firebase console |
+| --- | --- | --- | --- |
+| `linekeep.firebase.apiKey` | `LINEKEEP_FIREBASE_API_KEY` | `client[].api_key[].current_key` | Project settings → General → Your apps (Android) → Web API key |
+| `linekeep.firebase.appId` | `LINEKEEP_FIREBASE_APP_ID` | `client[].client_info.mobilesdk_app_id` | Project settings → Your apps → App ID |
+| `linekeep.firebase.projectId` | `LINEKEEP_FIREBASE_PROJECT_ID` | `project_info.project_id` | Project settings → Project ID |
+| `linekeep.firebase.senderId` | `LINEKEEP_FIREBASE_SENDER_ID` | `project_info.project_number` | Project settings → Cloud Messaging → Sender ID (the project number) |
+
+Register the Android app with package name `com.microorganics.calltracker` in the Firebase project, then pass the values, for example:
+
+```sh
+./gradlew --no-daemon \
+  -Plinekeep.firebase.apiKey=AIza... -Plinekeep.firebase.appId=1:1234567890:android:abc123 \
+  -Plinekeep.firebase.projectId=my-project -Plinekeep.firebase.senderId=1234567890 \
+  :app:assembleDebug
+```
+
+The backend needs the matching Firebase project's service account to send. The values end up in `BuildConfig`.
 
 ## Credential handling
 

@@ -39,6 +39,7 @@ export const requireAdmin: MiddlewareHandler<AppBindings> = async (
     await next();
     return;
   }
+  let verifiedEmail: string | undefined;
   const url = new URL(context.req.url);
   const origin = context.req.header("Origin");
   const mutating = !["GET", "HEAD", "OPTIONS"].includes(context.req.method);
@@ -117,6 +118,7 @@ export const requireAdmin: MiddlewareHandler<AppBindings> = async (
       ) {
         throw new Error("Missing administrator identity claims");
       }
+      verifiedEmail = identity.email.toLowerCase().slice(0, 256);
     } catch {
       // JWT/library failures can include the raw token. Never log or expose them.
       throw new HTTPException(401, {
@@ -125,6 +127,8 @@ export const requireAdmin: MiddlewareHandler<AppBindings> = async (
     }
   }
   context.set("adminAuthorized", true);
+  // Who is reading: read markers are kept per administrator, never shared between them.
+  context.set("adminId", verifiedEmail ?? "local");
   await next();
 };
 

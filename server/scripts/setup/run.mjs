@@ -3,13 +3,14 @@ import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from
 import { resolve } from "node:path";
 import { HELP, parseArgs } from "./args.mjs";
 import { buildWranglerConfig } from "./config.mjs";
-import { chooseFeatures, collectAnswers } from "./answers.mjs";
+import { assertNoSecretsInAnswers, chooseFeatures, collectAnswers } from "./answers.mjs";
 import { createCloudflare } from "./cloudflare.mjs";
 import { probePermissions, renderProbeReport } from "./permissions.mjs";
 import { buildPlan, COST_NOTES, describeAnswers, accessAppName } from "./plan.mjs";
 import { executePlan, workerHost } from "./steps.mjs";
 import { createUi } from "./ui.mjs";
 import { parseApiToken } from "./validate.mjs";
+import { whatsappChecklist } from "./whatsapp.mjs";
 import { createMasker, createWrangler, WRANGLER_ENTRY } from "./wrangler.mjs";
 
 export function realFs(cwd) {
@@ -71,6 +72,7 @@ function loadAnswersFile(deps, path) {
   for (const bad of ["apiToken", "token", "cloudflareApiToken", "mailgunApiKey"]) {
     if (bad in parsed) throw new Error(`Refusing "${bad}" in the answers file: secrets are never read from disk. Use CLOUDFLARE_API_TOKEN / MAILGUN_API_KEY or the hidden prompts.`);
   }
+  assertNoSecretsInAnswers(parsed);
   return parsed;
 }
 
@@ -146,6 +148,15 @@ function finalReport(deps, ctx, state) {
     say("[!!] non-development environments and the admin is unreachable until you configure Access");
     say("[!!] (re-run setup and enable Access, or follow the Cloudflare Access section of server/README.md).");
   }
+  if (answers.features.whatsapp) {
+    say("");
+    for (const line of whatsappChecklist({ registered: state.whatsapp?.registered === true, callbackUrl: state.whatsapp?.callbackUrl ?? `${url}/v1/webhooks/whatsapp` })) say(line);
+  }
+  if (answers.features.push) {
+    say("");
+    say(`Push notifications: ready for Firebase project ${answers.push.projectId}. Phones fetch the Firebase settings from the server when they next sync;`);
+    say("customers newly assigned to an employee and new customer messages then notify that employee's phone.");
+  }
   say("");
   say("Created:  " + (state.created.join("; ") || "nothing"));
   say("Reused:   " + (state.reused.join("; ") || "nothing"));
@@ -189,7 +200,7 @@ export async function run(argv, deps = defaultDeps()) {
     const file = loadAnswersFile(deps, args.answers);
     const yes = args.yes;
     const dryRun = args.dryRun;
-    const ctx = { ui, file, yes, dryRun, env: deps.env, envFlag: args.env };
+    const ctx = { ui, file, yes, dryRun, env: deps.env, envFlag: args.env, fs: deps.fs };
 
     let cf = null;
     let wrangler = null;
@@ -221,8 +232,8 @@ export async function run(argv, deps = defaultDeps()) {
 
     let organization;
     if (!dryRun && features.access) organization = await cf.getOrganization(account.id);
-    const { answers, secrets } = await collectAnswers(ctx, features, { organization });
-    for (const v of Object.values(secrets)) masker.add(v);
+    const { answers, secrets, maskOnly } = await collectAnswers(ctx, features, { organization });
+    for (const v of [...Object.values(secrets), ...maskOnly]) masker.add(v);
 
     const plan = buildPlan(answers);
     say("");
@@ -259,7 +270,7 @@ export async function run(argv, deps = defaultDeps()) {
     }
 
     const execCtx = {
-      answers, secrets, cf, wrangler, fs: deps.fs, ui, say, yes, dryRun, accountId: account.id,
+      answers, secrets, masker, cf, wrangler, fs: deps.fs, ui, say, yes, dryRun, accountId: account.id,
       configPath: "wrangler.jsonc", now: deps.now, sleep: deps.sleep, fetch: deps.fetch,
       randomHex: deps.randomHex, verifyAttempts: deps.verifyAttempts ?? 5,
     };

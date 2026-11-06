@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withPermit
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,6 +47,13 @@ internal fun customersFailureMessage(error: Exception): String = when {
     error is ApiFailure -> "Linekeep could not complete this (HTTP ${error.status})."
     error is IOException -> "Can't reach Linekeep. Check your connection and try again."
     else -> "Something went wrong. Try again."
+}
+
+internal fun <T> mergeNewestPage(known: List<T>, newest: List<T>, id: (T) -> String): List<T> {
+    val fresh = newest.distinctBy(id)
+    val freshIds = fresh.mapTo(HashSet(), id)
+    if (known.isNotEmpty() && fresh.isNotEmpty() && known.none { id(it) in freshIds }) return fresh
+    return fresh + known.filter { id(it) !in freshIds }
 }
 
 /** One memory-only, cursor-paged list. Results that arrive after a newer refresh, search or clear are dropped. */
@@ -111,9 +119,39 @@ internal class PagedList<T>(
         }
     }
 
+    /**
+     * Fetches the newest page and merges it by id: fetched copies replace known ones and win their position,
+     * older loaded items stay. Without any overlap the loaded list could have a gap, so it is replaced instead.
+     * Silent: no loading or error state is touched, failures propagate to the caller. Results are dropped if a
+     * refresh, search or clear ran meanwhile.
+     */
+    suspend fun mergeNewest() {
+        val before = generation.get()
+        val current = mutable.value
+        if (!current.loaded || current.refreshing) return
+        val page = fetch(current.query.ifEmpty { null }, null)
+        if (before != generation.get()) return
+        mutable.update { latest ->
+            if (!latest.loaded) latest
+            else {
+                val merged = mergeNewestPage(latest.items, page.items, id)
+                // Older pages stay loaded only when something beyond the fetched page survived the merge.
+                latest.copy(items = merged, nextCursor = if (merged.size > page.items.distinctBy(id).size) latest.nextCursor else page.nextCursor)
+            }
+        }
+    }
+
     /** Adds a just-sent item at the newest end, replacing any copy with the same id. */
     fun prepend(item: T) {
         mutable.update { current -> current.copy(items = listOf(item) + current.items.filter { id(it) != id(item) }) }
+    }
+
+    /** Rewrites one loaded item in place, without refetching. */
+    fun update(itemId: String, transform: (T) -> T) {
+        mutable.update { current ->
+            if (current.items.none { id(it) == itemId }) current
+            else current.copy(items = current.items.map { if (id(it) == itemId) transform(it) else it })
+        }
     }
 
     private fun settle(mine: Int, error: Exception) {
@@ -144,6 +182,9 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     @Volatile private var ownerId: String? = null
     @Volatile private var pending: Triple<String, String, String>? = null
 
+    /** The conversation currently open on screen, or null. */
+    val openConversationId: String? get() = selectedId
+
     val customers = PagedList<Customer>({ it.id }) { query, cursor ->
         enrollments.authorized { api.customers(it, query, cursor) }
     }
@@ -158,6 +199,15 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     private val mutableCustomer = MutableStateFlow<Customer?>(null)
     /** Facts for the open conversation; null until loaded. */
     val selectedCustomer: StateFlow<Customer?> = mutableCustomer.asStateFlow()
+
+    private val mutableUnreadChats = MutableStateFlow(0)
+    /** Chats with unread customer messages for this employee; 0 until fetched. */
+    val unreadChats: StateFlow<Int> = mutableUnreadChats.asStateFlow()
+    private val unreadRequest = AtomicInteger()
+
+    @Volatile private var lastVersion: Long? = null
+    @Volatile private var chatsStale = false
+    private val mediaGate = kotlinx.coroutines.sync.Semaphore(3)
 
     private val mutableAvailability = MutableStateFlow(SendAvailability.CHECKING)
     val availability: StateFlow<SendAvailability> = mutableAvailability.asStateFlow()
@@ -176,6 +226,10 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     private fun closeAll() {
         customers.clear()
         chats.clear()
+        unreadRequest.incrementAndGet()
+        mutableUnreadChats.value = 0
+        lastVersion = null
+        chatsStale = false
         closeConversation()
     }
 
@@ -187,7 +241,57 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
 
     suspend fun openChats(query: String) {
         resetIfOwnerChanged()
-        if (query.trim() != chats.state.value.query) chats.search(query) else chats.ensureLoaded()
+        if (query.trim() != chats.state.value.query) chats.search(query)
+        else if (chatsStale && chats.state.value.loaded) { chatsStale = false; chats.mergeNewest() }
+        else chats.ensureLoaded()
+    }
+
+    /** Downloads one message's media with the device token; at most three transfers run at once. */
+    suspend fun mediaBytes(url: String): ByteArray = mediaGate.withPermit {
+        enrollments.authorized { api.mediaBytes(it, url) }
+    }
+
+    /**
+     * Polls the tiny version endpoint until cancelled (callers run it only while the app is started). On a
+     * change it refreshes just what is on screen: the open conversation's newest page, or the chat list when
+     * [chatsVisible]; unread totals always. Other loaded chat lists are refreshed when next shown. Errors double
+     * the interval up to 60 s; success resets it. The first successful poll only records the version.
+     */
+    suspend fun runLiveUpdates(baseMs: Long, chatsVisible: Boolean) {
+        var wait = baseMs
+        while (true) {
+            wait = try {
+                pollVersion(chatsVisible)
+                baseMs
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                minOf(wait * 2, 60_000L)
+            }
+            kotlinx.coroutines.delay(wait)
+        }
+    }
+
+    private suspend fun pollVersion(chatsVisible: Boolean) {
+        resetIfOwnerChanged()
+        val version = enrollments.authorized { api.whatsAppVersion(it) }
+        val previous = lastVersion
+        if (previous == null) {
+            lastVersion = version
+            return
+        }
+        if (previous == version) return
+        coroutineScope {
+            if (selectedId != null) launch { messages.mergeNewest() }
+            if (chatsVisible && selectedId == null) launch { chats.mergeNewest() } else chatsStale = true
+            launch { refreshUnreadOrThrow() }
+        }
+        lastVersion = version
+    }
+
+    private suspend fun refreshUnreadOrThrow() {
+        val mine = unreadRequest.incrementAndGet()
+        val totals = enrollments.authorized { api.unread(it) }
+        if (mine == unreadRequest.get()) mutableUnreadChats.value = totals.chats
     }
 
     suspend fun openConversation(customerId: String, known: Customer?) {
@@ -205,6 +309,35 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
             launch { loadCustomer(customerId) }
             launch { checkAvailability() }
         }
+    }
+
+    /** Fetches this employee's unread totals; failures keep the last value and the next trigger retries. */
+    suspend fun refreshUnread() {
+        resetIfOwnerChanged()
+        val mine = unreadRequest.incrementAndGet()
+        try {
+            val totals = enrollments.authorized { api.unread(it) }
+            if (mine == unreadRequest.get()) mutableUnreadChats.value = totals.chats
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            if (isAccessLost(error) && mine == unreadRequest.get()) mutableUnreadChats.value = 0
+        }
+    }
+
+    /**
+     * Marks the open, loaded conversation read for this employee and clears its badge in memory.
+     * Ignored for any chat not on screen; failures are ignored so the next call retries.
+     */
+    suspend fun markConversationRead(customerId: String) {
+        if (selectedId != customerId || !messages.state.value.loaded) return
+        try {
+            enrollments.authorized { api.markChatRead(it, customerId) }
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            return
+        }
+        chats.update(customerId) { it.copy(unreadCount = 0) }
+        refreshUnread()
     }
 
     fun closeConversation() {

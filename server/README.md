@@ -191,6 +191,22 @@ Migration `0008_customers.sql` adds `customers`, `customer_employees` and `whats
 
 Administrators manage customers and read chats and calls at `/v1/admin/customers*` and `/v1/admin/whatsapp/chats`. An enrolled device reads only customers assigned to its **current** employee at `/v1/device/customers*` and `/v1/device/whatsapp/*`; other customers return `404`. `message.sentAt` and all other timestamps are UTC RFC 3339 strings. Historical conversations are inserted by an operator (`whatsapp_messages.source = 'import'`); no endpoint imports them. There is no WhatsApp transport yet: `GET /v1/device/whatsapp/status` returns `{"canSend": false}` and `POST /v1/device/customers/{id}/messages` validates the request and returns `503 WHATSAPP_NOT_CONFIGURED` without storing anything. Customer phone numbers and message bodies are personal data; do not log them or copy them into fixtures.
 
+## Push notifications
+
+Employees' phones are notified (Firebase Cloud Messaging, free) when a customer assigned to them sends a WhatsApp message and when a customer is newly assigned to them. Removing someone from a customer never notifies. The push carries only the customer's name, never the message text. Push is off until both secrets exist:
+
+1. Create a Firebase project (console.firebase.google.com, Google Analytics off) and register an Android app with package `com.microorganics.calltracker`.
+2. In Google Cloud IAM for that project create a service account with the **Firebase Cloud Messaging API Admin** role and download a JSON key.
+3. Set the secrets per environment (values are read from stdin, never put in a file in the repository):
+
+```sh
+npx wrangler secret put FCM_SERVICE_ACCOUNT --env dev < service-account.json
+echo '{"apiKey":"<current_key>","appId":"<mobilesdk_app_id>","projectId":"<project_id>","senderId":"<project_number>"}' \
+  | npx wrangler secret put FIREBASE_CLIENT_CONFIG --env dev
+```
+
+`FCM_SERVICE_ACCOUNT` is the sending key and must stay private. `FIREBASE_CLIENT_CONFIG` holds the four public identifiers from `google-services.json` (`client[0].api_key[0].current_key`, `client[0].client_info.mobilesdk_app_id`, `project_info.project_id`, `project_info.project_number`). Enrolled phones fetch it from `GET /v1/device/push-config`, so one generic APK serves every deployment. Optionally restrict the Firebase API key to the app's package and signing certificate in Google Cloud, Credentials.
+
 ## Call analytics
 
 `GET /v1/admin/analytics/calls?from=YYYY-MM-DD&to=YYYY-MM-DD&employeeIds=a,b&callTypes=incoming,outgoing` returns read-only aggregates (totals, previous-period totals for deltas, per-employee metrics, by type, by IST day, weekday-by-hour and duration buckets) over undeleted `call_logs`; see the [analytics contract](../handoffs/SERVER_AGENT.md#call-analytics--2026-10-18-approved-by-project-owner). Days are Asia/Kolkata (IST), both ends inclusive; the default window is the last 7 days ending today in IST and the maximum is 366 days. Malformed or unknown query values, duplicate keys, `from` after `to` and windows over 366 days return `400 INVALID_REQUEST`; a well-formed employee ID that matches nothing returns zeros. The implementation (`src/data/analytics.ts`) sends five statements in one D1 batch, computes IST day/hour/weekday in SQL from the UTC `started_at` text and fills zero days, all 168 weekday-hour cells and all eight call types in code. Responses contain no phone numbers, contact names or recording URLs. Run `node --test src/modules/analytics/analytics.test.mjs` for focused checks.

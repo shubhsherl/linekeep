@@ -70,6 +70,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -91,6 +95,7 @@ private data class RequiredAccess(
     val phoneNumbers: Boolean = false,
     val callHistory: Boolean = false,
     val notifications: Boolean = false,
+    val chatNotifications: Boolean = true,
     val needsSettings: Boolean = false,
     val background: BackgroundStatus = BackgroundStatus(),
 ) {
@@ -104,6 +109,7 @@ class SettingsActivity : ComponentActivity() {
     private var scanMessage by mutableStateOf<String?>(null)
     private var pendingConnect by mutableStateOf<PendingConnect?>(null)
     private var confirmReset by mutableStateOf(false)
+    private var openRequest by mutableStateOf<OpenRequest?>(null)
     private val permissionRequests get() = getSharedPreferences("permission-requests", MODE_PRIVATE)
 
     private fun granted(permission: String) =
@@ -122,6 +128,7 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         server = app.repository.serverUrl()
+        if (savedInstanceState == null) takeOpenRequest(intent)
         enableEdgeToEdge()
         setContent {
             val status by app.repository.status.collectAsStateWithLifecycle()
@@ -279,6 +286,8 @@ class SettingsActivity : ComponentActivity() {
                     inspectFolder = { app.scope.launch { app.repository.inspectRecordingFolder() } },
                     customers = app.customers,
                     scope = app.scope,
+                    openRequest = openRequest,
+                    consumeOpenRequest = { openRequest = null },
                 )
             }
         }
@@ -293,6 +302,35 @@ class SettingsActivity : ComponentActivity() {
             app.repository.refreshSim()
             refreshAccess()
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        takeOpenRequest(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        AppVisibility.foreground = true
+    }
+
+    override fun onStop() {
+        AppVisibility.foreground = false
+        super.onStop()
+    }
+
+    /** A notification tap carries the chat to open; the extras are removed so a recreation never reopens it. */
+    private fun takeOpenRequest(from: Intent?) {
+        val request = from?.let {
+            parseOpenRequest(
+                it.getStringExtra(EXTRA_PUSH_TYPE), it.getStringExtra(EXTRA_PUSH_CUSTOMER_ID), it.getStringExtra(EXTRA_PUSH_CUSTOMER_NAME),
+            )
+        } ?: return
+        from.removeExtra(EXTRA_PUSH_TYPE)
+        from.removeExtra(EXTRA_PUSH_CUSTOMER_ID)
+        from.removeExtra(EXTRA_PUSH_CUSTOMER_NAME)
+        openRequest = request
     }
 
     private fun enrollAt(code: String, newServer: String?) {
@@ -335,6 +373,7 @@ class SettingsActivity : ComponentActivity() {
             phoneNumbers = granted(Manifest.permission.READ_PHONE_NUMBERS),
             callHistory = granted(Manifest.permission.READ_CALL_LOG),
             notifications = notifications,
+            chatNotifications = PushNotifications.enabled(this),
             needsSettings = requiredPermissions().any(::needsSettings) ||
                 (!notifications && (Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS))),
             background = BackgroundAccess.read(this),
@@ -425,16 +464,40 @@ private fun DeviceScreen(
     inspectFolder: () -> Unit,
     customers: CustomersRepository,
     scope: CoroutineScope,
+    openRequest: OpenRequest?,
+    consumeOpenRequest: () -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
+    val unreadChats by customers.unreadChats.collectAsStateWithLifecycle()
+    // Totals refresh on app resume, whenever the Chats tab is shown (including coming back from a conversation).
+    LifecycleResumeEffect(Unit) {
+        scope.launch { customers.refreshUnread() }
+        onPauseOrDispose { }
+    }
     // Only the id survives recreation; names and phone numbers are re-read from the in-memory repository.
     var conversationId by rememberSaveable { mutableStateOf<String?>(null) }
     var conversationName by remember { mutableStateOf("") }
     var conversationPhone by remember { mutableStateOf("") }
+    LaunchedEffect(tab, conversationId) { if (tab == 3 && conversationId == null) customers.refreshUnread() }
+    // Foreground-only polling of the version marker: 5 s while a conversation is open, otherwise 15 s.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(tab, conversationId, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            customers.runLiveUpdates(if (conversationId != null) 5_000L else 15_000L, chatsVisible = tab == 3)
+        }
+    }
     val openConversation = { id: String, name: String, phone: String ->
         conversationName = name
         conversationPhone = phone
         conversationId = id
+    }
+    // A notification tap opens that customer's conversation on the Chats tab (messages) or Customers tab (assignments).
+    LaunchedEffect(openRequest) {
+        openRequest?.let { request ->
+            tab = request.tab
+            openConversation(request.customerId, request.customerName, "")
+            consumeOpenRequest()
+        }
     }
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { insets ->
         Column(
@@ -484,7 +547,12 @@ private fun DeviceScreen(
                     Tab(selected = tab == 0, onClick = { tab = 0 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Home") })
                     Tab(selected = tab == 1, onClick = { tab = 1 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Advanced") })
                     Tab(selected = tab == 2, onClick = { tab = 2 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Customers") })
-                    Tab(selected = tab == 3, onClick = { tab = 3 }, modifier = Modifier.heightIn(min = 48.dp), text = { Text("Chats") })
+                    Tab(selected = tab == 3, onClick = { tab = 3 }, modifier = Modifier.heightIn(min = 48.dp), text = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Chats")
+                            if (unreadChats > 0) UnreadBadge(unreadChats, "$unreadChats unread chats")
+                        }
+                    })
                 }
                 Box(Modifier.widthIn(max = 640.dp).weight(1f)) {
                     when (tab) {
@@ -671,6 +739,13 @@ private fun HomeScreen(
                 AccessRow("Status notifications", access.notifications)
                 AccessRow("Unrestricted background activity", access.background.unrestricted)
                 AccessRow("Recordings folder", content.folderAccessible)
+            }
+            if (PushConfig.enabled && !access.chatNotifications) {
+                Text(
+                    stringResource(R.string.notifications_off_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
             SupportingText(stringResource(R.string.sharing_disclosure))
             Button(

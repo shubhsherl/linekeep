@@ -19,7 +19,7 @@ export function createAdminUi(): Hono<AppBindings> {
     );
     context.header(
       "Content-Security-Policy",
-      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' https:; media-src 'self' https: blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' https:; img-src 'self'; media-src 'self' https: blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
     );
     await next();
   });

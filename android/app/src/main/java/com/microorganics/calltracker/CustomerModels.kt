@@ -27,6 +27,17 @@ internal data class Customer(
 
 internal enum class MessageDirection { IN, OUT }
 
+internal enum class MediaKind { IMAGE, VIDEO, AUDIO, DOCUMENT, STICKER }
+
+/** [url] is a server path (`/v1/device/whatsapp/messages/{id}/media`) fetched with the device bearer token. */
+internal data class MessageMedia(
+    val kind: MediaKind,
+    val url: String,
+    val mimeType: String? = null,
+    val fileName: String? = null,
+    val size: Long? = null,
+)
+
 internal data class WhatsAppMessage(
     val id: String,
     val customerId: String,
@@ -41,6 +52,7 @@ internal data class WhatsAppMessage(
     val deliveredAt: Long? = null,
     val readAt: Long? = null,
     val sentBy: EmployeeRef? = null,
+    val media: MessageMedia? = null,
 )
 
 internal data class ChatSummary(
@@ -53,6 +65,8 @@ internal data class ChatSummary(
     val lastText: String,
     val lastSentAt: Long,
     val messageCount: Int,
+    /** Customer messages newer than this viewer's read marker; 0 when all are read. */
+    val unreadCount: Int = 0,
 )
 
 internal data class Page<T>(val items: List<T>, val nextCursor: String?)
@@ -94,6 +108,24 @@ internal fun parseCustomer(json: JSONObject): Customer? {
     )
 }
 
+/** Absent without a usable url; an unrecognised future kind is offered as a downloadable document. */
+internal fun parseMedia(json: JSONObject?): MessageMedia? {
+    json ?: return null
+    val url = json.optionalString("url") ?: return null
+    val kind = when (json.optionalString("kind")) {
+        "image" -> MediaKind.IMAGE
+        "video" -> MediaKind.VIDEO
+        "audio" -> MediaKind.AUDIO
+        "sticker" -> MediaKind.STICKER
+        else -> MediaKind.DOCUMENT
+    }
+    val size = if (json.has("size") && !json.isNull("size")) (json.opt("size") as? Number)?.toLong()?.takeIf { it >= 0 } else null
+    return MessageMedia(kind, url, json.optionalString("mimeType"), json.optionalString("fileName"), size)
+}
+
+/** The `version` of `GET /v1/device/whatsapp/version`, or null when absent or not a number. */
+internal fun parseVersion(json: JSONObject): Long? = (json.opt("version") as? Number)?.toLong()
+
 private fun direction(value: String?) = if (value == "out") MessageDirection.OUT else MessageDirection.IN
 
 internal fun parseMessage(json: JSONObject): WhatsAppMessage? {
@@ -108,6 +140,7 @@ internal fun parseMessage(json: JSONObject): WhatsAppMessage? {
         status = json.optionalString("status") ?: "sent",
         sentAt = sentAt, deliveredAt = json.optionalTime("deliveredAt"), readAt = json.optionalTime("readAt"),
         sentBy = json.optJSONObject("sentBy")?.employee(),
+        media = parseMedia(json.optJSONObject("media")),
     )
 }
 
@@ -125,8 +158,14 @@ internal fun parseChat(json: JSONObject): ChatSummary? {
         lastText = last.optionalString("text").orEmpty(),
         lastSentAt = last.optionalTime("sentAt") ?: return null,
         messageCount = json.optInt("messageCount", 0),
+        unreadCount = json.optInt("unreadCount", 0).coerceAtLeast(0),
     )
 }
+
+/** Chat and message totals unread by this phone's employee. */
+internal data class UnreadTotals(val chats: Int, val messages: Int)
+
+internal fun parseUnread(json: JSONObject) = UnreadTotals(json.optInt("chats", 0).coerceAtLeast(0), json.optInt("messages", 0).coerceAtLeast(0))
 
 /** Malformed items are skipped rather than failing the whole page. */
 internal fun <T> parsePage(json: JSONObject, parse: (JSONObject) -> T?): Page<T> =

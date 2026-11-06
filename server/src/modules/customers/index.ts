@@ -13,7 +13,14 @@ import {
   whatsappSendInput,
   type CustomerCursor,
 } from "../../data/customers";
+import type { Env } from "../../env";
+import { defer } from "../../http/defer";
+import { notifyAssigned } from "../../push/notify";
+import { createWhatsAppReadRepository } from "../../data/whatsapp-reads";
 import { requireDevice, type DeviceBindings } from "../identity";
+import {
+  listTemplates, sendToCustomer, whatsappCanSend, WhatsAppSendFailedError, WhatsAppTemplateRequiredError, WhatsAppUnavailableError,
+} from "../whatsapp";
 
 const customerId = z.string().min(1).max(256);
 const booleanFlag = z.enum(["true", "false"]).transform((value) => value === "true");
@@ -118,8 +125,36 @@ function customerReadRoutes<B extends AppBindings>(
   return routes;
 }
 
+function adminViewer(context: Context<AppBindings>) {
+  return { type: "admin" as const, id: context.get("adminId") ?? "local" };
+}
+
 function errorBody(requestId: string, code: string, message: string) {
   return { requestId, error: { code, message } };
+}
+
+/** Shared by the admin and device routes; `employeeId` is the device's employee, or null for an administrator. */
+async function sendMessage<B extends AppBindings>(context: Context<B>, customerKey: string, employeeId: string | null) {
+  const requestId = context.get("requestId");
+  const scope = employeeId === null ? undefined : { employeeId };
+  const found = await createCustomerRepository(context.env.DB).getCustomer(customerId.parse(customerKey), scope);
+  if (!found) throw new HTTPException(404, { message: "Customer not found" });
+  const input = whatsappSendInput.parse(await context.req.json());
+  try {
+    const sent = await sendToCustomer(context.env as Env, found, input, employeeId);
+    return context.json({ requestId, message: sent }, 201);
+  } catch (error) {
+    if (error instanceof WhatsAppUnavailableError) {
+      return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp sending is not configured"), 503);
+    }
+    if (error instanceof WhatsAppTemplateRequiredError) {
+      return context.json(errorBody(requestId, "TEMPLATE_REQUIRED", "The customer has not written in the last 24 hours; send an approved template"), 409);
+    }
+    if (error instanceof WhatsAppSendFailedError) {
+      return context.json(errorBody(requestId, "WHATSAPP_SEND_FAILED", "WhatsApp could not send the message"), 502);
+    }
+    throw error;
+  }
 }
 
 const noStoreAdmin: MiddlewareHandler<AppBindings> = async (context, next) => {
@@ -146,6 +181,7 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
       const created = await createCustomerRepository(context.env.DB).createCustomer(
         await context.req.json(),
       );
+      await defer(context, notifyAssigned(context.env, created, created.employees.map((employee) => employee.id)));
       return context.json({ requestId: context.get("requestId"), customer: created }, 201);
     } catch (error) {
       if (error instanceof CustomerPhoneExistsError) {
@@ -174,11 +210,13 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
   });
   routes.put("/customers/:customerId/employees", bodyLimit({ maxSize: 16384 }), async (context) => {
     try {
-      const updated = await createCustomerRepository(context.env.DB).setCustomerEmployees(
-        customerId.parse(context.req.param("customerId")),
-        customerEmployeesInput.parse(await context.req.json()).employeeIds,
-      );
+      const repository = createCustomerRepository(context.env.DB);
+      const id = customerId.parse(context.req.param("customerId"));
+      const before = new Set(((await repository.getCustomer(id))?.employees ?? []).map((employee) => employee.id));
+      const updated = await repository.setCustomerEmployees(id, customerEmployeesInput.parse(await context.req.json()).employeeIds);
       if (!updated) throw new HTTPException(404, { message: "Customer not found" });
+      // Only people who were not handling this customer before are told; removal is silent.
+      await defer(context, notifyAssigned(context.env, updated, updated.employees.map((employee) => employee.id).filter((employeeId) => !before.has(employeeId))));
       return context.json({ requestId: context.get("requestId"), customer: updated });
     } catch (error) {
       if (error instanceof CustomerAssignmentError) {
@@ -202,9 +240,38 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
     if (!page) throw new HTTPException(404, { message: "Customer not found" });
     return context.json({ ...pageBody(context.get("requestId"), page), items: page.items });
   });
+  routes.post("/customers/:customerId/messages", (context) =>
+    sendMessage(context, context.req.param("customerId"), null));
+  routes.get("/whatsapp/status", (context) =>
+    context.json({ requestId: context.get("requestId"), canSend: whatsappCanSend(context.env) }));
+  routes.get("/whatsapp/templates", async (context) => {
+    const requestId = context.get("requestId");
+    try {
+      return context.json({ requestId, items: await listTemplates(context.env as Env) });
+    } catch (error) {
+      if (error instanceof WhatsAppUnavailableError) {
+        return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp templates are not configured"), 503);
+      }
+      if (error instanceof WhatsAppSendFailedError) {
+        return context.json(errorBody(requestId, "WHATSAPP_SEND_FAILED", "WhatsApp templates could not be loaded"), 502);
+      }
+      throw error;
+    }
+  });
+  routes.get("/whatsapp/version", async (context) =>
+    context.json({ requestId: context.get("requestId"), version: await createWhatsAppReadRepository(context.env.DB).feedVersion() }));
+  routes.get("/whatsapp/unread", async (context) =>
+    context.json({ requestId: context.get("requestId"), ...(await createWhatsAppReadRepository(context.env.DB).totals(adminViewer(context))) }));
+  routes.post("/whatsapp/chats/:customerId/read", async (context) => {
+    const id = customerId.parse(context.req.param("customerId"));
+    if (!(await createCustomerRepository(context.env.DB).getCustomer(id))) throw new HTTPException(404, { message: "Customer not found" });
+    await createWhatsAppReadRepository(context.env.DB).markRead(adminViewer(context), id);
+    return context.json({ requestId: context.get("requestId"), customerId: id, unreadCount: 0 });
+  });
   routes.get("/whatsapp/chats", async (context) => {
     const page = await createCustomerRepository(context.env.DB).listChats(
       withCursor(adminChatQuery.parse(queryValues(context.req.url))),
+      undefined, adminViewer(context),
     );
     return context.json({ ...pageBody(context.get("requestId"), page), items: page.items });
   });
@@ -232,20 +299,27 @@ export function createDeviceCustomerRoutes() {
     const page = await createCustomerRepository(context.env.DB).listChats(
       withCursor(deviceListQuery.parse(queryValues(context.req.url))),
       { employeeId: context.get("device").employeeId },
+      { type: "employee", id: context.get("device").employeeId },
     );
     return context.json({ ...pageBody(context.get("requestId"), page), items: page.items });
   });
   routes.get("/whatsapp/status", (context) =>
-    // No WhatsApp transport exists yet; clients must show a disabled composer.
-    context.json({ requestId: context.get("requestId"), canSend: false }));
-  routes.post("/customers/:customerId/messages", async (context) => {
-    const found = await createCustomerRepository(context.env.DB).getCustomer(
-      customerId.parse(context.req.param("customerId")),
-      { employeeId: context.get("device").employeeId },
-    );
-    if (!found) throw new HTTPException(404, { message: "Customer not found" });
-    whatsappSendInput.parse(await context.req.json());
-    return context.json(errorBody(context.get("requestId"), "WHATSAPP_NOT_CONFIGURED", "WhatsApp sending is not configured"), 503);
+    context.json({ requestId: context.get("requestId"), canSend: whatsappCanSend(context.env) }));
+  routes.get("/whatsapp/version", async (context) =>
+    context.json({ requestId: context.get("requestId"), version: await createWhatsAppReadRepository(context.env.DB).feedVersion() }));
+  routes.get("/whatsapp/unread", async (context) => {
+    const { employeeId } = context.get("device");
+    return context.json({ requestId: context.get("requestId"),
+      ...(await createWhatsAppReadRepository(context.env.DB).totals({ type: "employee", id: employeeId }, employeeId)) });
   });
+  routes.post("/whatsapp/chats/:customerId/read", async (context) => {
+    const { employeeId } = context.get("device");
+    const id = customerId.parse(context.req.param("customerId"));
+    if (!(await createCustomerRepository(context.env.DB).getCustomer(id, { employeeId }))) throw new HTTPException(404, { message: "Customer not found" });
+    await createWhatsAppReadRepository(context.env.DB).markRead({ type: "employee", id: employeeId }, id);
+    return context.json({ requestId: context.get("requestId"), customerId: id, unreadCount: 0 });
+  });
+  routes.post("/customers/:customerId/messages", (context) =>
+    sendMessage(context, context.req.param("customerId"), context.get("device").employeeId));
   return routes;
 }

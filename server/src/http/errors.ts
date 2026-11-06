@@ -8,6 +8,7 @@ import { InvalidCallStateError } from "../data/calls";
 const errors = {
   400: { code: "INVALID_REQUEST", message: "Invalid request" },
   401: { code: "UNAUTHORIZED", message: "Authentication required" },
+  403: { code: "FORBIDDEN", message: "Request refused" },
   404: { code: "NOT_FOUND", message: "Resource not found" },
   409: {
     code: "INVALID_STATE",
@@ -23,6 +24,7 @@ const errors = {
   },
   429: { code: "RATE_LIMITED", message: "Retry after backing off" },
   500: { code: "INTERNAL_ERROR", message: "Internal server error" },
+  503: { code: "NOT_CONFIGURED", message: "Feature is not configured" },
 } as const;
 
 export const handleError: ErrorHandler<AppBindings> = (error, context) => {

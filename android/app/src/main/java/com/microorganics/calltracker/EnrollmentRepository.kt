@@ -372,15 +372,16 @@ internal class EnrollmentRepository(private val context: Context) {
      * up again with a new code. Allowed only after a 401: a working connection is never dropped from here.
      */
     suspend fun resetRejectedConnection() = withContext(Dispatchers.IO) {
-        mutex.withLock {
+        val removed = mutex.withLock {
             load()
-            if (enrollment?.unauthorized != true || mutableStatus.value.storageUnavailable) return@withLock
+            val old = enrollment
+            if (old?.unauthorized != true || mutableStatus.value.storageUnavailable) return@withLock null
             try {
                 store.clear()
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 publish(mutableStatus.value.copy(message = "The old connection could not be removed. Try again."))
-                return@withLock
+                return@withLock null
             }
             enrollment = null
             val work = androidx.work.WorkManager.getInstance(context)
@@ -389,6 +390,14 @@ internal class EnrollmentRepository(private val context: Context) {
             refreshScheduling()
             publish(enrollmentStatus("Old connection removed. Scan a new setup or recovery code from your manager.")
                 .copy(heartbeatMessage = null))
+            old
+        }
+        // Best effort: a rejected credential usually cannot delete its push token, so the FCM token is also invalidated
+        // locally by the registrar; the local copy is cleared there when the enrollment disappears.
+        if (removed != null) {
+            try { api.deletePushToken(removed) } catch (error: Exception) {
+                if (error is CancellationException) throw error
+            }
         }
     }
 

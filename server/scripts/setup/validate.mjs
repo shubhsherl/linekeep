@@ -145,3 +145,18 @@ export function parseApiToken(raw) {
   const v = text(raw);
   return /^[A-Za-z0-9_-]{20,}$/.test(v) ? ok(v) : fail("That does not look like a Cloudflare API token.");
 }
+
+/** Meta numeric identifiers (app, WhatsApp Business Account, phone number): 5-32 digits. */
+export function parseMetaId(raw, label = "ID") {
+  const v = text(raw);
+  return /^\d{5,32}$/.test(v) ? ok(v) : fail(`${label} must be 5-32 digits (copy it from the Meta dashboard).`);
+}
+
+/** Opaque credential (system user token, app secret): non-empty, no whitespace. Never echoes the value. */
+export function parseCredential(raw, label = "value") {
+  const v = text(raw);
+  if (v === "") return fail(`The ${label} cannot be empty.`);
+  if (/\s/.test(v)) return fail(`The ${label} must not contain spaces or line breaks (check for a bad paste).`);
+  if (v.length > 4096) return fail(`The ${label} is unreasonably long.`);
+  return ok(v);
+}

@@ -667,3 +667,30 @@ test("a recording named 'Call recording <identity>_date_time' links to its call 
   const page = (await (await f.list("?hasRecording=true")).json()).items;
   assert.deepEqual(page.find((row) => row.id === accepted[0].id).recordings.map((row) => row.id), [audio.id]);
 });
+
+test("calls from a customer's number carry that customer; other numbers, archived customers and recordings do not", async (t) => {
+  const f = await fixture(t);
+  const admin = (method, path, body) => f.request(path, {
+    method, headers: { Authorization: `Bearer ${adminSecret}`, "Content-Type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const asha = (await (await admin("POST", "/v1/admin/customers", { name: "Asha Traders", phone: "9876543210" })).json()).customer;
+  const gone = (await (await admin("POST", "/v1/admin/customers", { name: "Archived", phone: "9123456780" })).json()).customer;
+  await admin("DELETE", `/v1/admin/customers/${gone.id}`);
+  await f.post([
+    entry(1, { remoteNumber: "+91 98765-43210", startedAt: "2026-09-24T11:05:00Z" }),
+    entry(2, { remoteNumber: "09876543210", startedAt: "2026-09-24T11:04:00Z" }),
+    entry(3, { remoteNumber: "+919123456780", startedAt: "2026-09-24T11:03:00Z" }),
+    entry(4, { remoteNumber: "+919000000000", startedAt: "2026-09-24T11:02:00Z" }),
+    entry(5, { startedAt: "2026-09-24T11:01:00Z" }),
+  ]);
+  await recording(f, 9);
+  const items = (await (await f.list()).json()).items;
+  const byNumber = Object.fromEntries(items.filter((i) => i.kind === "call").map((i) => [i.remoteNumber ?? "none", i.customer]));
+  assert.deepEqual(byNumber["+91 98765-43210"], { id: asha.id, name: "Asha Traders" });
+  assert.deepEqual(byNumber["09876543210"], { id: asha.id, name: "Asha Traders" }); // a leading trunk zero still matches
+  assert.equal(byNumber["+919123456780"], undefined);
+  assert.equal(byNumber["+919000000000"], undefined);
+  assert.equal(byNumber.none, undefined);
+  assert.equal(items.find((i) => i.kind === "recording").customer, undefined);
+});

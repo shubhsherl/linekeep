@@ -5,6 +5,7 @@ This guide takes you from nothing to a running, protected Linekeep backend and a
 - [What you will need](#1-what-you-will-need)
 - [Create a Cloudflare API token](#2-create-a-cloudflare-api-token)
 - [Run the interactive setup](#3-run-the-interactive-setup)
+  - [WhatsApp and push notifications](#whatsapp-and-push-notifications)
 - [Sign in and create the first employee](#4-sign-in-and-create-the-first-employee)
 - [Build and install the Android app](#5-build-and-install-the-android-app)
 - [Enroll a phone](#6-enroll-a-phone)
@@ -24,6 +25,8 @@ Obtain employee and call-participant consent, and decide your retention policy, 
 | Zero Trust enabled (free, up to 50 users) | Protects the admin pages with Cloudflare Access | Enabled once in the dashboard under **Zero Trust**; the script can create the organization if you consent. |
 | Admin email addresses | The people allowed into the admin | They sign in with a Cloudflare account, or with an emailed one-time PIN if you enable that option. |
 | *Optional:* a Mailgun account and a verified sending domain | The daily email summary | Mailgun is billed by Mailgun. |
+| *Optional:* a Meta Business app with WhatsApp, and a WhatsApp Business Account | WhatsApp Business in the admin and app | See [WhatsApp and push notifications](#whatsapp-and-push-notifications) for the full list. Meta bills template messages. |
+| *Optional:* a Firebase project and a service-account key | Push notifications to employees' phones | Free. See [WhatsApp and push notifications](#whatsapp-and-push-notifications). |
 | *For the Android app:* JDK 17 and Android SDK 35 | Building the APK | Only needed on the machine that builds the app. |
 
 You do **not** need a domain name: the backend runs on a free `*.workers.dev` address.
@@ -38,7 +41,7 @@ The setup script talks to Cloudflare with a token that you control and can delet
 
    | Permission | Level | Needed for |
    | --- | --- | --- |
-   | Workers Scripts | Edit | Always: deploying the Worker, secrets and the cron trigger |
+   | Workers Scripts | Edit | Always: deploying the Worker, its secrets (hashing, Mailgun, WhatsApp and push alike, all set with one `wrangler secret bulk`) and the cron trigger |
    | D1 | Edit | Always: the database |
    | Workers R2 Storage | Edit | Always: the private recordings bucket |
    | Account Settings | Read | Always: finding your account |
@@ -70,12 +73,13 @@ Paste the token when asked (the input is hidden), or run it as `CLOUDFLARE_API_T
    - environment name (`production` for real data, `dev` for a trial), Worker name, database name, bucket name, maximum recording size;
    - **Admin protection with Cloudflare Access** (strongly recommended): admin emails, session length, and whether to add the One-time PIN login method;
    - **Daily email summary**: Mailgun domain, region, sender, recipients and send time (shown in IST; default 6 PM IST);
-   - **Recording retention**: delete recording audio older than N days (call logs are kept).
+   - **Recording retention**: delete recording audio older than N days (call logs are kept);
+   - **WhatsApp Business** and **Push notifications**: each prints what you must have prepared first and asks whether to set it up now. See [below](#whatsapp-and-push-notifications).
 
    Customers, call analytics and QR-code device setup are always included.
 4. **Shows a plan and asks for confirmation.** `--dry-run` prints the plan without changing anything.
 5. **Provisions and deploys:** a `workers.dev` subdomain, the D1 database, a private R2 bucket (never made public), the generated `server/wrangler.jsonc`, database migrations, secrets, the first deployment, then the Access application and policy, then a redeploy with the Access settings.
-6. **Verifies** `/health`, that `/admin` redirects to your Access login, and that device endpoints answer 401 without a token.
+6. **Verifies** `/health`, that `/admin` redirects to your Access login, and that device endpoints answer 401 without a token. If you chose WhatsApp it then offers to register the webhook with Meta.
 7. **Prints a summary:** your admin URL and Worker URL (the value phones use), what was created or reused, and the next steps.
 
 It is safe to re-run: existing resources are reused, nothing is deleted, and an existing hashing secret is never replaced. Replacing an existing `server/wrangler.jsonc` asks first and keeps a timestamped backup.
@@ -86,11 +90,54 @@ Useful flags:
 | --- | --- |
 | `--dry-run` | Print the plan and configuration; no writes, no API calls |
 | `--yes` | Accept defaults and skip the final confirmation |
-| `--answers file.json` | Take answers from a JSON file (never the token or Mailgun key) |
+| `--answers file.json` | Take answers from a JSON file (never the Cloudflare token, Mailgun key, WhatsApp token or app secret, or key contents) |
 | `--env name` | Environment to configure, default `production` |
 | `--help` | Show usage |
 
 The hashing secret `TOKEN_HASH_SECRET` is generated for you and stored only in Cloudflare. **Never change it after phones are enrolled:** that invalidates every device credential and invitation.
+
+### WhatsApp and push notifications
+
+Both are optional and can be added later by running `npm run setup` again (existing resources are reused). In the feature list they appear as **WhatsApp Business** and **Push notifications to employees' phones**. Setup prints the prerequisites below before it asks for any value and then asks **Set up WhatsApp now? (y/N)** (and the same for push), so you can still back out. With `--yes`, selecting the feature in the answers file counts as yes; `"whatsapp": { "setup": false }` or `"push": { "setup": false }` skips it.
+
+**Prepare for WhatsApp Business** (Meta, not Cloudflare):
+
+1. A Meta developer account and a Business app with the WhatsApp product (developers.facebook.com), connected to your Meta Business.
+2. A WhatsApp Business Account (WABA) with a registered phone number. The number must not be active in the consumer WhatsApp app; a test number from the app dashboard works for trying it.
+3. A system user token that never expires: Business Settings → Users → System users, assign the app and the WhatsApp account with full control, then generate a token with `whatsapp_business_management` and `whatsapp_business_messaging`.
+4. From the app: the **App ID** and **App secret** (App settings → Basic), and the **WABA ID** and **Phone number ID** (WhatsApp → API Setup).
+5. Before real customers can reach you: a Privacy policy URL, app icon and category on App settings → Basic, then switch the app to **Live mode**. Until it is Live, customers' messages reach the webhook only for people with a role on the app.
+6. Message templates approved in WhatsApp Manager (needed to start conversations), and a payment method on the WABA for paid template messages.
+
+**What setup asks for WhatsApp:** the access token (hidden), Phone number ID, WABA ID, App ID and App secret (hidden). Ids are 5-32 digits; the token and secret must be non-empty without spaces. The two secrets come from the `WHATSAPP_TOKEN` and `WHATSAPP_APP_SECRET` environment variables or the hidden prompts, **never from the answers file** (like `MAILGUN_API_KEY`); the ids can be in it:
+
+```json
+{
+  "features": ["whatsapp", "push"],
+  "whatsapp": { "phoneNumberId": "123456789", "wabaId": "987654321", "appId": "555555555", "registerWebhook": false },
+  "push": { "serviceAccountFile": "~/keys/service-account.json", "googleServicesFile": "~/keys/google-services.json" }
+}
+```
+
+It sets the Worker secrets `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_WABA_ID`, `WHATSAPP_APP_SECRET` and `WHATSAPP_VERIFY_TOKEN`. These go through the same `wrangler secret bulk` call as the Mailgun secrets, which the **Workers Scripts: Edit** permission already allows, so the [permission table](#2-create-a-cloudflare-api-token) does not change.
+
+**The webhook verify token** is a random value that setup generates; you never type or see it, and setup never prints it. It is generated once: if `WHATSAPP_VERIFY_TOKEN` already exists it is kept. Meta compares it only while a webhook is being registered, and Cloudflare cannot return an existing secret's value.
+
+**Registering the webhook.** After the deployment is verified setup asks **Register the webhook with Meta now?** If you accept, it makes these calls (`--dry-run` prints them with placeholders and makes none):
+
+- `POST https://graph.facebook.com/v23.0/{app-id}/subscriptions` with `object=whatsapp_business_account`, `callback_url=<worker url>/v1/webhooks/whatsapp`, `verify_token`, `fields=messages` and `access_token={app-id}|{app-secret}`;
+- `POST https://graph.facebook.com/v23.0/{waba-id}/subscribed_apps` with the system user token.
+
+If a verify token already exists, registering needs a new value, so setup asks before replacing it (answers file: `"replaceVerifyToken": true`); otherwise it keeps it and tells you to register by hand. If you decline (answers file: `"registerWebhook": false`, the default under `--yes`), setup prints the exact callback URL and the manual steps: store a verify token of your choice with `npx wrangler secret put WHATSAPP_VERIFY_TOKEN --env <env>` and enter the same value in the Meta dashboard (WhatsApp → Configuration → Webhook), subscribing to `messages`. A failed registration does not undo the deployment; setup says so and prints the same instructions.
+
+**Stays manual (setup cannot do or verify it):** Live mode and the app-review prerequisites, creating and getting templates approved, the WABA payment method, and registering or verifying the phone number. The final report lists them, marking the webhook done only if setup registered it.
+
+**Prepare for push notifications** (Google):
+
+1. A Firebase project with an Android app for the package `com.microorganics.calltracker` (download `google-services.json`).
+2. A service account with the **Firebase Cloud Messaging API Admin** role and its JSON key (Google Cloud → IAM). See [Push notifications](../server/README.md#push-notifications).
+
+**What setup asks for push:** the path to the service-account JSON (it must parse and contain `client_email`, `private_key` and `project_id`) and either the path to `google-services.json` or the four values `apiKey`, `appId`, `projectId`, `senderId`. Both files must come from the same Firebase project. It sets `FCM_SERVICE_ACCOUNT` (the key file's JSON, stored only in Cloudflare) and `FIREBASE_CLIENT_CONFIG` (the four public identifiers). File paths may be in the answers file; file contents are never printed or accepted inline. Phones fetch the Firebase settings from the server, so no new app build is needed. **Stays manual:** creating the Firebase project, the service account and its key, and optionally restricting the API key in Google Cloud.
 
 ## 4. Sign in and create the first employee
 

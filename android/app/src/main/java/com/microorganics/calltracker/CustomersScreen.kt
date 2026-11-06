@@ -5,10 +5,12 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -41,12 +44,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.withStarted
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -72,13 +79,16 @@ private fun statusLabel(status: String): String = when (status) {
     else -> status.replaceFirstChar { it.uppercase() }
 }
 
-/** Media is never downloaded in this app; say what the message is instead of leaving a blank bubble. */
+/** Describes what a message is when it has no text, for list previews and bubbles without attachments. */
 private fun typeLabel(type: String, templateName: String? = null): String? = when (type) {
     "text" -> null
-    "image" -> "Photo (not shown in this app)"
-    "document" -> "Document (not shown in this app)"
+    "image" -> "Photo"
+    "document" -> "Document"
+    "video" -> "Video"
+    "audio" -> "Audio"
+    "sticker" -> "Sticker"
     "template" -> if (templateName != null) "Template: $templateName" else "Template message"
-    else -> "${type.replaceFirstChar { it.uppercase() }} message (not shown in this app)"
+    else -> "${type.replaceFirstChar { it.uppercase() }} message"
 }
 
 @Composable
@@ -232,18 +242,39 @@ internal fun ChatsTab(customers: CustomersRepository, scope: CoroutineScope, ope
     }
 }
 
+/** Filled circular count; capped at 99+. The description replaces the visible digits for screen readers. */
+@Composable
+internal fun UnreadBadge(count: Int, description: String, modifier: Modifier = Modifier) {
+    val label = if (count > 99) "99+" else count.toString()
+    Box(
+        modifier.defaultMinSize(minWidth = 24.dp, minHeight = 24.dp)
+            .background(MaterialTheme.colorScheme.primary, CircleShape)
+            .clearAndSetSemantics { contentDescription = description }
+            .padding(horizontal = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimary, maxLines = 1)
+    }
+}
+
 @Composable
 private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
+    val unread = chat.unreadCount > 0
     ListSurface(onClick) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(chat.customerName, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(chat.customerName, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = if (unread) FontWeight.Bold else FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             formatTime(listTimeFormat, chat.lastSentAt)?.let { SupportingText(it) }
         }
         val preview = chat.lastText.ifBlank { typeLabel(chat.lastMessageType).orEmpty() }
-        Text(
-            (if (chat.lastDirection == MessageDirection.OUT) "You: " else "") + preview,
-            style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                (if (chat.lastDirection == MessageDirection.OUT) "You: " else "") + preview,
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium, fontWeight = if (unread) FontWeight.Bold else null,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+            if (unread) UnreadBadge(chat.unreadCount, "${chat.unreadCount} unread messages")
+        }
         SupportingText(chat.customerPhone)
     }
 }
@@ -268,6 +299,17 @@ internal fun ConversationScreen(
     var sendNotice by remember(customerId) { mutableStateOf<String?>(null) }
     BackHandler(onBack = close)
     LaunchedEffect(customerId) { scope.launch { customers.openConversation(customerId, null) } }
+    // Once per open after the messages load, and again when a newer incoming message arrives while the screen is shown.
+    val media = rememberMediaController(customers, scope)
+    MediaDialogs(media, customers)
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val newestIncomingId = thread.items.firstOrNull { it.direction == MessageDirection.IN }?.id
+    LaunchedEffect(customerId, thread.loaded, newestIncomingId) {
+        if (thread.loaded && newestIncomingId != null) {
+            lifecycle.withStarted { }
+            customers.markConversationRead(customerId)
+        }
+    }
     val name = customer?.name ?: hintName.ifEmpty { "Conversation" }
     val phone = customer?.phone ?: hintPhone
 
@@ -296,7 +338,7 @@ internal fun ConversationScreen(
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            MessageThread(thread, { scope.launch { customers.refreshConversation() } }, { scope.launch { customers.messages.loadMore() } })
+            MessageThread(thread, customers, media, { scope.launch { customers.refreshConversation() } }, { scope.launch { customers.messages.loadMore() } })
         }
         Composer(
             availability = availability,
@@ -342,7 +384,7 @@ private fun CustomerFacts(customer: Customer?, phone: String, dial: () -> Unit) 
 }
 
 @Composable
-private fun MessageThread(thread: PagedState<WhatsAppMessage>, refresh: () -> Unit, loadEarlier: () -> Unit) {
+private fun MessageThread(thread: PagedState<WhatsAppMessage>, customers: CustomersRepository, media: MediaController, refresh: () -> Unit, loadEarlier: () -> Unit) {
     when {
         thread.items.isEmpty() -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             Centered {
@@ -364,7 +406,7 @@ private fun MessageThread(thread: PagedState<WhatsAppMessage>, refresh: () -> Un
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (thread.error != null) item("error") { ErrorNotice(thread.error, refresh) }
-            items(thread.items, key = { it.id }) { MessageBubble(it) }
+            items(thread.items, key = { it.id }) { MessageBubble(it, customers, media) }
             if (thread.nextCursor != null) {
                 item("earlier") {
                     LaunchedEffect(thread.nextCursor, thread.items.size) { loadEarlier() }
@@ -378,9 +420,10 @@ private fun MessageThread(thread: PagedState<WhatsAppMessage>, refresh: () -> Un
 }
 
 @Composable
-private fun MessageBubble(message: WhatsAppMessage) {
+private fun MessageBubble(message: WhatsAppMessage, customers: CustomersRepository, controller: MediaController) {
     val outgoing = message.direction == MessageDirection.OUT
-    val label = typeLabel(message.messageType, message.templateName)
+    val attachment = message.media
+    val label = if (attachment != null) null else typeLabel(message.messageType, message.templateName)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start) {
         Surface(
             modifier = Modifier.widthIn(max = 420.dp),
@@ -390,8 +433,9 @@ private fun MessageBubble(message: WhatsAppMessage) {
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 label?.let { Text(it, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) }
+                if (attachment != null) MediaBlock(message, attachment, customers, controller)
                 message.body?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
-                if (label == null && message.body == null) Text("(empty message)", style = MaterialTheme.typography.bodySmall)
+                if (label == null && attachment == null && message.body == null) Text("(empty message)", style = MaterialTheme.typography.bodySmall)
                 val meta = buildList {
                     formatTime(bubbleTimeFormat, message.sentAt)?.let { add(it) }
                     if (outgoing) {

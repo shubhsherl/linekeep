@@ -1,6 +1,7 @@
 import { buildWranglerConfig, backupName, parseJsonc, renderWranglerConfig } from "./config.mjs";
 import { ACCESS_PATHS, accessAppName, accessPolicyName, maskEmail } from "./plan.mjs";
 import { parseSubdomain } from "./validate.mjs";
+import { buildMetaCalls, describeMetaCalls, manualWebhookInstructions, MetaError, registerWebhook, webhookUrl } from "./whatsapp.mjs";
 
 export class StepError extends Error {
   constructor(stepId, message) {
@@ -186,6 +187,67 @@ async function verify(ctx, state) {
   if (checks.some(([, pass]) => !pass)) throw new StepError("verify", "Verification failed; the deployment exists but did not behave as expected. Fresh workers.dev hostnames can take a minute to propagate; re-run setup to verify again.");
 }
 
+/** Optional: register the webhook with Meta. Failure never undoes the deployment; the final report says what is left. */
+async function registerWhatsAppWebhook(ctx, state) {
+  const { answers } = ctx;
+  const w = answers.whatsapp;
+  const callbackUrl = webhookUrl(state.workerUrl);
+  state.whatsapp = { registered: false, callbackUrl };
+  const manual = () => {
+    for (const line of manualWebhookInstructions({ callbackUrl, wabaId: w.wabaId, env: answers.env })) ctx.say(`      ${line}`);
+  };
+  ctx.say(`      Callback URL: ${callbackUrl}`);
+  ctx.say("      Registering makes these calls (secret values filled in at run time, never printed):");
+  for (const line of describeMetaCalls({ appId: w.appId, wabaId: w.wabaId, callbackUrl })) ctx.say(`        ${line}`);
+  const wanted = typeof w.registerWebhook === "boolean"
+    ? w.registerWebhook
+    : !ctx.yes && (await ctx.ui.confirm("Register the webhook with Meta now? (uses your App ID and App secret)", true));
+  if (!wanted) {
+    ctx.say("      [..] webhook not registered by setup");
+    manual();
+    return;
+  }
+
+  let verifyToken = state.verifyToken;
+  if (!verifyToken) {
+    const replace = typeof w.replaceVerifyToken === "boolean"
+      ? w.replaceVerifyToken
+      : !ctx.yes && (await ctx.ui.confirm("WHATSAPP_VERIFY_TOKEN already exists and cannot be read back. Replace it with a new random value so it can be registered? (Meta only checks it during registration)", true));
+    if (!replace) {
+      ctx.say("      [..] the existing verify token was kept, so setup cannot register the webhook");
+      manual();
+      return;
+    }
+    verifyToken = ctx.randomHex(24);
+    ctx.masker?.add(verifyToken);
+    await ctx.wrangler.putSecrets(answers.env, { WHATSAPP_VERIFY_TOKEN: verifyToken });
+    state.secretsSet.push("WHATSAPP_VERIFY_TOKEN (replaced)");
+  }
+
+  const calls = buildMetaCalls({
+    appId: w.appId, wabaId: w.wabaId, callbackUrl, verifyToken,
+    appSecret: ctx.secrets.whatsappAppSecret, accessToken: ctx.secrets.whatsappToken,
+  });
+  // Meta calls the Worker back during registration; a freshly set secret can take a moment to become active.
+  const attempts = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await registerWebhook(ctx.fetch, calls);
+      break;
+    } catch (error) {
+      if (!(error instanceof MetaError) || attempt === attempts) {
+        ctx.say(`      [!!] Could not register the webhook: ${ctx.masker ? ctx.masker.mask(error.message) : error.message}`);
+        manual();
+        return;
+      }
+      ctx.say(`      [..] Meta did not accept the registration yet (attempt ${attempt}/${attempts}); retrying`);
+      await ctx.sleep(5000);
+    }
+  }
+  state.whatsapp.registered = true;
+  note(state, "updated", "Meta webhook registration (callback URL, messages field, app subscribed to the WABA)");
+}
+
 export const handlers = {
   async subdomain(ctx, state) {
     let sub = await ctx.cf.getSubdomain(ctx.accountId);
@@ -264,11 +326,34 @@ export const handlers = {
       if (m.from) toSet.MAILGUN_FROM_EMAIL = m.from;
       state.secretsSet.push(...Object.keys(toSet).filter((k) => k !== "TOKEN_HASH_SECRET"));
     }
+    if (ctx.answers.features.whatsapp) {
+      const w = ctx.answers.whatsapp;
+      const before = Object.keys(toSet);
+      toSet.WHATSAPP_TOKEN = ctx.secrets.whatsappToken;
+      toSet.WHATSAPP_PHONE_NUMBER_ID = w.phoneNumberId;
+      toSet.WHATSAPP_WABA_ID = w.wabaId;
+      toSet.WHATSAPP_APP_SECRET = ctx.secrets.whatsappAppSecret;
+      // Generated once. An existing token is kept so an already-registered webhook keeps working; Meta only
+      // compares it while a webhook is being registered, and it cannot be read back from Cloudflare.
+      if (names.includes("WHATSAPP_VERIFY_TOKEN")) note(state, "reused", "secret WHATSAPP_VERIFY_TOKEN (kept)");
+      else {
+        state.verifyToken = ctx.randomHex(24);
+        ctx.masker?.add(state.verifyToken);
+        toSet.WHATSAPP_VERIFY_TOKEN = state.verifyToken;
+      }
+      state.secretsSet.push(...Object.keys(toSet).filter((k) => !before.includes(k)));
+    }
+    if (ctx.answers.features.push) {
+      toSet.FCM_SERVICE_ACCOUNT = ctx.secrets.fcmServiceAccount;
+      toSet.FIREBASE_CLIENT_CONFIG = ctx.secrets.firebaseClientConfig;
+      state.secretsSet.push("FCM_SERVICE_ACCOUNT", "FIREBASE_CLIENT_CONFIG");
+    }
     if (Object.keys(toSet).length) await ctx.wrangler.putSecrets(env, toSet);
   },
 
   access: ensureAccess,
   verify,
+  whatsapp: registerWhatsAppWebhook,
 };
 
 /**

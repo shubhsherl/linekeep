@@ -11,6 +11,12 @@ const boundedId = z.string().min(1).max(256);
  * Ten digits and a leading-zero eleven digits are Indian numbers; anything else
  * keeps its digits. `phoneKey` is the last ten digits (fewer for short numbers).
  */
+/** The last ten digits of a number written with ordinary separators; mirrors call_logs.phone_key. Null if it is not a plain number of 10+ digits. */
+export function callPhoneKey(value: string | undefined): string | null {
+  const digits = (value ?? "").replace(/[ +\-().\/\u00a0]/g, "");
+  return digits.length >= 10 && /^\d+$/.test(digits) ? digits.slice(-10) : null;
+}
+
 export function normalizePhone(value: string): { phone: string; phoneKey: string } | null {
   const digits = value.replace(/\D/g, "");
   const normalized = digits.length === 10
@@ -62,7 +68,17 @@ export const customerUpdateInput = z.strictObject({
 export const customerEmployeesInput = z.strictObject({ employeeIds });
 export const whatsappSendInput = z.strictObject({
   clientMessageId: z.uuid(),
-  text: z.string().min(1).max(4096),
+  text: z.string().min(1).max(4096).optional(),
+  // An approved template (with its variable values); the only way to start a conversation or to write after
+  // the customer's 24-hour window has closed.
+  template: z.strictObject({
+    name: z.string().regex(/^[a-z0-9_]{1,512}$/),
+    language: z.string().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).default("en_US"),
+    // Values for the body variables, in order. Meta rejects newlines and tabs inside a variable.
+    params: z.array(z.string().trim().min(1).max(1024).regex(/^[^\n\r\t]*$/)).max(20).default([]),
+  }).optional(),
+}).refine((value) => (value.text === undefined) !== (value.template === undefined), {
+  message: "Send either text or a template",
 });
 
 const limit = z.number().int().min(1).max(100).default(50);
@@ -112,6 +128,7 @@ export interface WhatsAppMessage {
   messageType: string;
   body?: string;
   mediaUrl?: string;
+  media?: { kind: "image" | "video" | "audio" | "document" | "sticker"; mimeType?: string; fileName?: string; size?: number; url: string };
   templateName?: string;
   status: "queued" | "sent" | "delivered" | "read" | "failed";
   fromNumber?: string;
@@ -124,8 +141,10 @@ export interface WhatsAppMessage {
 export interface ChatSummary {
   customer: { id: string; name: string; phone: string };
   employees: { id: string; name: string }[];
-  lastMessage: { direction: "in" | "out"; messageType: string; text: string; sentAt: string };
+  lastMessage: { direction: "in" | "out"; messageType: string; text: string; sentAt: string; status: WhatsAppMessage["status"] };
   messageCount: number;
+  /** Customer messages this viewer has not read yet (their own marker, never another viewer's). */
+  unreadCount: number;
 }
 export interface CustomerPage<T> { items: T[]; nextCursor: CustomerCursor | null }
 
@@ -139,16 +158,17 @@ type CustomerRow = {
   created_at: string; updated_at: string; message_count: number;
   last_message_at: string | null; last_call_at: string | null; employees: string;
 };
-type MessageRow = {
+export type MessageRow = {
   id: string; customer_id: string; direction: WhatsAppMessage["direction"]; message_type: string;
-  body: string | null; media_url: string | null; template_name: string | null;
+  body: string | null; media_url: string | null; media_id: string | null; media_key: string | null;
+  media_mime: string | null; media_name: string | null; media_size: number | null; template_name: string | null;
   status: WhatsAppMessage["status"]; from_number: string | null; to_number: string | null;
   sent_at: string; delivered_at: string | null; read_at: string | null;
   sent_by_employee_id: string | null; sent_by_name: string | null;
 };
 type ChatRow = {
   id: string; name: string; phone: string; direction: WhatsAppMessage["direction"];
-  message_type: string; text: string; sent_at: string; message_count: number; employees: string;
+  message_type: string; text: string; sent_at: string; status: WhatsAppMessage["status"]; message_count: number; employees: string; unread_count: number;
 };
 type CallFeedRow = CallRow & {
   feed_id: string; feed_device_id: string; feed_employee_id: string; employee_name: string;
@@ -192,8 +212,15 @@ function customer(row: CustomerRow): Customer {
   };
 }
 
-function message(row: MessageRow): WhatsAppMessage {
+const mediaKinds = new Set(["image", "video", "audio", "document", "sticker"]);
+
+export function message(row: MessageRow, apiBase = "/v1/admin"): WhatsAppMessage {
+  const media = (row.media_key || row.media_id) && mediaKinds.has(row.message_type)
+    ? { kind: row.message_type as NonNullable<WhatsAppMessage["media"]>["kind"], mimeType: row.media_mime ?? undefined,
+      fileName: row.media_name ?? undefined, size: row.media_size ?? undefined, url: `${apiBase}/whatsapp/messages/${row.id}/media` }
+    : undefined;
   return {
+    media,
     id: row.id,
     customerId: row.customer_id,
     direction: row.direction,
@@ -310,6 +337,18 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
 
     getCustomer: find,
 
+    /** Live customers keyed by `phone_key`, for decorating other feeds. Unknown keys are simply absent. */
+    async matchByPhoneKeys(keys: string[]): Promise<Map<string, { id: string; name: string }>> {
+      const unique = [...new Set(keys)].filter((key) => /^\d{8,10}$/.test(key)).slice(0, 90);
+      const result = new Map<string, { id: string; name: string }>();
+      if (unique.length === 0) return result;
+      const rows = await db.prepare(
+        `SELECT id, name, phone_key FROM customers WHERE archived_at IS NULL AND phone_key IN (${unique.map(() => "?").join(",")})`,
+      ).bind(...unique).all<{ id: string; name: string; phone_key: string }>();
+      for (const row of rows.results) result.set(row.phone_key, { id: row.id, name: row.name });
+      return result;
+    },
+
     async listCustomers(
       input: z.input<typeof listInput> = {}, scope?: CustomerScope,
     ): Promise<CustomerPage<Customer>> {
@@ -417,15 +456,15 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
       const value = pageInput.parse(input);
       if (!(await visible(customerId, scope))) return null;
       const rows = await db.prepare(
-        `SELECT m.id, m.customer_id, m.direction, m.message_type, m.body, m.media_url,
-          m.template_name, m.status, m.from_number, m.to_number, m.sent_at, m.delivered_at,
+        `SELECT m.id, m.customer_id, m.direction, m.message_type, m.body, m.media_url, m.media_id, m.media_key,
+          m.media_mime, m.media_name, m.media_size, m.template_name, m.status, m.from_number, m.to_number, m.sent_at, m.delivered_at,
           m.read_at, m.sent_by_employee_id, e.name AS sent_by_name
         FROM whatsapp_messages m LEFT JOIN employees e ON e.id = m.sent_by_employee_id
         WHERE m.customer_id = ? ${value.cursor ? "AND (m.sent_at, m.id) < (?, ?)" : ""}
         ORDER BY m.sent_at DESC, m.id DESC LIMIT ?`,
       ).bind(customerId, ...(value.cursor ? [value.cursor.sortAt, value.cursor.id] : []),
         value.limit + 1).all<MessageRow>();
-      return paged(rows.results.map(message), value.limit,
+      return paged(rows.results.map((row) => message(row, scope ? "/v1/device" : "/v1/admin")), value.limit,
         (item) => ({ sortAt: item.sentAt, id: item.id }));
     },
 
@@ -490,9 +529,12 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
 
     /** One row per customer with messages, newest conversation first. */
     async listChats(
-      input: z.input<typeof chatInput> = {}, scope?: CustomerScope,
+      input: z.input<typeof chatInput> = {}, scope?: CustomerScope, viewer?: { type: "admin" | "employee"; id: string },
     ): Promise<CustomerPage<ChatSummary>> {
       const value = chatInput.parse(input);
+      const since = viewer
+        ? (await db.prepare("SELECT value FROM whatsapp_settings WHERE key = 'unread_since'").first<{ value: string }>())?.value ?? "9999-12-31T00:00:00.000Z"
+        : "9999-12-31T00:00:00.000Z";
       const conditions = ["c.archived_at IS NULL"];
       const bindings: (string | number)[] = [];
       if (scope) {
@@ -510,14 +552,17 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
       }
       const rows = await db.prepare(
         `SELECT c.id, c.name, c.phone, m.direction, m.message_type,
-          substr(coalesce(m.body, ''), 1, 200) AS text, m.sent_at,
-          ${messageCount} AS message_count, ${employeesJson} AS employees
+          substr(coalesce(m.body, ''), 1, 200) AS text, m.sent_at, m.status,
+          ${messageCount} AS message_count, ${employeesJson} AS employees,
+          (SELECT count(*) FROM whatsapp_messages u WHERE u.customer_id = c.id AND u.direction = 'in'
+            AND u.sent_at > COALESCE((SELECT r.last_read_at FROM whatsapp_chat_reads r
+              WHERE r.viewer_type = ? AND r.viewer_id = ? AND r.customer_id = c.id), ?)) AS unread_count
         FROM customers c JOIN whatsapp_messages m ON m.id = (
           SELECT l.id FROM whatsapp_messages l WHERE l.customer_id = c.id
           ORDER BY l.sent_at DESC, l.id DESC LIMIT 1)
         WHERE ${conditions.join(" AND ")}
         ORDER BY m.sent_at DESC, c.id DESC LIMIT ?`,
-      ).bind(...bindings, value.limit + 1).all<ChatRow>();
+      ).bind(viewer?.type ?? "admin", viewer?.id ?? "", since, ...bindings, value.limit + 1).all<ChatRow>();
       const chats = rows.results.map((row) => ({
         cursor: { sortAt: row.sent_at, id: row.id },
         chat: {
@@ -525,9 +570,9 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
           employees: JSON.parse(row.employees) as ChatSummary["employees"],
           lastMessage: {
             direction: row.direction, messageType: row.message_type, text: row.text,
-            sentAt: row.sent_at,
+            sentAt: row.sent_at, status: row.status,
           },
-          messageCount: row.message_count,
+          messageCount: row.message_count, unreadCount: row.unread_count,
         } satisfies ChatSummary,
       }));
       const result = paged(chats, value.limit, (item) => item.cursor);

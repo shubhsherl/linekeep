@@ -11,6 +11,9 @@ import javax.net.ssl.HttpsURLConnection
 
 /** [code] is the server's stable error code when the response carried the standard error body. */
 internal class ApiFailure(val status: Int, val code: String? = null) : IOException("HTTP $status")
+internal const val MAX_MEDIA_BYTES = 25L * 1024 * 1024
+private const val MEDIA_PATH_PREFIX = "/v1/device/whatsapp/messages/"
+internal class MediaTooLarge : IOException("Media is larger than 25 MB")
 internal class UploadFailure(val status: Int) : IOException("Audio transfer HTTP $status")
 internal class SourceChanged : IOException("Recording changed while being read; not completed")
 internal data class UploadedAudio(val bytes: Long, val etag: String?)
@@ -158,14 +161,70 @@ internal class DeviceApi(private val server: () -> String?) {
     fun chats(enrollment: Enrollment, query: String?, cursor: String?, limit: Int = PAGE_SIZE): Page<ChatSummary> =
         parsePage(get("/v1/device/whatsapp/chats" + queryString("q" to query, "cursor" to cursor, "limit" to limit.toString()), enrollment.token), ::parseChat)
 
+    /** Marks the chat read for this employee only. A 404 (unknown or unassigned customer) surfaces as [ApiFailure]. */
+    fun markChatRead(enrollment: Enrollment, customerId: String) {
+        request("POST", "/v1/device/whatsapp/chats/${android.net.Uri.encode(customerId)}/read", null, enrollment.token)
+    }
+
+    fun unread(enrollment: Enrollment): UnreadTotals = parseUnread(get("/v1/device/whatsapp/unread", enrollment.token))
+
     fun whatsAppCanSend(enrollment: Enrollment): Boolean =
         parseCanSend(get("/v1/device/whatsapp/status", enrollment.token))
+
+    /** The Firebase client identifiers the server wants this phone to use, or null while the server has push disabled. */
+    fun pushConfig(enrollment: Enrollment): FirebaseConfig? =
+        parsePushConfigResponse(get("/v1/device/push-config", enrollment.token))
+
+    /** Registers (or replaces) this device's FCM token. Idempotent on the server. */
+    fun putPushToken(enrollment: Enrollment, token: String) {
+        val response = request("PUT", "/v1/device/push-token", JSONObject().put("token", token), enrollment.token)
+        check(response.optString("status") == "registered") { "Unexpected push registration response" }
+    }
+
+    /** Removes this device's FCM token from the server. */
+    fun deletePushToken(enrollment: Enrollment) {
+        request("DELETE", "/v1/device/push-token", null, enrollment.token)
+    }
 
     /** Throws [ApiFailure] with code [WHATSAPP_NOT_CONFIGURED] (HTTP 503) until the server has a transport; nothing is stored then. */
     fun sendMessage(enrollment: Enrollment, customerId: String, clientMessageId: String, text: String): WhatsAppMessage? {
         val response = post("/v1/device/customers/${android.net.Uri.encode(customerId)}/messages",
             JSONObject().put("clientMessageId", clientMessageId).put("text", text), enrollment.token)
         return response.optJSONObject("message")?.let(::parseMessage)
+    }
+
+    /** Live-update marker; changes whenever any WhatsApp message is added or changes. */
+    fun whatsAppVersion(enrollment: Enrollment): Long =
+        parseVersion(get("/v1/device/whatsapp/version", enrollment.token)) ?: throw IOException("Malformed version response")
+
+    /** Downloads one message's media. Only device media paths are accepted; more than [MAX_MEDIA_BYTES] is refused. */
+    fun mediaBytes(enrollment: Enrollment, path: String): ByteArray {
+        if (!path.startsWith(MEDIA_PATH_PREFIX) || path.contains("..") || path.contains('?') || path.contains('#')) {
+            throw IOException("Unexpected media path")
+        }
+        val connection = secureConnection((server() ?: throw ServerNotSet()) + path)
+        try {
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Accept", "*/*")
+            connection.setRequestProperty("Authorization", "Bearer ${enrollment.token}")
+            connection.readTimeout = 60_000
+            val status = connection.responseCode
+            if (status !in 200..299) throw ApiFailure(status, errorCode(connection))
+            if (connection.contentLengthLong > MAX_MEDIA_BYTES) throw MediaTooLarge()
+            return connection.inputStream.use { input ->
+                val out = java.io.ByteArrayOutputStream(connection.contentLength.coerceIn(8 * 1024, MAX_MEDIA_BYTES.toInt()))
+                val buffer = ByteArray(16 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (out.size() + count > MAX_MEDIA_BYTES) throw MediaTooLarge()
+                    out.write(buffer, 0, count)
+                }
+                out.toByteArray()
+            }
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun queryString(vararg parameters: Pair<String, String?>): String {
@@ -189,10 +248,15 @@ internal class DeviceApi(private val server: () -> String?) {
                 val bytes = payload.toString().toByteArray(Charsets.UTF_8)
                 connection.setFixedLengthStreamingMode(bytes.size)
                 connection.outputStream.use { it.write(bytes) }
+            } else if (method == "POST") {
+                // Bodiless POST: send an explicit empty body so Content-Length: 0 is always present.
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(0)
+                connection.outputStream.close()
             }
             val status = connection.responseCode
             if (status !in 200..299) throw ApiFailure(status, errorCode(connection))
-            return connection.inputStream.bufferedReader().use { JSONObject(it.readText()) }
+            return connection.inputStream.bufferedReader().use { reader -> reader.readText().ifBlank { "{}" }.let(::JSONObject) }
         } finally {
             connection.disconnect()
         }

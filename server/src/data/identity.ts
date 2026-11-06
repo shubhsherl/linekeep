@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { createCredentials } from "../security/credentials";
+import { normalizePhone } from "./customers";
 import {
   type Clock,
   id,
@@ -85,10 +86,23 @@ function directoryPage<Row extends { id: string; created_at: string }, Item>(
   };
 }
 
+/** Contact number shown to customers through WhatsApp templates; stored as "+<country code><digits>". */
+const employeePhone = z.string().trim().min(1).max(64).transform((value, context) => {
+  const normalized = normalizePhone(value);
+  if (!normalized) {
+    context.addIssue({ code: "custom", message: "Invalid phone number" });
+    return z.NEVER;
+  }
+  return normalized.phone;
+});
 const employeeInput = z.object({
   name: z.string().trim().min(1).max(200),
-  phoneNumber: z.string().min(1).optional(),
+  phoneNumber: employeePhone.optional(),
 });
+const employeeUpdateInput = z.strictObject({
+  name: z.string().trim().min(1).max(200).optional(),
+  phoneNumber: employeePhone.nullable().optional(),
+}).refine((value) => value.name !== undefined || value.phoneNumber !== undefined, { message: "Nothing to update" });
 const deviceInput = z.object({
   model: z.string().optional(),
   manufacturer: z.string().optional(),
@@ -111,7 +125,7 @@ export interface IdentityRepository {
   listEmployees(input?: DirectoryInput): Promise<DirectoryPage<Employee>>;
   updateEmployee(
     employeeId: string,
-    input: { name: string },
+    input: { name?: string; phoneNumber?: string | null },
   ): Promise<Employee | null>;
   getManagedDevice(deviceId: string): Promise<ManagedDevice | null>;
   listDevices(
@@ -328,12 +342,19 @@ export function createIdentityRepository(
     },
 
     async updateEmployee(employeeId, input) {
-      const value = employeeInput.pick({ name: true }).parse(input);
+      const value = employeeUpdateInput.parse(input);
       const row = await db
         .prepare(
-          `UPDATE employees SET name = ? WHERE id = ? RETURNING ${employeeColumns}`,
+          `UPDATE employees SET name = COALESCE(?, name),
+            phone_number = CASE WHEN ? THEN ? ELSE phone_number END
+          WHERE id = ? RETURNING ${employeeColumns}`,
         )
-        .bind(value.name, id.parse(employeeId))
+        .bind(
+          value.name ?? null,
+          value.phoneNumber === undefined ? 0 : 1,
+          value.phoneNumber ?? null,
+          id.parse(employeeId),
+        )
         .first<EmployeeRow>();
       return row ? employee(row) : null;
     },

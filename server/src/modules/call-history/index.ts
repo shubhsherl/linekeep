@@ -12,6 +12,7 @@ import {
   createCallHistoryRepository,
   type CallHistoryCursor,
 } from "../../data/call-history";
+import { callPhoneKey, createCustomerRepository } from "../../data/customers";
 import { utcTimestamp } from "../../data/values";
 import { requireDevice, type DeviceBindings } from "../identity";
 
@@ -110,9 +111,17 @@ export function createAdminCallHistoryRoutes(authorize: MiddlewareHandler<AppBin
       ...input,
       cursor: input.cursor ? decodeCursor(input.cursor) : undefined,
     });
+    // Calls whose number belongs to a customer carry that customer, so the admin can open it from the feed.
+    const keys = result.items.flatMap((item) => (item.kind === "call" ? [callPhoneKey(item.remoteNumber)] : []));
+    const customers = await createCustomerRepository(context.env.DB).matchByPhoneKeys(keys.filter((key): key is string => key !== null));
+    const items = result.items.map((item) => {
+      const key = item.kind === "call" ? callPhoneKey(item.remoteNumber) : null;
+      const customer = key ? customers.get(key) : undefined;
+      return customer ? { ...item, customer } : item;
+    });
     return context.json({
       requestId: context.get("requestId"),
-      items: result.items,
+      items,
       nextCursor: result.nextCursor ? encodeCursor(result.nextCursor) : null,
     });
   });

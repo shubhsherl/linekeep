@@ -75,6 +75,10 @@ const employeeInput = z.object({
   name: z.string().trim().min(1).max(200),
   phoneNumber: z.string().trim().min(1).max(64).optional(),
 });
+const employeePatchInput = z.strictObject({
+  name: z.string().trim().min(1).max(200).optional(),
+  phoneNumber: z.string().trim().min(1).max(64).nullable().optional(),
+});
 
 const directoryQuery = z.strictObject({
   cursor: z.string().min(1).max(2048).optional(),
@@ -209,10 +213,7 @@ export function createAdminIdentityRoutes(
     });
   });
   app.patch("/employees/:employeeId", async (context) => {
-    const input = employeeInput
-      .pick({ name: true })
-      .strict()
-      .parse(await context.req.json());
+    const input = employeePatchInput.parse(await context.req.json());
     const employee = await identityRepository(context.env).updateEmployee(
       context.req.param("employeeId"),
       input,

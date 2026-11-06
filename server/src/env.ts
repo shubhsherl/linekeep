@@ -14,4 +14,14 @@ export interface Env {
   MAILGUN_DOMAIN?: string;
   MAILGUN_FROM_EMAIL?: string;
   MAILGUN_REGION?: string;
+  WHATSAPP_TOKEN?: string;
+  WHATSAPP_PHONE_NUMBER_ID?: string;
+  WHATSAPP_WABA_ID?: string;
+  WHATSAPP_APP_SECRET?: string;
+  WHATSAPP_VERIFY_TOKEN?: string;
+  WHATSAPP_GRAPH_VERSION?: string;
+  /** JSON key of the Firebase service account that sends push notifications; unset turns push off. */
+  FCM_SERVICE_ACCOUNT?: string;
+  /** The Firebase app's public client identifiers as JSON {apiKey, appId, projectId, senderId}; handed to enrolled phones. */
+  FIREBASE_CLIENT_CONFIG?: string;
 }

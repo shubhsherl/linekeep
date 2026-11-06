@@ -526,3 +526,23 @@ test("manager-issued recovery retains enrollment provenance and old bearer crede
   }
   assert.equal((await f.request(`/v1/admin/devices/${registration.deviceId}/recovery-invitations`, {}, "Bearer synthetic-admin")).status, 409);
 });
+
+test("an employee's contact number is normalized, editable, clearable and independent of the name", async (t) => {
+  const { request } = await fixture(t);
+  const auth = "Bearer synthetic-admin";
+  const created = await (await request("/v1/admin/employees", { name: "Asha", phoneNumber: "98765 43210" }, auth)).json();
+  assert.equal(created.employee.phoneNumber, "+919876543210");
+  const id = created.employee.id;
+  const patch = async (body) => request(`/v1/admin/employees/${id}`, body, auth, "PATCH");
+
+  const renamed = await (await patch({ name: "Asha K" })).json();
+  assert.deepEqual([renamed.employee.name, renamed.employee.phoneNumber], ["Asha K", "+919876543210"]);
+  const changed = await (await patch({ phoneNumber: "+1 (555) 555-0123" })).json();
+  assert.deepEqual([changed.employee.name, changed.employee.phoneNumber], ["Asha K", "+15555550123"]);
+  const cleared = await (await patch({ phoneNumber: null })).json();
+  assert.equal(cleared.employee.phoneNumber, undefined);
+  for (const bad of [{}, { phoneNumber: "abc" }, { phoneNumber: "123" }, { phoneNumber: "" }, { other: 1 }]) {
+    assert.equal((await patch(bad)).status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await request("/v1/admin/employees", { name: "Bad", phoneNumber: "12" }, auth)).status, 400);
+});

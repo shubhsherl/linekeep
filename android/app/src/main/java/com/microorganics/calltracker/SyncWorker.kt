@@ -31,6 +31,8 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,13 +45,35 @@ class CalltrackerApplication : Application() {
         private set
     internal lateinit var customers: CustomersRepository
         private set
+    internal lateinit var push: PushRegistrar
+        private set
 
     override fun onCreate() {
         super.onCreate()
+        PushConfig.initialize(this)
         repository = EnrollmentRepository(this)
         customers = CustomersRepository(repository)
+        push = PushRegistrar(this, repository)
+        PushNotifications.ensureChannel(this)
         scope.launch { repository.restore() }
         scope.launch { repository.contentStatus.collect { repository.updateContentNotification() } }
+        // Fetches the server's Firebase options, then registers, after enrollment and on every start while enrolled (retrying earlier failures);
+        // clears the token when the connection is removed. A revoked connection leaves it untouched.
+        scope.launch {
+            repository.status
+                .map { Triple(it.loaded && !it.storageUnavailable, it.deviceId, it.unauthorized) }
+                .distinctUntilChanged()
+                .collect { (ready, deviceId, unauthorized) ->
+                    when {
+                        !ready -> Unit
+                        deviceId == null -> push.forget()
+                        !unauthorized -> {
+                            push.refreshConfig()
+                            push.register()
+                        }
+                    }
+                }
+        }
     }
 }
 

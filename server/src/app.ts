@@ -24,12 +24,16 @@ import {
   createDeviceCustomerRoutes,
 } from "./modules/customers";
 import { createAdminAnalyticsRoutes } from "./modules/analytics";
+import { createWhatsAppWebhookRoutes } from "./modules/whatsapp";
+import { createDevicePushRoutes } from "./modules/push";
+import { createAdminWhatsAppMediaRoutes, createDeviceWhatsAppMediaRoutes } from "./modules/whatsapp/media";
+import { createAdminWhatsAppConfigRoutes, createDeviceWhatsAppConfigRoutes } from "./modules/whatsapp/config-routes";
 
 import type { Env } from "./env";
 
 export type AppBindings = {
   Bindings: Env & { ACCESS_TEAM_DOMAIN?: string; ACCESS_AUDIENCE?: string };
-  Variables: { requestId: string; adminAuthorized?: boolean };
+  Variables: { requestId: string; adminAuthorized?: boolean; adminId?: string };
 };
 
 export function createApp() {
@@ -74,8 +78,10 @@ export function createApp() {
   app.use("/v1/*", async (context, next) => {
     if (context.req.method !== "POST" && context.req.method !== "PATCH")
       return next();
+    // A request that declares an empty body (a browser or phone POSTing with no payload) has nothing to type-check.
     if (
       context.req.raw.body &&
+      context.req.header("Content-Length") !== "0" &&
       context.req.header("Content-Type")?.split(";")[0].trim() !==
         "application/json"
     ) {
@@ -83,19 +89,25 @@ export function createApp() {
     }
     const limit =
       context.req.method === "POST" &&
-      context.req.path === "/v1/device/call-logs/batch"
+      (context.req.path === "/v1/device/call-logs/batch" || context.req.path === "/v1/webhooks/whatsapp")
         ? limitCallHistoryBody
         : limitJsonBody;
     return limit(context, next);
   });
+  app.route("/v1/webhooks", createWhatsAppWebhookRoutes());
   app.route("/v1/device", createDeviceIdentityRoutes());
   app.route("/v1/device/uploads", createRecordingRoutes());
   app.route("/v1/device/call-logs", createDeviceCallHistoryRoutes());
   app.route("/v1/device", createDeviceCustomerRoutes());
+  app.route("/v1/device", createDeviceWhatsAppConfigRoutes());
+  app.route("/v1/device", createDeviceWhatsAppMediaRoutes());
+  app.route("/v1/device", createDevicePushRoutes());
   app.route("/v1/admin", createAdminIdentityRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCallRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCallHistoryRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCustomerRoutes(requireAdmin));
+  app.route("/v1/admin", createAdminWhatsAppConfigRoutes(requireAdmin));
+  app.route("/v1/admin", createAdminWhatsAppMediaRoutes(requireAdmin));
   app.route("/v1/admin", createAdminAnalyticsRoutes(requireAdmin));
   app.route("/", createLocalAdminRoutes());
   app.use("/admin", requireAdminPage);

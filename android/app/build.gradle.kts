@@ -22,6 +22,27 @@ val appLabelSuffix = providers.gradleProperty("linekeep.appLabelSuffix")
     .orElse(providers.environmentVariable("LINEKEEP_APP_LABEL_SUFFIX"))
     .orElse(provider { localSettings.getProperty("appLabelSuffix", "") })
     .get().trim()
+
+// Firebase Cloud Messaging is normally configured at runtime from the server (GET /v1/device/push-config), so one generic
+// APK serves every deployment. These values are only an optional fallback for custom builds, used when the server has not
+// supplied any. Each is read from -Plinekeep.firebase.<name>, then the LINEKEEP_FIREBASE_<NAME> environment variable, then
+// android/local.properties. If any of the four is empty, the fallback is off (no registration, no crash).
+val androidLocalProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.isFile) file.inputStream().use { load(it) }
+}
+fun firebaseSetting(name: String, environmentName: String): String {
+    val key = "linekeep.firebase.$name"
+    return providers.gradleProperty(key)
+        .orElse(providers.environmentVariable("LINEKEEP_FIREBASE_$environmentName"))
+        .orElse(provider { androidLocalProperties.getProperty(key, "") })
+        .get().trim()
+}
+fun buildConfigString(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+val firebaseApiKey = firebaseSetting("apiKey", "API_KEY")
+val firebaseAppId = firebaseSetting("appId", "APP_ID")
+val firebaseProjectId = firebaseSetting("projectId", "PROJECT_ID")
+val firebaseSenderId = firebaseSetting("senderId", "SENDER_ID")
 val appLabel = if (appLabelSuffix.isEmpty()) "Linekeep" else "Linekeep ($appLabelSuffix)"
 if (apiBaseUrl.isNotEmpty()) {
     val apiOrigin = URI(apiBaseUrl)
@@ -46,9 +67,13 @@ android {
         applicationId = "com.microorganics.calltracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.0.1"
+        versionCode = 15
+        versionName = "1.0.5"
         buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
+        buildConfigField("String", "FIREBASE_API_KEY", buildConfigString(firebaseApiKey))
+        buildConfigField("String", "FIREBASE_APP_ID", buildConfigString(firebaseAppId))
+        buildConfigField("String", "FIREBASE_PROJECT_ID", buildConfigString(firebaseProjectId))
+        buildConfigField("String", "FIREBASE_SENDER_ID", buildConfigString(firebaseSenderId))
         resValue("string", "app_name", appLabel)
     }
     signingConfigs {
@@ -90,6 +115,8 @@ dependencies {
     implementation("androidx.room:room-runtime:2.7.1")
     implementation("androidx.room:room-ktx:2.7.1")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
+    implementation("com.google.firebase:firebase-messaging")
     ksp("androidx.room:room-compiler:2.7.1")
     testImplementation("junit:junit:4.13.2")
     // The Android stub jar throws for org.json in JVM tests; the parsers under test are pure.

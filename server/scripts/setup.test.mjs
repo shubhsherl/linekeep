@@ -3,11 +3,14 @@ import test from "node:test";
 import { parseArgs } from "./setup/args.mjs";
 import { backupName, buildWranglerConfig, DEFAULT_CRON, parseJsonc, renderWranglerConfig } from "./setup/config.mjs";
 import { probePermissions, requiredPermissions } from "./setup/permissions.mjs";
+import { assertNoSecretsInAnswers } from "./setup/answers.mjs";
 import { buildPlan, describeAnswers } from "./setup/plan.mjs";
+import { parseFirebaseField, parseGoogleServices, parseServiceAccount } from "./setup/push.mjs";
+import { buildMetaCalls, describeMetaCalls, PLACEHOLDERS, registerWebhook, webhookUrl } from "./setup/whatsapp.mjs";
 import { run } from "./setup/run.mjs";
 import {
   cronToIst, istTimeToCron, parseBucketName, parseCron, parseD1Name, parseDays, parseDomain, parseEmail, parseEmailList,
-  parseEnvName, parseMegabytes, parseSessionDuration, parseWorkerName,
+  parseCredential, parseEnvName, parseMegabytes, parseMetaId, parseSessionDuration, parseWorkerName,
 } from "./setup/validate.mjs";
 import { WRANGLER_ENTRY, createMasker } from "./setup/wrangler.mjs";
 
@@ -489,4 +492,321 @@ test("prerequisites and missing answers fail clearly", async () => {
   const usage = makeDeps();
   assert.equal(await run(["--nope"], usage.deps), 2);
   assert.equal(await run(["--help"], usage.deps), 0);
+});
+
+// ---------- WhatsApp and push notifications ----------
+const WA_TOKEN = "EAAGsystemUserTOKEN1234567890";
+const WA_SECRET = "synthetic-whatsapp-app-secret-for-tests";
+const VERIFY = "ab".repeat(24); // makeDeps().randomHex(24)
+const PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nTOPSECRETKEYMATERIAL\n-----END PRIVATE KEY-----\n";
+const SERVICE_ACCOUNT = JSON.stringify({ type: "service_account", project_id: "linekeep-demo", client_email: "fcm@linekeep-demo.iam.gserviceaccount.com", private_key: PRIVATE_KEY });
+const API_KEY = "AIzaSyDUMMYDUMMYDUMMYDUMMY123456";
+const googleServices = (over = {}) => JSON.stringify({
+  project_info: { project_number: "123456789012", project_id: "linekeep-demo" },
+  client: [
+    { client_info: { mobilesdk_app_id: "1:123456789012:android:other000", android_client_info: { package_name: "com.example.other" } }, api_key: [{ current_key: "AIzaOTHEROTHEROTHEROTHER12345" }] },
+    { client_info: { mobilesdk_app_id: "1:123456789012:android:abcdef0123", android_client_info: { package_name: "com.microorganics.calltracker" } }, api_key: [{ current_key: API_KEY }] },
+  ],
+  ...over,
+});
+const WA_FILE = { phoneNumberId: "123456789", wabaId: "987654321", appId: "555555555" };
+const FILES = { "/k/sa.json": SERVICE_ACCOUNT, "/k/gs.json": googleServices() };
+const PUSH_FILE = { serviceAccountFile: "/k/sa.json", googleServicesFile: "/k/gs.json" };
+const BOTH = { features: ["whatsapp", "push"], whatsapp: WA_FILE, push: PUSH_FILE };
+const SECRET_ENV = { WHATSAPP_TOKEN: WA_TOKEN, WHATSAPP_APP_SECRET: WA_SECRET };
+
+function graphFetch(graph = []) {
+  return async (url, init) => {
+    if (String(url).startsWith("https://graph.facebook.com/")) {
+      graph.push({ url: String(url), init });
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    }
+    if (url.includes("/health")) return response(200);
+    if (url.includes("/v1/device/customers")) return response(401);
+    return response(200);
+  };
+}
+const waDeps = (over = {}) => makeDeps({ fs: fakeFs(FILES), env: SECRET_ENV, ...over });
+const noLeak = (h, extra = []) => {
+  const everything = `${text(h)}\n${h.fs.map.get("wrangler.jsonc") ?? ""}`;
+  for (const secret of [TOKEN, WA_TOKEN, WA_SECRET, VERIFY, PRIVATE_KEY, "TOPSECRETKEYMATERIAL", SERVICE_ACCOUNT, ...extra]) {
+    assert.ok(!everything.includes(secret), `leaked ${secret.slice(0, 10)}`);
+  }
+};
+
+test("WhatsApp id and credential validation", () => {
+  assert.equal(parseMetaId(" 123456789012345 ").value, "123456789012345");
+  for (const bad of ["1234", "x12345", "1234 56789", "", "1".repeat(33), "12.5e4"]) assert.equal(parseMetaId(bad).ok, false, bad);
+  assert.equal(parseCredential(WA_TOKEN).value, WA_TOKEN);
+  for (const bad of ["", "   ", "has space", "line\nbreak", "x".repeat(5000)]) {
+    const r = parseCredential(bad, "access token");
+    assert.equal(r.ok, false);
+    assert.ok(!r.error.includes("has space"), "the value is never echoed");
+  }
+});
+
+test("service account and google-services.json parsing", () => {
+  const sa = parseServiceAccount(SERVICE_ACCOUNT);
+  assert.equal(sa.ok, true);
+  assert.equal(sa.value.projectId, "linekeep-demo");
+  assert.deepEqual(JSON.parse(sa.value.json).client_email, "fcm@linekeep-demo.iam.gserviceaccount.com");
+  for (const missing of ["client_email", "private_key", "project_id"]) {
+    const broken = { ...JSON.parse(SERVICE_ACCOUNT) };
+    delete broken[missing];
+    const r = parseServiceAccount(JSON.stringify(broken));
+    assert.equal(r.ok, false);
+    assert.match(r.error, new RegExp(missing));
+  }
+  const garbage = parseServiceAccount('{"private_key": "TOPSECRETKEYMATERIAL" oops');
+  assert.equal(garbage.ok, false);
+  assert.ok(!garbage.error.includes("TOPSECRET"), "parse errors never quote the file");
+  assert.equal(parseServiceAccount(JSON.stringify({ ...JSON.parse(SERVICE_ACCOUNT), private_key: "not a pem" })).ok, false);
+
+  const gs = parseGoogleServices(googleServices());
+  assert.deepEqual(gs.value, { apiKey: API_KEY, appId: "1:123456789012:android:abcdef0123", projectId: "linekeep-demo", senderId: "123456789012" });
+  const wrongPackage = parseGoogleServices(JSON.stringify({ ...JSON.parse(googleServices()), client: [JSON.parse(googleServices()).client[0]] }));
+  assert.equal(wrongPackage.ok, false);
+  assert.match(wrongPackage.error, /com\.microorganics\.calltracker/);
+  assert.equal(parseGoogleServices("nope").ok, false);
+  assert.equal(parseFirebaseField("senderId", 123456789012).ok, true);
+  for (const [k, v] of [["apiKey", "short"], ["appId", "1:2:ios:ab"], ["projectId", "A"], ["senderId", "12"]]) assert.equal(parseFirebaseField(k, v).ok, false, k);
+});
+
+test("answers file never carries WhatsApp or push secrets", async () => {
+  for (const file of [
+    { whatsappToken: WA_TOKEN }, { whatsapp: { token: WA_TOKEN } }, { whatsapp: { accessToken: WA_TOKEN } },
+    { whatsapp: { appSecret: WA_SECRET } }, { whatsapp: { verifyToken: VERIFY } }, { push: { serviceAccount: SERVICE_ACCOUNT } },
+    { push: { privateKey: PRIVATE_KEY } },
+  ]) assert.throws(() => assertNoSecretsInAnswers(file), /Refusing/, JSON.stringify(file).slice(0, 40));
+  assert.doesNotThrow(() => assertNoSecretsInAnswers(BOTH));
+
+  for (const file of [{ features: [], whatsapp: { appSecret: WA_SECRET } }, { features: [], push: { serviceAccount: SERVICE_ACCOUNT } }]) {
+    const h = waDeps();
+    withAnswers(h.fs, file);
+    assert.equal(await runYes(h), 1);
+    assert.deepEqual(h.cf.mutations(), []);
+    assert.match(text(h), /Refusing/);
+    noLeak(h);
+  }
+});
+
+test("WhatsApp answers: ids validated, secrets only from the environment, missing values are named", async () => {
+  const badId = waDeps();
+  withAnswers(badId.fs, { features: ["whatsapp"], whatsapp: { ...WA_FILE, wabaId: "12ab" } });
+  assert.equal(await runYes(badId), 1);
+  assert.match(text(badId), /whatsapp\.wabaId.*5-32 digits/);
+  assert.deepEqual(badId.cf.mutations(), []);
+
+  const noEnv = waDeps({ env: {} });
+  withAnswers(noEnv.fs, { features: ["whatsapp"], whatsapp: WA_FILE });
+  assert.equal(await runYes(noEnv), 1);
+  assert.match(text(noEnv), /WHATSAPP_TOKEN environment variable/);
+
+  const noSecret = waDeps({ env: { WHATSAPP_TOKEN: WA_TOKEN } });
+  withAnswers(noSecret.fs, { features: ["whatsapp"], whatsapp: WA_FILE });
+  assert.equal(await runYes(noSecret), 1);
+  assert.match(text(noSecret), /WHATSAPP_APP_SECRET environment variable/);
+
+  const missingId = waDeps();
+  withAnswers(missingId.fs, { features: ["whatsapp"], whatsapp: { phoneNumberId: "123456789" } });
+  assert.equal(await runYes(missingId), 1);
+  assert.match(text(missingId), /whatsapp\.wabaId/);
+
+  const spaced = waDeps({ env: { WHATSAPP_TOKEN: "has a space", WHATSAPP_APP_SECRET: WA_SECRET } });
+  withAnswers(spaced.fs, { features: ["whatsapp"], whatsapp: WA_FILE });
+  assert.equal(await runYes(spaced), 1);
+  assert.match(text(spaced), /WHATSAPP_TOKEN is set but invalid/);
+  assert.ok(!text(spaced).includes("has a space"));
+});
+
+test("push answers: files are validated and the project must match", async () => {
+  const missingFile = waDeps();
+  withAnswers(missingFile.fs, { features: ["push"], push: { serviceAccountFile: "/k/none.json", googleServicesFile: "/k/gs.json" } });
+  assert.equal(await runYes(missingFile), 1);
+  assert.match(text(missingFile), /Could not read "\/k\/none\.json"/);
+
+  const mismatch = waDeps({ fs: fakeFs({ ...FILES, "/k/gs.json": googleServices({ project_info: { project_number: "123456789012", project_id: "other-project" } }) }) });
+  withAnswers(mismatch.fs, { features: ["push"], push: PUSH_FILE });
+  assert.equal(await runYes(mismatch), 1);
+  assert.match(text(mismatch), /same Firebase project/);
+  noLeak(mismatch);
+
+  const noClient = waDeps();
+  withAnswers(noClient.fs, { features: ["push"], push: { serviceAccountFile: "/k/sa.json" } });
+  assert.equal(await runYes(noClient), 1);
+  assert.match(text(noClient), /push\.googleServicesFile/);
+
+  const manual = waDeps();
+  withAnswers(manual.fs, { features: ["push"], push: { serviceAccountFile: "/k/sa.json", apiKey: API_KEY, appId: "1:123456789012:android:abcdef0123", projectId: "linekeep-demo", senderId: "123456789012" } });
+  assert.equal(await runYes(manual), 0, text(manual));
+  assert.equal(manual.wr.puts[0].values.FIREBASE_CLIENT_CONFIG, JSON.stringify({ apiKey: API_KEY, appId: "1:123456789012:android:abcdef0123", projectId: "linekeep-demo", senderId: "123456789012" }));
+});
+
+test("Meta call construction is pure and keeps secrets out of descriptions", () => {
+  const callbackUrl = webhookUrl("https://w.me.workers.dev/");
+  assert.equal(callbackUrl, "https://w.me.workers.dev/v1/webhooks/whatsapp");
+  const [subscription, subscribed] = buildMetaCalls({ appId: "555555555", wabaId: "987654321", callbackUrl, verifyToken: VERIFY, appSecret: WA_SECRET, accessToken: WA_TOKEN });
+  assert.equal(subscription.method, "POST");
+  assert.equal(subscription.url, "https://graph.facebook.com/v23.0/555555555/subscriptions");
+  assert.ok(!subscription.url.includes(WA_SECRET), "secrets are in the body, never the URL");
+  const form = new URLSearchParams(subscription.body);
+  assert.deepEqual(Object.fromEntries(form), {
+    object: "whatsapp_business_account", callback_url: callbackUrl, verify_token: VERIFY, fields: "messages", access_token: `555555555|${WA_SECRET}`,
+  });
+  assert.equal(subscribed.url, "https://graph.facebook.com/v23.0/987654321/subscribed_apps");
+  assert.equal(subscribed.headers.Authorization, `Bearer ${WA_TOKEN}`);
+
+  const described = describeMetaCalls({ appId: "555555555", wabaId: "987654321", callbackUrl }).join("\n");
+  for (const secret of [VERIFY, WA_SECRET, WA_TOKEN]) assert.ok(!described.includes(secret));
+  for (const placeholder of Object.values(PLACEHOLDERS)) assert.ok(described.includes(placeholder), placeholder);
+  assert.match(described, /POST https:\/\/graph\.facebook\.com\/v23\.0\/555555555\/subscriptions/);
+});
+
+test("registerWebhook reports Meta errors without request contents", async () => {
+  const calls = buildMetaCalls({ appId: "555555555", wabaId: "987654321", callbackUrl: "https://w/x", verifyToken: VERIFY, appSecret: WA_SECRET, accessToken: WA_TOKEN });
+  const rejected = async () => ({ ok: false, status: 400, json: async () => ({ error: { message: "Callback verification failed", code: 100 } }) });
+  await assert.rejects(registerWebhook(rejected, calls), (e) => /Callback verification failed \(code 100\)/.test(e.message) && !e.message.includes(WA_SECRET) && !e.message.includes(VERIFY));
+  await assert.rejects(registerWebhook(async () => { throw new Error(`boom ${WA_SECRET}`); }, calls), (e) => !e.message.includes(WA_SECRET));
+});
+
+test("dry run lists the new secrets and the Meta calls, with no network and no secret values", async () => {
+  const h = makeDeps({
+    fs: fakeFs(FILES), env: { CLOUDFLARE_API_TOKEN: "", ...SECRET_ENV },
+    createCloudflare: () => assert.fail("no Cloudflare client in dry run"),
+    createWrangler: () => assert.fail("no wrangler in dry run"),
+    fetch: () => assert.fail("no network in dry run"),
+  });
+  withAnswers(h.fs, { ...BOTH, subdomain: "me" });
+  assert.equal(await runYes(h, ["--dry-run"]), 0, text(h));
+  const out = text(h);
+  for (const name of ["WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID", "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "FCM_SERVICE_ACCOUNT", "FIREBASE_CLIENT_CONFIG"]) {
+    assert.ok(out.includes(`secret: ${name}`), name);
+  }
+  assert.match(out, /Meta developer account and a Business app/);
+  assert.match(out, /Live mode/);
+  assert.match(out, /Firebase Cloud Messaging API Admin role/);
+  assert.match(out, /POST https:\/\/graph\.facebook\.com\/v23\.0\/555555555\/subscriptions/);
+  assert.match(out, /POST https:\/\/graph\.facebook\.com\/v23\.0\/987654321\/subscribed_apps/);
+  assert.match(out, /callback_url=https:\/\/linekeep-api-production\.me\.workers\.dev\/v1\/webhooks\/whatsapp/);
+  assert.deepEqual(h.fs.writes, []);
+  noLeak(h);
+  assert.ok(!out.includes(API_KEY));
+
+  const plan = buildPlan({ ...base({}), features: { access: false, email: false, retention: false, whatsapp: true, push: true }, whatsapp: { ...WA_FILE }, push: { projectId: "linekeep-demo" } });
+  assert.deepEqual(plan.map((s) => s.id), ["subdomain", "d1", "r2", "config", "migrate", "deploy", "secrets", "verify", "whatsapp"]);
+  assert.match(describeAnswers({ ...base({}), features: { whatsapp: true, push: true }, push: { projectId: "linekeep-demo" } }).join("\n"), /Firebase project linekeep-demo/);
+});
+
+test("permissions stay unchanged: WhatsApp and push secrets use Workers Scripts: Edit", () => {
+  assert.deepEqual(requiredPermissions(["whatsapp", "push"]).map((p) => p.label), requiredPermissions([]).map((p) => p.label));
+});
+
+test("declining 'Set up WhatsApp now?' skips every WhatsApp prompt and plan entry", async () => {
+  const asked = [];
+  const h = makeDeps({
+    fs: fakeFs(FILES),
+    ui: {
+      multiselect: async () => ["whatsapp", "push"],
+      ask: async (q, { default: d, parse }) => {
+        asked.push(q);
+        return parse(String(d)).value;
+      },
+      confirm: async (q) => {
+        asked.push(q);
+        return false;
+      },
+    },
+  });
+  assert.equal(await run(["--dry-run"], h.deps), 0, text(h));
+  assert.ok(asked.some((q) => /Set up WhatsApp now\?/.test(q)));
+  assert.ok(asked.some((q) => /Set up push notifications now\?/.test(q)));
+  assert.ok(!asked.some((q) => /Phone number ID|Meta App ID|service-account/.test(q)));
+  assert.match(text(h), /WhatsApp Business:\s+off/);
+  assert.ok(!text(h).includes("secret: WHATSAPP_TOKEN"));
+  assert.match(text(h), /Meta developer account/, "prerequisites are still shown first");
+});
+
+test("fresh run sets the new secrets, generates the verify token and registers the webhook", async () => {
+  const graph = [];
+  const h = waDeps({ fetch: graphFetch(graph) });
+  withAnswers(h.fs, { ...BOTH, whatsapp: { ...WA_FILE, registerWebhook: true } });
+  assert.equal(await runYes(h), 0, text(h));
+  assert.deepEqual(h.wr.calls, ["migrate", "deploy", "secretNames", "putSecrets"]);
+  const { values } = h.wr.puts[0];
+  assert.deepEqual(Object.keys(values).sort(), [
+    "FCM_SERVICE_ACCOUNT", "FIREBASE_CLIENT_CONFIG", "TOKEN_HASH_SECRET", "WHATSAPP_APP_SECRET", "WHATSAPP_PHONE_NUMBER_ID",
+    "WHATSAPP_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_WABA_ID",
+  ]);
+  assert.equal(values.WHATSAPP_TOKEN, WA_TOKEN);
+  assert.equal(values.WHATSAPP_APP_SECRET, WA_SECRET);
+  assert.equal(values.WHATSAPP_PHONE_NUMBER_ID, "123456789");
+  assert.equal(values.WHATSAPP_WABA_ID, "987654321");
+  assert.equal(values.WHATSAPP_VERIFY_TOKEN, VERIFY);
+  assert.equal(JSON.parse(values.FCM_SERVICE_ACCOUNT).project_id, "linekeep-demo");
+  assert.deepEqual(JSON.parse(values.FIREBASE_CLIENT_CONFIG), { apiKey: API_KEY, appId: "1:123456789012:android:abcdef0123", projectId: "linekeep-demo", senderId: "123456789012" });
+
+  assert.equal(graph.length, 2);
+  assert.equal(graph[0].url, "https://graph.facebook.com/v23.0/555555555/subscriptions");
+  assert.equal(graph[0].init.method, "POST");
+  const form = new URLSearchParams(graph[0].init.body);
+  assert.equal(form.get("verify_token"), VERIFY);
+  assert.equal(form.get("access_token"), `555555555|${WA_SECRET}`);
+  assert.equal(form.get("callback_url"), "https://linekeep-api-production.me.workers.dev/v1/webhooks/whatsapp");
+  assert.equal(graph[1].url, "https://graph.facebook.com/v23.0/987654321/subscribed_apps");
+  assert.equal(graph[1].init.headers.Authorization, `Bearer ${WA_TOKEN}`);
+
+  assert.match(text(h), /Secrets set \(names only\):.*WHATSAPP_VERIFY_TOKEN/);
+  assert.match(text(h), /\[x\] Webhook registered/);
+  assert.match(text(h), /Live mode/);
+  assert.match(text(h), /payment method/);
+  assert.match(text(h), /Push notifications: ready for Firebase project linekeep-demo/);
+  noLeak(h, [API_KEY]);
+});
+
+test("existing verify token is kept; declining registration prints instructions but never the token", async () => {
+  const graph = [];
+  const h = waDeps({ fetch: graphFetch(graph), wrangler: fakeWrangler({ secrets: ["TOKEN_HASH_SECRET", "WHATSAPP_VERIFY_TOKEN"] }) });
+  withAnswers(h.fs, { features: ["whatsapp"], whatsapp: { ...WA_FILE, registerWebhook: true } });
+  assert.equal(await runYes(h), 0, text(h));
+  assert.ok(!("WHATSAPP_VERIFY_TOKEN" in h.wr.puts[0].values), "an existing verify token is never regenerated implicitly");
+  assert.equal(h.wr.puts.length, 1, "no replacement without consent");
+  assert.equal(graph.length, 0, "cannot register without knowing the token");
+  assert.match(text(h), /Reused:.*WHATSAPP_VERIFY_TOKEN/);
+  assert.match(text(h), /npx wrangler secret put WHATSAPP_VERIFY_TOKEN --env production/);
+  assert.match(text(h), /Callback URL:\s+https:\/\/linekeep-api-production\.me\.workers\.dev\/v1\/webhooks\/whatsapp/);
+  assert.match(text(h), /\[ \] Register the webhook/);
+  noLeak(h);
+
+  const declined = waDeps({ fetch: graphFetch(graph) });
+  withAnswers(declined.fs, { features: ["whatsapp"], whatsapp: WA_FILE });
+  assert.equal(await runYes(declined), 0, text(declined));
+  assert.equal(graph.length, 0);
+  assert.equal(declined.wr.puts[0].values.WHATSAPP_VERIFY_TOKEN, VERIFY, "first run still generates and stores one");
+  assert.match(text(declined), /never shown/);
+  noLeak(declined);
+});
+
+test("replacing the verify token needs consent and then registers", async () => {
+  const graph = [];
+  const h = waDeps({ fetch: graphFetch(graph), wrangler: fakeWrangler({ secrets: ["TOKEN_HASH_SECRET", "WHATSAPP_VERIFY_TOKEN"] }) });
+  withAnswers(h.fs, { features: ["whatsapp"], whatsapp: { ...WA_FILE, registerWebhook: true, replaceVerifyToken: true } });
+  assert.equal(await runYes(h), 0, text(h));
+  assert.equal(h.wr.puts.length, 2);
+  assert.deepEqual(h.wr.puts[1].values, { WHATSAPP_VERIFY_TOKEN: VERIFY });
+  assert.equal(new URLSearchParams(graph[0].init.body).get("verify_token"), VERIFY);
+  assert.match(text(h), /WHATSAPP_VERIFY_TOKEN \(replaced\)/);
+  noLeak(h);
+});
+
+test("a rejected Meta registration is reported without failing the deployment or leaking secrets", async () => {
+  const h = waDeps({
+    fetch: async (url) => (String(url).startsWith("https://graph.facebook.com/")
+      ? { ok: false, status: 400, json: async () => ({ error: { message: `bad ${WA_SECRET}`, code: 100 } }) }
+      : url.includes("/v1/device/customers") ? response(401) : response(200)),
+  });
+  withAnswers(h.fs, { features: ["whatsapp"], whatsapp: { ...WA_FILE, registerWebhook: true } });
+  assert.equal(await runYes(h), 0, text(h));
+  assert.match(text(h), /Could not register the webhook/);
+  assert.match(text(h), /\[ \] Register the webhook/);
+  noLeak(h);
 });
