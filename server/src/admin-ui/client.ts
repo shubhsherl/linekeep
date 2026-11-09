@@ -3233,6 +3233,724 @@ export const clientJavaScript = String.raw`(() => {
     }
   });
 
+  // ---- Bulk add customers: paste or choose a CSV, assign, optional intro template, then add in batches of 25 ----
+  // Everything shown comes from textContent. The file is read in the browser and never uploaded.
+  const bulkDialog = byId('bulk-dialog');
+  const BULK_MAX_ROWS = 2000;
+  const BULK_BATCH = 25;
+  const BULK_REASONS = {
+    name_required: 'Name is missing',
+    name_too_long: 'Name is longer than 200 characters',
+    invalid_phone: 'Phone number is not valid',
+    notes_too_long: 'Notes are longer than 4000 characters',
+    duplicate_phone: 'Same phone number as an earlier row',
+    invalid_employee: 'The chosen employee is not active',
+    not_saved: 'Could not be saved; try again',
+    no_handler: 'No handler assigned, so a handler variable could not be filled',
+    missing_value: 'A template value was empty (for example the handler has no phone number)',
+    header_image_required: 'The template needs a header file and none is set',
+    send_failed: 'WhatsApp could not send the message',
+    not_on_whatsapp: 'The number is not on WhatsApp',
+    rate_limited: 'WhatsApp is limiting messages right now'
+  };
+  const BULK_STATUS_TEXT = { created: 'Added', exists: 'Already exists', invalid: 'Invalid', duplicate_in_request: 'Duplicate', not_sent: 'Not sent' };
+  const BULK_SOURCES = [['customer_name', 'Customer name'], ['handler_name', 'Handled by: name'], ['handler_phone', 'Handled by: phone number'], ['custom', 'Fixed text']];
+  const bulk = freshBulk();
+  function freshBulk() {
+    return { step: 'data', rows: [], tooMany: false, mode: 'none', oneId: '', splitIds: new Set(), intro: false, templates: null, template: null, sources: [], values: [], header: null, headerUploading: false, headerError: '', headerToken: 0, templateLoading: false, results: [], running: false, stopRequested: false, decide: null, finished: false, opener: null };
+  }
+  function resetBulk() {
+    const next = freshBulk();
+    for (const key of Object.keys(next)) bulk[key] = next[key];
+  }
+  function bulkIntroAvailable() { return featuresLoaded && whatsappAvailable() && waSendState === 'yes'; }
+  function bulkStepList() { return bulkIntroAvailable() ? ['data', 'assign', 'intro', 'confirm', 'run'] : ['data', 'assign', 'confirm', 'run']; }
+
+  // Same rules as the server: ten digits (or a leading zero and ten) are Indian, 8 to 15 digits in all, key = last ten digits.
+  function bulkPhone(value) {
+    const text = String(value);
+    if (text.length > 64) return null;
+    const digits = text.replace(/\D/g, '');
+    const normalized = digits.length === 10 ? '91' + digits : digits.length === 11 && digits.startsWith('0') ? '91' + digits.slice(1) : digits;
+    if (normalized.length < 8 || normalized.length > 15) return null;
+    return { phone: '+' + normalized, key: normalized.slice(-10) };
+  }
+  // Splits the text into records at line ends that are not inside a quoted field.
+  function bulkRecords(text) {
+    const records = [];
+    let current = '';
+    let quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '"') {
+        if (quoted && text[i + 1] === '"') { current += '""'; i++; continue; }
+        if (quoted) quoted = false;
+        else if (/(^|[,\t])\s*$/.test(current)) quoted = true;
+        current += ch;
+        continue;
+      }
+      if (!quoted && (ch === '\n' || ch === '\r')) {
+        if (ch === '\r' && text[i + 1] === '\n') i++;
+        records.push(current);
+        current = '';
+        continue;
+      }
+      current += ch;
+    }
+    records.push(current);
+    return records.filter((record) => record.trim() !== '');
+  }
+  function bulkFields(record, delimiter) {
+    const fields = [];
+    let field = '';
+    let quoted = false;
+    for (let i = 0; i < record.length; i++) {
+      const ch = record[i];
+      if (quoted) {
+        if (ch === '"') { if (record[i + 1] === '"') { field += '"'; i++; } else quoted = false; } else field += ch;
+        continue;
+      }
+      if (ch === delimiter) { fields.push(field.trim()); field = ''; continue; }
+      if (ch === '"' && field.trim() === '') { quoted = true; field = ''; continue; }
+      field += ch;
+    }
+    fields.push(field.trim());
+    return fields;
+  }
+  function bulkSplit(record) {
+    if (record.includes('\t')) {
+      const tabbed = bulkFields(record, '\t');
+      if (tabbed.length > 1) return tabbed;
+    }
+    return bulkFields(record, ',');
+  }
+  function parseBulk(text) {
+    const records = bulkRecords(text);
+    const rows = [];
+    const seen = new Map();
+    records.forEach((record, position) => {
+      const fields = bulkSplit(record);
+      if (position === 0 && /^(name|customer|customer name)$/i.test(fields[0] || '') && /^(phone|mobile|number|phone number|mobile number)$/i.test(fields[1] || '')) return;
+      const name = (fields[0] || '').replace(/\s+/g, ' ').trim();
+      const rawPhone = fields[1] || '';
+      const notes = fields.slice(2).filter((part) => part !== '').join(', ').trim();
+      const phone = bulkPhone(rawPhone);
+      let problem = '';
+      if (!name) problem = 'name_required';
+      else if (name.length > 200) problem = 'name_too_long';
+      else if (!phone) problem = 'invalid_phone';
+      else if (notes.length > 4000) problem = 'notes_too_long';
+      else if (seen.has(phone.key)) problem = 'duplicate_phone';
+      const row = { number: rows.length + 1, name, rawPhone, phone: phone ? phone.phone : '', notes, problem, employeeId: '' };
+      if (!problem) seen.set(phone.key, row.number);
+      else if (problem === 'duplicate_phone') row.duplicateOf = seen.get(phone.key);
+      rows.push(row);
+    });
+    return rows;
+  }
+  function bulkReady() { return bulk.rows.filter((row) => !row.problem); }
+  function bulkReasonText(reason) { return BULK_REASONS[reason] || reason || ''; }
+  function bulkTable(headings, rows) {
+    const table = element('table');
+    const head = element('tr');
+    for (const heading of headings) head.append(element('th', heading));
+    const thead = element('thead');
+    thead.append(head);
+    table.append(thead);
+    const body = element('tbody');
+    for (const cells of rows) {
+      const tr = element('tr');
+      for (const cell of cells) {
+        const td = element('td', cell.text);
+        if (cell.className) td.className = cell.className;
+        tr.append(td);
+      }
+      body.append(tr);
+    }
+    table.append(body);
+    return table;
+  }
+  function renderBulkPreview() {
+    const rows = bulk.rows;
+    const ready = bulkReady().length;
+    const invalid = rows.filter((row) => row.problem && row.problem !== 'duplicate_phone').length;
+    const duplicates = rows.filter((row) => row.problem === 'duplicate_phone').length;
+    bulk.tooMany = rows.length > BULK_MAX_ROWS;
+    const preview = byId('bulk-preview');
+    if (!rows.length) {
+      byId('bulk-summary').textContent = '';
+      preview.hidden = true;
+      preview.replaceChildren();
+      return;
+    }
+    let summary = rows.length + (rows.length === 1 ? ' row' : ' rows') + ': ' + ready + ' ready, ' + invalid + ' invalid, ' + duplicates + (duplicates === 1 ? ' duplicate' : ' duplicates') + '.';
+    if (bulk.tooMany) summary += ' That is more than the ' + BULK_MAX_ROWS + ' customers allowed at a time; split the list.';
+    byId('bulk-summary').textContent = summary;
+    const onlyProblems = byId('bulk-problems-only').checked;
+    const shown = rows.filter((row) => !onlyProblems || row.problem);
+    const limit = 200;
+    const cells = shown.slice(0, limit).map((row) => [
+      { text: String(row.number) }, { text: row.name || '(missing)' }, { text: row.phone || row.rawPhone || '(missing)' }, { text: row.notes },
+      row.problem ? { text: bulkReasonText(row.problem) + (row.duplicateOf ? ' (row ' + row.duplicateOf + ')' : ''), className: 'bulk-bad' } : { text: 'Ready', className: 'bulk-good' }
+    ]);
+    const nodes = [bulkTable(['#', 'Name', 'Phone', 'Notes', 'Check'], cells)];
+    if (shown.length > limit) nodes.push(element('p', 'Showing the first ' + limit + ' of ' + shown.length + ' rows.', 'hint'));
+    if (!shown.length) nodes.push(element('p', 'No rows have problems.', 'hint'));
+    preview.replaceChildren(...nodes);
+    preview.hidden = false;
+  }
+  function reparseBulk() {
+    bulk.rows = parseBulk(byId('bulk-text').value);
+    renderBulkPreview();
+  }
+  byId('bulk-text').addEventListener('input', reparseBulk);
+  byId('bulk-problems-only').addEventListener('change', renderBulkPreview);
+  byId('bulk-file').addEventListener('change', async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (!file) return;
+    message('bulk-error', '');
+    if (file.size > 2 * 1024 * 1024) { message('bulk-error', 'This file is larger than 2 MB. Split it into smaller files.'); return; }
+    try {
+      byId('bulk-text').value = await file.text();
+      reparseBulk();
+    } catch {
+      message('bulk-error', 'The file could not be read.');
+    }
+  });
+
+  function bulkActiveEmployees() { return Array.from(employees.values()).filter((employee) => employee.active); }
+  function bulkChosenEmployees() {
+    if (bulk.mode === 'one') return bulk.oneId ? [bulk.oneId] : [];
+    if (bulk.mode === 'split') return bulkActiveEmployees().filter((employee) => bulk.splitIds.has(employee.id)).map((employee) => employee.id);
+    return [];
+  }
+  // The employee of each ready row; computed here so every batch can be sent on its own.
+  function applyBulkAssignment() {
+    const ids = bulkChosenEmployees();
+    bulkReady().forEach((row, index) => { row.employeeId = ids.length ? ids[index % ids.length] : ''; });
+  }
+  function renderBulkAssign() {
+    const active = bulkActiveEmployees();
+    const select = byId('bulk-one-employee');
+    const options = [];
+    const blank = element('option', 'Choose an employee');
+    blank.value = '';
+    options.push(blank);
+    for (const employee of active) {
+      const option = element('option', employee.name + ' · ' + employee.id);
+      option.value = employee.id;
+      options.push(option);
+    }
+    select.replaceChildren(...options);
+    select.value = active.some((employee) => employee.id === bulk.oneId) ? bulk.oneId : '';
+    const container = byId('bulk-split-choices');
+    fillEmployeeChoices(container, bulk.splitIds);
+    for (const input of container.querySelectorAll('input[type=checkbox]')) {
+      input.addEventListener('change', () => { if (input.checked) bulk.splitIds.add(input.value); else bulk.splitIds.delete(input.value); updateBulkAssignNote(); });
+    }
+    for (const radio of bulkDialog.querySelectorAll('input[name=bulk-mode]')) radio.checked = radio.value === bulk.mode;
+    byId('bulk-one-field').hidden = bulk.mode !== 'one';
+    byId('bulk-split-field').hidden = bulk.mode !== 'split';
+    updateBulkAssignNote();
+  }
+  function updateBulkAssignNote() {
+    const ready = bulkReady().length;
+    const ids = bulkChosenEmployees();
+    let text = '';
+    if (bulk.mode === 'none') text = 'The ' + ready + ' new customers will be unassigned; assign them later from the Customers list.';
+    else if (bulk.mode === 'one') text = ids.length ? ready + ' customers will be assigned to ' + bulkEmployeeName(ids[0]) + '.' : 'Choose the employee.';
+    else text = ids.length ? 'About ' + Math.ceil(ready / ids.length) + ' customers each across ' + ids.length + (ids.length === 1 ? ' employee.' : ' employees.') : 'Choose at least one employee.';
+    byId('bulk-assign-note').textContent = text;
+  }
+  function bulkEmployeeName(id) { const employee = employees.get(id); return employee ? employee.name : id; }
+  for (const radio of bulkDialog.querySelectorAll('input[name=bulk-mode]')) {
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      bulk.mode = radio.value;
+      byId('bulk-one-field').hidden = bulk.mode !== 'one';
+      byId('bulk-split-field').hidden = bulk.mode !== 'split';
+      updateBulkAssignNote();
+    });
+  }
+  byId('bulk-one-employee').addEventListener('change', (event) => { bulk.oneId = event.target.value; updateBulkAssignNote(); });
+
+  // ---- Intro message ----
+  function bulkStorageKey(template) { return 'linekeep.bulkIntro.' + template.name + '.' + template.language; }
+  function bulkStoredMapping(template) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(bulkStorageKey(template)) || 'null');
+      if (!Array.isArray(stored) || stored.length !== template.variables.length) return null;
+      const sources = stored.map((item) => item && BULK_SOURCES.some((entry) => entry[0] === item.source) ? item.source : null);
+      if (sources.includes(null)) return null;
+      return { sources, values: stored.map((item) => typeof item.value === 'string' ? item.value.slice(0, 1024) : '') };
+    } catch { return null; }
+  }
+  function saveBulkMapping() {
+    const template = bulk.template;
+    if (!template) return;
+    try {
+      localStorage.setItem(bulkStorageKey(template), JSON.stringify(template.variables.map((_, index) => ({ source: bulk.sources[index], value: bulk.sources[index] === 'custom' ? bulk.values[index] : '' }))));
+    } catch { /* Remembering the mapping is optional. */ }
+  }
+  function bulkHandlerSource(source) { return source === 'handler_name' || source === 'handler_phone'; }
+  function selectBulkTemplate(template) {
+    bulk.template = template;
+    bulk.header = null;
+    bulk.headerUploading = false;
+    bulk.headerError = '';
+    bulk.headerToken++;
+    if (!template) { bulk.sources = []; bulk.values = []; return; }
+    const stored = bulkStoredMapping(template);
+    bulk.sources = stored ? stored.sources : template.variables.map((_, index) => index === 0 ? 'customer_name' : 'custom');
+    bulk.values = stored ? stored.values : template.variables.map(() => '');
+    if (bulk.mode === 'none') bulk.sources = bulk.sources.map((source) => bulkHandlerSource(source) ? 'custom' : source);
+  }
+  function bulkSample() {
+    const row = bulkReady()[0];
+    const handler = row && row.employeeId ? employees.get(row.employeeId) : null;
+    return { name: row ? row.name : 'Customer', handlerName: handler ? handler.name : 'Handler', handlerPhone: handler ? handler.phoneNumber || '' : '' };
+  }
+  function bulkSampleValues() {
+    const sample = bulkSample();
+    return bulk.sources.map((source, index) => source === 'customer_name' ? sample.name : source === 'handler_name' ? sample.handlerName : source === 'handler_phone' ? sample.handlerPhone : String(bulk.values[index] || '').trim());
+  }
+  function renderBulkIntroPreview() {
+    const template = bulk.template;
+    const box = byId('bulk-intro-preview');
+    if (!template) { box.replaceChildren(); return; }
+    const values = bulkSampleValues();
+    const parts = [];
+    if (templateNeedsHeader(template)) parts.push(element('div', '[' + template.headerFormat.toLowerCase() + ' header]', 'bulk-bubble-part bulk-sample'));
+    for (const [text, className] of [[template.header, ''], [template.body, ''], [template.footer, 'bulk-bubble-footer']]) {
+      if (!text) continue;
+      const part = element('div', undefined, 'bulk-bubble-part ' + className);
+      part.append(...templateParts(text, template, values));
+      parts.push(part);
+    }
+    box.replaceChildren(...parts);
+  }
+  function bulkHeaderState(template) {
+    if (!template || !templateNeedsHeader(template)) return null;
+    return bulk.header ? 'override' : template.headerImageConfigured ? 'default' : 'missing';
+  }
+  function renderBulkHeader() {
+    const template = bulk.template;
+    const box = byId('bulk-header-box');
+    const state = bulkHeaderState(template);
+    if (!state) { box.hidden = true; box.replaceChildren(); return; }
+    const kind = template.headerFormat.toLowerCase();
+    const noun = kind === 'image' ? 'image' : kind === 'video' ? 'video' : 'document';
+    const fileInput = byId('bulk-header-file');
+    fileInput.accept = attachAccept([kind]);
+    const note = bulk.headerUploading ? 'Uploading…'
+      : state === 'override' ? 'Header ' + noun + ': using ' + bulk.header.fileName + ' for every message.'
+      : 'Default ' + noun + ': ' + (state === 'default' ? 'configured (set in Config > WhatsApp Business > Template images).' : 'missing. Choose a file below or set a default in Config > WhatsApp Business > Template images.');
+    const status = element('p', note, state === 'missing' && !bulk.headerUploading ? 'bulk-warn' : undefined);
+    status.setAttribute('role', 'status');
+    const actions = element('div', undefined, 'actions');
+    const pick = element('button', state === 'missing' ? 'Choose ' + noun : 'Use a different ' + noun, 'secondary');
+    pick.type = 'button';
+    pick.disabled = bulk.headerUploading;
+    pick.addEventListener('click', () => fileInput.click());
+    actions.append(pick);
+    if (bulk.header) {
+      const reset = element('button', template.headerImageConfigured ? 'Use the default' : 'Remove file', 'secondary');
+      reset.type = 'button';
+      reset.disabled = bulk.headerUploading;
+      reset.addEventListener('click', () => { bulk.header = null; bulk.headerError = ''; renderBulkHeader(); });
+      actions.append(reset);
+    }
+    const nodes = [status, actions];
+    if (bulk.headerError) { const failure = element('p', bulk.headerError, 'error-text'); failure.setAttribute('role', 'alert'); nodes.push(failure); }
+    box.hidden = false;
+    box.replaceChildren(...nodes);
+  }
+  byId('bulk-header-file').addEventListener('change', async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    const template = bulk.template;
+    if (!file || !template || !templateNeedsHeader(template)) return;
+    const kind = template.headerFormat.toLowerCase();
+    const problem = attachProblem(file, [kind]);
+    if (problem) { bulk.headerError = problem; renderBulkHeader(); return; }
+    const token = ++bulk.headerToken;
+    bulk.headerUploading = true;
+    bulk.headerError = '';
+    renderBulkHeader();
+    try {
+      const uploaded = await uploadAttachment(file);
+      if (token !== bulk.headerToken) return;
+      if (uploaded.kind !== kind) throw new Error('The uploaded file is not a ' + kind + '.');
+      bulk.header = uploaded;
+    } catch (error) {
+      if (token !== bulk.headerToken) return;
+      bulk.headerError = 'Could not upload the file. ' + errorMessage(error);
+    }
+    bulk.headerUploading = false;
+    renderBulkHeader();
+  });
+  function renderBulkVars() {
+    const template = bulk.template;
+    const container = byId('bulk-vars');
+    byId('bulk-handler-note').hidden = bulk.mode !== 'none' || !template || !template.variables.length;
+    if (!template) { container.replaceChildren(); return; }
+    const nodes = template.variables.map((variable, index) => {
+      const wrapper = element('div', undefined, 'bulk-var');
+      wrapper.append(element('span', '{{' + variable.key + '}}' + (variable.example ? ' (for example ' + variable.example + ')' : '')));
+      const select = element('select');
+      select.setAttribute('aria-label', 'Fill {{' + variable.key + '}} with');
+      for (const [value, text] of BULK_SOURCES) {
+        const option = element('option', text);
+        option.value = value;
+        option.disabled = bulk.mode === 'none' && bulkHandlerSource(value);
+        select.append(option);
+      }
+      select.value = bulk.sources[index];
+      const input = element('input');
+      input.type = 'text';
+      input.maxLength = 1024;
+      input.autocomplete = 'off';
+      input.placeholder = variable.example || 'Text for every customer';
+      input.setAttribute('aria-label', 'Fixed text for {{' + variable.key + '}}');
+      input.value = bulk.values[index] || '';
+      input.hidden = bulk.sources[index] !== 'custom';
+      select.addEventListener('change', () => {
+        bulk.sources[index] = select.value;
+        input.hidden = select.value !== 'custom';
+        if (!input.hidden) input.focus();
+        renderBulkIntroPreview();
+      });
+      input.addEventListener('input', () => {
+        if (/[\t\r\n]/.test(input.value)) input.value = input.value.replace(/[\t\r\n]+/g, ' ');
+        bulk.values[index] = input.value;
+        renderBulkIntroPreview();
+      });
+      wrapper.append(select, input);
+      return wrapper;
+    });
+    if (!nodes.length) nodes.push(element('p', 'This template has no variables.', 'hint'));
+    container.replaceChildren(...nodes);
+  }
+  function renderBulkIntro() {
+    byId('bulk-intro-on').checked = bulk.intro;
+    byId('bulk-intro-body').hidden = !bulk.intro;
+    if (!bulk.intro) return;
+    renderBulkTemplateChoices();
+    renderBulkVars();
+    renderBulkHeader();
+    renderBulkIntroPreview();
+  }
+  function renderBulkTemplateChoices() {
+    const select = byId('bulk-template');
+    const sendable = (bulk.templates || []).filter((item) => item.sendable);
+    const blank = element('option', bulk.templateLoading ? 'Loading templates…' : sendable.length ? 'Choose a template' : 'No templates available');
+    blank.value = '';
+    const options = [blank];
+    sendable.forEach((item, index) => {
+      const option = element('option', item.name + ' · ' + item.language + (templateNeedsHeader(item) ? ' · ' + item.headerFormat.toLowerCase() + ' header' : ''));
+      option.value = String(index);
+      options.push(option);
+    });
+    select.replaceChildren(...options);
+    const current = bulk.template ? sendable.findIndex((item) => sameTemplate(item, bulk.template)) : -1;
+    select.value = current >= 0 ? String(current) : '';
+  }
+  async function loadBulkTemplates() {
+    if (bulk.templateLoading) return;
+    if (templateState.templates && Date.now() - templateState.loadedAt < 300000) { bulk.templates = templateState.templates; renderBulkIntro(); return; }
+    bulk.templateLoading = true;
+    message('bulk-template-error', '');
+    byId('bulk-template-reload').hidden = true;
+    message('bulk-template-status', 'Loading templates…');
+    renderBulkTemplateChoices();
+    try {
+      const data = await api('/whatsapp/templates');
+      if (!data || !Array.isArray(data.items)) throw new Error('The server returned unreadable templates. Please try again.');
+      templateState.templates = data.items.map(readTemplate).filter(Boolean);
+      templateState.loadedAt = Date.now();
+      bulk.templates = templateState.templates;
+    } catch (error) {
+      message('bulk-template-error', error.status === 503 && error.code === 'WHATSAPP_NOT_CONFIGURED' ? 'WhatsApp templates are unavailable because WhatsApp is not configured.' : errorMessage(error));
+      byId('bulk-template-reload').hidden = false;
+    } finally {
+      bulk.templateLoading = false;
+      message('bulk-template-status', '');
+      if (bulkDialog.open) renderBulkIntro();
+    }
+  }
+  byId('bulk-template-reload').addEventListener('click', () => { templateState.templates = null; loadBulkTemplates(); });
+  byId('bulk-intro-on').addEventListener('change', (event) => {
+    bulk.intro = event.target.checked;
+    renderBulkIntro();
+    if (bulk.intro && !bulk.templates) loadBulkTemplates();
+  });
+  byId('bulk-template').addEventListener('change', (event) => {
+    const sendable = (bulk.templates || []).filter((item) => item.sendable);
+    selectBulkTemplate(event.target.value === '' ? null : sendable[Number(event.target.value)] || null);
+    renderBulkVars();
+    renderBulkHeader();
+    renderBulkIntroPreview();
+  });
+  // Returns a message for the first thing wrong with the intro settings, else an empty string.
+  function bulkIntroProblem() {
+    if (!bulk.intro) return '';
+    const template = bulk.template;
+    if (!template) return 'Choose a template, or untick the intro message.';
+    if (bulk.headerUploading) return 'Wait for the file to finish uploading.';
+    if (bulkHeaderState(template) === 'missing') return 'This template needs a header ' + template.headerFormat.toLowerCase() + '. Choose a file or set a default in Config.';
+    for (let index = 0; index < template.variables.length; index++) {
+      const source = bulk.sources[index];
+      if (bulk.mode === 'none' && bulkHandlerSource(source)) return 'Handler variables need the customers to be assigned. Go back and choose an employee, or pick another source for {{' + template.variables[index].key + '}}.';
+      if (source === 'custom' && !String(bulk.values[index] || '').trim()) return 'Enter the fixed text for {{' + template.variables[index].key + '}}.';
+    }
+    return '';
+  }
+  function bulkIntroPayload() {
+    const template = bulk.template;
+    const body = { template: { name: template.name, language: template.language, params: template.variables.map((_, index) => bulk.sources[index] === 'custom' ? { value: String(bulk.values[index]).trim() } : { source: bulk.sources[index] }) } };
+    if (bulkHeaderState(template) === 'override') body.template.headerAttachmentId = bulk.header.attachmentId;
+    return body;
+  }
+
+  // ---- Steps ----
+  function updateBulkSteps() {
+    const list = bulkStepList();
+    for (const item of byId('bulk-steps').children) {
+      item.hidden = !list.includes(item.dataset.step);
+      if (item.dataset.step === bulk.step) item.setAttribute('aria-current', 'step'); else item.removeAttribute('aria-current');
+    }
+  }
+  function showBulkStep(step) {
+    bulk.step = step;
+    const list = bulkStepList();
+    for (const name of ['data', 'assign', 'intro', 'confirm', 'run']) byId('bulk-step-' + name).hidden = name !== step;
+    updateBulkSteps();
+    const position = list.indexOf(step);
+    const running = step === 'run';
+    byId('bulk-back').hidden = running || position <= 0;
+    byId('bulk-next').hidden = running;
+    byId('bulk-next').textContent = step === 'confirm' ? 'Add ' + bulkReady().length + (bulkReady().length === 1 ? ' customer' : ' customers') : 'Next';
+    byId('bulk-cancel').textContent = bulk.finished ? 'Close' : 'Cancel';
+    byId('bulk-cancel').hidden = running && !bulk.finished;
+    message('bulk-error', '');
+    if (step === 'assign') renderBulkAssign();
+    if (step === 'intro') { renderBulkIntro(); if (bulk.intro && !bulk.templates) loadBulkTemplates(); }
+    if (step === 'confirm') renderBulkConfirm();
+    const heading = byId({ data: 'bulk-data-heading', assign: 'bulk-assign-heading', intro: 'bulk-intro-heading', confirm: 'bulk-confirm-heading', run: 'bulk-run-heading' }[step]);
+    heading.focus();
+  }
+  function renderBulkConfirm() {
+    const rows = bulk.rows;
+    const ready = bulkReady().length;
+    const skipped = rows.length - ready;
+    const ids = bulkChosenEmployees();
+    const facts = [
+      ['New customers', ready + ' to add' + (skipped ? ' (' + skipped + ' skipped as invalid or duplicate)' : '') + '. Numbers that already exist are left untouched.'],
+      ['Assignment', bulk.mode === 'none' ? 'Unassigned' : bulk.mode === 'one' ? 'All to ' + bulkEmployeeName(ids[0]) : 'Split evenly across ' + ids.map(bulkEmployeeName).join(', ')],
+      ['Intro message', bulk.intro && bulk.template ? 'Yes, template ' + bulk.template.name + ' (' + bulk.template.language + '), only to customers added now' : 'No']
+    ];
+    byId('bulk-confirm-facts').replaceChildren(...facts.map(([label, value]) => fact(label, value)));
+  }
+  function bulkNext() {
+    message('bulk-error', '');
+    const list = bulkStepList();
+    const step = bulk.step;
+    if (step === 'data') {
+      reparseBulk();
+      if (!bulk.rows.length) { message('bulk-error', 'Paste at least one customer or choose a file.'); return; }
+      if (bulk.tooMany) { message('bulk-error', 'There are more than ' + BULK_MAX_ROWS + ' rows. Split the list and add it in parts.'); return; }
+      if (!bulkReady().length) { message('bulk-error', 'No row is ready to add. Fix the rows marked in the table.'); return; }
+      if (!directoryReady) loadDirectory();
+    } else if (step === 'assign') {
+      if (bulk.mode === 'one' && !bulk.oneId) { message('bulk-error', 'Choose the employee.'); return; }
+      if (bulk.mode === 'split' && !bulkChosenEmployees().length) { message('bulk-error', 'Choose at least one employee.'); return; }
+      applyBulkAssignment();
+    } else if (step === 'intro') {
+      const problem = bulkIntroProblem();
+      if (problem) { message('bulk-error', problem); return; }
+    } else if (step === 'confirm') {
+      runBulk();
+      return;
+    }
+    showBulkStep(list[list.indexOf(step) + 1]);
+  }
+  function bulkBack() {
+    const list = bulkStepList();
+    const position = list.indexOf(bulk.step);
+    if (position > 0) showBulkStep(list[position - 1]);
+  }
+  byId('bulk-next').addEventListener('click', bulkNext);
+  byId('bulk-back').addEventListener('click', bulkBack);
+  byId('bulk-cancel').addEventListener('click', () => bulkDialog.close());
+  bulkDialog.addEventListener('cancel', (event) => { if (bulk.running) event.preventDefault(); });
+  bulkDialog.addEventListener('close', () => {
+    const opener = bulk.opener;
+    resetBulk();
+    byId('bulk-text').value = '';
+    byId('bulk-problems-only').checked = false;
+    byId('bulk-results').replaceChildren();
+    if (opener && opener.isConnected) opener.focus();
+  });
+  async function openBulk(opener) {
+    resetBulk();
+    bulk.opener = opener || null;
+    byId('bulk-text').value = '';
+    byId('bulk-summary').textContent = '';
+    byId('bulk-preview').hidden = true;
+    byId('bulk-intro-on').checked = false;
+    byId('bulk-run-failure').hidden = true;
+    byId('bulk-results').hidden = true;
+    byId('bulk-download').hidden = true;
+    byId('bulk-stop').hidden = true;
+    byId('bulk-progress').value = 0;
+    byId('bulk-run-status').textContent = '';
+    byId('bulk-run-heading').textContent = 'Adding customers';
+    showBulkStep('data');
+    bulkDialog.showModal();
+    byId('bulk-text').focus();
+    if (!directoryReady) loadDirectory();
+    if (whatsappAvailable()) loadSendState().then(() => { if (bulkDialog.open) updateBulkSteps(); });
+  }
+  byId('customer-bulk').addEventListener('click', (event) => openBulk(event.currentTarget));
+
+  // ---- Running the batches ----
+  function bulkResultFor(row) { return bulk.results[row.number - 1]; }
+  function applyBulkBatch(batch, data) {
+    batch.forEach((row, position) => {
+      const result = data.results[position];
+      bulk.results[row.number - 1] = result && typeof result.status === 'string' ? result : { status: 'invalid', reason: 'not_saved' };
+    });
+  }
+  function readBulkResponse(data, size) {
+    if (!data || !Array.isArray(data.results) || data.results.length !== size) throw new Error('The server returned an unreadable result. Retry this batch: customers already saved are reported as existing and are not messaged again.');
+    return data;
+  }
+  function waitForBulkDecision() { return new Promise((resolve) => { bulk.decide = resolve; }); }
+  async function runBulk() {
+    const ready = bulkReady();
+    if (bulk.intro) saveBulkMapping();
+    bulk.results = bulk.rows.map((row) => row.problem ? { status: row.problem === 'duplicate_phone' ? 'duplicate_in_request' : 'invalid', reason: row.problem } : null);
+    bulk.running = true;
+    bulk.finished = false;
+    bulk.stopRequested = false;
+    showBulkStep('run');
+    byId('bulk-stop').hidden = false;
+    byId('bulk-stop').disabled = false;
+    byId('bulk-results').hidden = true;
+    byId('bulk-download').hidden = true;
+    byId('bulk-run-heading').textContent = 'Adding customers';
+    const introBody = bulk.intro && bulk.template ? bulkIntroPayload() : null;
+    const batches = [];
+    for (let start = 0; start < ready.length; start += BULK_BATCH) batches.push(ready.slice(start, start + BULK_BATCH));
+    const progress = byId('bulk-progress');
+    progress.max = Math.max(1, ready.length);
+    progress.value = 0;
+    let finishedRows = 0;
+    let aborted = false;
+    for (let index = 0; index < batches.length && !aborted; index++) {
+      if (bulk.stopRequested) break;
+      const batch = batches[index];
+      byId('bulk-run-status').textContent = 'Adding customers ' + (finishedRows + 1) + '–' + (finishedRows + batch.length) + ' of ' + ready.length + '…';
+      const body = { rows: batch.map((row) => { const item = { name: row.name, phone: row.rawPhone }; if (row.notes) item.notes = row.notes; if (row.employeeId) item.employeeId = row.employeeId; return item; }) };
+      if (introBody) body.intro = introBody;
+      for (;;) {
+        try {
+          const data = readBulkResponse(await api('/customers/bulk', { method: 'POST', body: JSON.stringify(body) }), batch.length);
+          applyBulkBatch(batch, data);
+          break;
+        } catch (error) {
+          byId('bulk-run-failure-text').textContent = 'Customers ' + (finishedRows + 1) + '–' + (finishedRows + batch.length) + ' could not be added. ' + errorMessage(error);
+          byId('bulk-run-failure').hidden = false;
+          byId('bulk-retry').focus();
+          byId('bulk-stop').hidden = true;
+          const retry = await waitForBulkDecision();
+          byId('bulk-run-failure').hidden = true;
+          byId('bulk-stop').hidden = false;
+          if (!retry) { aborted = true; break; }
+        }
+      }
+      if (aborted) break;
+      finishedRows += batch.length;
+      progress.value = finishedRows;
+    }
+    bulk.running = false;
+    bulk.finished = true;
+    bulk.results = bulk.results.map((result) => result || { status: 'not_sent', reason: '' });
+    byId('bulk-stop').hidden = true;
+    byId('bulk-run-heading').textContent = aborted || bulk.stopRequested ? 'Stopped' : 'Done';
+    renderBulkResults(aborted || bulk.stopRequested);
+    byId('bulk-cancel').textContent = 'Close';
+    byId('bulk-cancel').hidden = false;
+    byId('bulk-download').hidden = false;
+    customersList.load(true);
+    refreshUnread();
+    byId('bulk-run-heading').focus();
+  }
+  byId('bulk-retry').addEventListener('click', () => { if (bulk.decide) { const decide = bulk.decide; bulk.decide = null; decide(true); } });
+  byId('bulk-give-up').addEventListener('click', () => { if (bulk.decide) { const decide = bulk.decide; bulk.decide = null; decide(false); } });
+  byId('bulk-stop').addEventListener('click', () => {
+    bulk.stopRequested = true;
+    byId('bulk-stop').disabled = true;
+    byId('bulk-run-status').textContent = 'Stopping after this batch…';
+  });
+  function renderBulkResults(stopped) {
+    const counts = { created: 0, exists: 0, invalid: 0, duplicate_in_request: 0, not_sent: 0 };
+    const intro = { sent: 0, failed: 0, skipped: 0 };
+    for (const result of bulk.results) {
+      counts[result.status] = (counts[result.status] || 0) + 1;
+      if (result.intro && intro[result.intro.status] !== undefined) intro[result.intro.status]++;
+    }
+    let summary = 'Added ' + counts.created + ' · already existed ' + counts.exists + ' · invalid ' + counts.invalid + ' · duplicates ' + counts.duplicate_in_request;
+    if (counts.not_sent) summary += ' · not sent ' + counts.not_sent;
+    if (bulk.intro) summary += '. Intro messages: ' + intro.sent + ' sent, ' + intro.failed + ' failed, ' + intro.skipped + ' skipped';
+    byId('bulk-run-status').textContent = summary + '.' + (stopped ? ' Customers already added stay added.' : '');
+    const rows = bulk.rows.map((row, index) => {
+      const result = bulk.results[index];
+      const reason = bulkReasonText(result.reason);
+      const good = result.status === 'created';
+      const cells = [
+        { text: String(row.number) }, { text: row.name || '(missing)' }, { text: row.phone || row.rawPhone },
+        { text: BULK_STATUS_TEXT[result.status] || result.status, className: good ? 'bulk-good' : result.status === 'invalid' || result.status === 'not_sent' ? 'bulk-bad' : '' },
+        { text: result.status === 'created' && row.employeeId ? (result.assigned ? bulkEmployeeName(row.employeeId) : 'Not assigned') : '' }
+      ];
+      if (bulk.intro) {
+        const state = result.intro;
+        cells.push({ text: state ? (state.status === 'sent' ? 'Sent' : state.status === 'skipped' ? 'Skipped' : 'Failed') : '', className: state && state.status === 'failed' ? 'bulk-bad' : state && state.status === 'sent' ? 'bulk-good' : '' });
+      }
+      cells.push({ text: [reason, bulkIntroReason(result)].filter(Boolean).join(' · ') });
+      return cells;
+    });
+    const headings = ['#', 'Name', 'Phone', 'Result', 'Assigned'].concat(bulk.intro ? ['Intro'] : [], ['Details']);
+    byId('bulk-results').replaceChildren(bulkTable(headings, rows));
+    byId('bulk-results').hidden = false;
+  }
+  function bulkIntroReason(result) { return result.intro && result.intro.reason ? bulkReasonText(result.intro.reason) : ''; }
+  function bulkCsvCell(value, guard) {
+    let text = String(value === undefined || value === null ? '' : value);
+    if (guard && /^[=+\-@\t\r]/.test(text)) text = "'" + text;
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+  function downloadBulkResults() {
+    const lines = [['row', 'name', 'phone', 'result', 'assigned_to', 'intro', 'details', 'customer_id'].map((heading) => bulkCsvCell(heading)).join(',')];
+    bulk.rows.forEach((row, index) => {
+      const result = bulk.results[index] || { status: 'not_sent' };
+      const details = [bulkReasonText(result.reason), bulkIntroReason(result)].filter(Boolean).join(' · ');
+      lines.push([
+        bulkCsvCell(row.number), bulkCsvCell(row.name, true), bulkCsvCell(row.phone || row.rawPhone, false), bulkCsvCell(BULK_STATUS_TEXT[result.status] || result.status),
+        bulkCsvCell(result.status === 'created' && row.employeeId && result.assigned ? bulkEmployeeName(row.employeeId) : '', true),
+        bulkCsvCell(result.intro ? result.intro.status : ''), bulkCsvCell(details, true), bulkCsvCell(result.customerId || '')
+      ].join(','));
+    });
+    const link = document.createElement('a');
+    link.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent('\ufeff' + lines.join('\r\n') + '\r\n');
+    link.download = 'linekeep-bulk-add-results.csv';
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+  byId('bulk-download').addEventListener('click', downloadBulkResults);
+
   // ---- Chat list (left pane) ----
   const chatLayout = byId('chat-layout');
   byId('whatsapp-refresh').append(waIcon('refresh'));

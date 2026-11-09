@@ -38,3 +38,37 @@ export async function notifyAssigned(env: Env, customer: { id: string; name: str
     type: "assigned", customerId: customer.id, customerName: customer.name, title: "New customer assigned", body: customer.name,
   });
 }
+
+/**
+ * Bulk import: one push per employee however many customers they received (the newest app notification replaces an older one for
+ * the same customer, so one per customer would bury the phone). A single customer is announced like a normal assignment; several
+ * as a count, opening the first of them. `maxFetches` bounds the calls to Google so the request stays under the platform's
+ * subrequest limit (one is reserved for the access token); employees past the budget simply are not notified.
+ */
+export async function notifyBulkAssigned(
+  env: Env, groups: { employeeId: string; customers: { id: string; name: string }[] }[], maxFetches: number,
+): Promise<void> {
+  try {
+    const account = pushAccount(env);
+    let budget = maxFetches - 1;
+    if (!account || budget <= 0) return;
+    const repository = createPushRepository(env.DB);
+    for (const group of groups) {
+      const first = group.customers[0];
+      if (!first || budget <= 0) continue;
+      const tokens = (await repository.tokensFor([group.employeeId])).slice(0, budget);
+      budget -= tokens.length;
+      const many = group.customers.length > 1;
+      const data: PushData = {
+        type: "assigned", customerId: first.id, customerName: first.name,
+        title: many ? "New customers assigned" : "New customer assigned",
+        body: many ? `${group.customers.length} new customers` : first.name,
+      };
+      await Promise.all(tokens.map(async (token) => {
+        if ((await sendPush(account, token, data)) === "invalid-token") await repository.deleteToken(token);
+      }));
+    }
+  } catch {
+    // Push is best effort.
+  }
+}

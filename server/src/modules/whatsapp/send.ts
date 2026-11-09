@@ -62,7 +62,7 @@ export class WhatsAppSendFailedError extends Error {
 /** Meta keeps uploaded media for 30 days; a cached id is reused for 25. */
 const metaMediaTtlMs = 25 * 24 * 60 * 60 * 1000;
 /** Meta errors that mean the media id itself was not usable, so one fresh upload is worth trying. */
-const staleMediaErrors = new Set([100, 131052, 131053]);
+export const staleMediaErrors = new Set([100, 131052, 131053]);
 
 async function ownedAttachment(env: Env, id: string, owner: AttachmentOwner | null): Promise<Attachment> {
   const found = await createWhatsAppAttachmentRepository(env.DB).get(id);
@@ -71,7 +71,7 @@ async function ownedAttachment(env: Env, id: string, owner: AttachmentOwner | nu
 }
 
 /** Uploads the staged file to Meta, or reuses the id from an earlier send through the same number. */
-async function metaMedia(env: Env, config: WhatsAppConfig, file: Attachment, fresh: boolean): Promise<{ media: CloudMedia; cached: boolean }> {
+export async function metaMedia(env: Env, config: WhatsAppConfig, file: Attachment, fresh: boolean): Promise<{ media: CloudMedia; cached: boolean }> {
   const media = (mediaId: string): CloudMedia => ({ kind: file.kind, mediaId, fileName: file.fileName });
   if (!fresh && file.metaMediaId && file.metaPhoneNumberId === config.phoneNumberId && file.metaUploadedAt
     && Date.now() - Date.parse(file.metaUploadedAt) < metaMediaTtlMs) {
@@ -103,7 +103,7 @@ function assertSendable(file: Attachment): void {
 }
 
 /** The file for a template's media header: the caller's own choice, else the template's default from Config. */
-async function headerFile(env: Env, template: WhatsAppTemplate, overrideId: string | undefined, owner: AttachmentOwner | null): Promise<Attachment | undefined> {
+export async function headerFile(env: Env, template: WhatsAppTemplate, overrideId: string | undefined, owner: AttachmentOwner | null): Promise<Attachment | undefined> {
   const wanted = template.headerFormat.toLowerCase();
   if (!["image", "video", "document"].includes(wanted)) {
     if (overrideId) throw new HTTPException(400, { message: "Template has no media header" });

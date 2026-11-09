@@ -154,6 +154,43 @@ dd.pre { white-space: pre-wrap; }
 .choice-list:empty { display: none; }
 .choice-list .checkbox-filter { align-self: auto; width: auto; max-width: 100%; margin: 0; font-weight: 500; font-size: 13px; overflow-wrap: anywhere; }
 .choice-list .hint { margin: 4px 0; }
+dialog.bulk-dialog { width: min(780px, calc(100% - 20px)); }
+.bulk-steps { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 10px 0 14px; padding: 0; list-style: none; counter-reset: bulk; }
+.bulk-steps li { counter-increment: bulk; padding: 2px 10px; border: 1px solid var(--line); border-radius: 12px; font-size: 12px; color: var(--muted); }
+.bulk-steps li::before { content: counter(bulk) ". "; }
+.bulk-steps li[aria-current=step] { border-color: var(--accent); background: var(--accent); color: var(--wa-in); font-weight: 600; }
+.bulk-step { display: grid; gap: 10px; }
+.bulk-step h3 { margin: 0; font-size: 15px; }
+.bulk-step h3:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bulk-step fieldset { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px 10px; }
+.bulk-step legend { padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.bulk-step p, .bulk-step ol { margin: 0; }
+.bulk-file-actions { margin-top: 0; justify-content: flex-start; }
+dialog .bulk-file-actions { margin-top: 0; justify-content: flex-start; }
+.bulk-file-label { cursor: pointer; }
+.bulk-file-actions input:focus-visible + .bulk-file-label { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bulk-summary { font-size: 13px; font-weight: 600; }
+.bulk-table { max-height: min(340px, 45vh); overflow: auto; }
+.bulk-table table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 13px; }
+.bulk-table th, .bulk-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.bulk-table thead th { position: sticky; top: 0; background: var(--c-f4f8f5); font-size: 12px; }
+.bulk-table tbody tr:last-child td { border-bottom: 0; }
+.bulk-table td.bulk-bad { color: var(--c-942832); }
+.bulk-table td.bulk-good { color: var(--c-0f5a38); }
+.bulk-warning { margin: 0; font-size: 13px; border-color: var(--c-b56c11); background: var(--c-fff3d9); color: var(--c-815615); }
+.bulk-vars { display: grid; gap: 8px; }
+.bulk-var { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 4px 8px; align-items: end; }
+.bulk-var > span { grid-column: 1 / -1; font-size: 12px; font-weight: 600; color: var(--muted); }
+.bulk-var input[hidden] { display: none; }
+.bulk-header { display: grid; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.bulk-header .actions, dialog .bulk-header .actions { margin-top: 0; justify-content: flex-start; }
+.bulk-header .bulk-warn { color: var(--c-942832); }
+.bulk-bubble { padding: 8px 10px; border-radius: 8px; background: var(--wa-out); color: var(--wa-text); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bulk-bubble mark { background: var(--c-fff3a8); color: var(--c-6b4f00); border-radius: 3px; padding: 0 2px; }
+.bulk-bubble .bulk-bubble-part + .bulk-bubble-part { margin-top: 6px; }
+.bulk-bubble .bulk-bubble-footer { color: var(--wa-sub); font-size: 12px; }
+#bulk-progress { width: 100%; height: 14px; accent-color: var(--accent); }
+.bulk-sample { color: var(--muted); }
 .wa { color: var(--wa-text); }
 .wa .wa-icon-btn { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 40px; height: 40px; min-height: 40px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--wa-sub); }
 .wa .wa-icon-btn:hover { background: var(--c-0b141a14); }
@@ -457,6 +494,10 @@ button.sort .sort-mark { display: inline-block; min-width: 10px; color: var(--ac
   .player-panel .section-heading { align-items: flex-start; flex-direction: column; }
   dialog .actions button { flex: 1; }
   .field-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .bulk-var { grid-template-columns: minmax(0, 1fr); }
+  dialog.bulk-dialog { padding: 14px; }
+  .bulk-steps li { padding: 2px 8px; }
+  .bulk-file-actions .button { flex: 1 1 100%; }
   .choice-list .checkbox-filter { min-height: 42px; }
 }
 @media (max-width: 900px) {

@@ -20,6 +20,7 @@ import { defer } from "../../http/defer";
 import { notifyAssigned } from "../../push/notify";
 import { ApiError } from "../../http/errors";
 import { requireFeature } from "../../settings/gate";
+import { BULK_BODY_LIMIT, bulkCreateCustomers } from "./bulk";
 import { createWhatsAppReadRepository } from "../../data/whatsapp-reads";
 import { requireDevice, type DeviceBindings } from "../identity";
 import type { AttachmentOwner } from "../../data/whatsapp-attachments";
@@ -196,6 +197,9 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
   routes.route("/", customerReadRoutes<AppBindings>(
     () => undefined, (url) => adminListQuery.parse(queryValues(url)),
   ));
+  routes.post("/customers/bulk", bodyLimit({
+    maxSize: BULK_BODY_LIMIT, onError: () => { throw new ApiError(413, "request_too_large", "The request is too large; send fewer customers at a time"); },
+  }), bulkCreateCustomers);
   routes.post("/customers", async (context) => {
     try {
       const created = await createCustomerRepository(context.env.DB).createCustomer(

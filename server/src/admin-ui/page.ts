@@ -165,7 +165,7 @@ export const adminHtml = `<!doctype html>
     <section id="customers-panel" role="tabpanel" aria-labelledby="customers-tab" hidden>
       <div id="customers-browse">
         <section class="panel filters" aria-labelledby="customers-heading">
-          <div class="section-heading"><div><h2 id="customers-heading" tabindex="-1">Customers</h2></div><button id="customer-add" type="button">Add customer</button></div>
+          <div class="section-heading"><div><h2 id="customers-heading" tabindex="-1">Customers</h2></div><div class="actions"><button id="customer-bulk" class="secondary" type="button">Bulk add</button><button id="customer-add" type="button">Add customer</button></div></div>
           <p class="hint">Only name and phone are required. Search matches names, phone digits and email addresses as literal text. Only the employees listed as handling a customer see it in the Linekeep app.</p>
           <form id="customers-form">
             <div class="filter-grid">
@@ -458,6 +458,82 @@ export const adminHtml = `<!doctype html>
       <p id="customer-dialog-status" role="status" aria-live="polite"></p><p id="customer-dialog-error" class="error-text" role="alert" hidden></p>
       <div class="actions"><button id="cancel-customer" class="secondary" type="button">Cancel</button><button id="confirm-customer" type="submit">Add customer</button></div>
     </fieldset></form>
+  </dialog>
+  <dialog id="bulk-dialog" class="bulk-dialog" aria-labelledby="bulk-title" aria-describedby="bulk-description">
+    <h2 id="bulk-title">Bulk add customers</h2>
+    <p id="bulk-description" class="hint">Add many customers at once, assign them to employees and optionally send each new customer an intro WhatsApp message. Customers whose phone number already exists are left untouched and are never messaged.</p>
+    <ol id="bulk-steps" class="bulk-steps" aria-label="Steps">
+      <li data-step="data">Data</li><li data-step="assign">Assign</li><li data-step="intro">Intro message</li><li data-step="confirm">Confirm</li><li data-step="run">Results</li>
+    </ol>
+    <section id="bulk-step-data" class="bulk-step" aria-labelledby="bulk-data-heading">
+      <h3 id="bulk-data-heading" tabindex="-1">1. Customers</h3>
+      <label>One customer per line: name, phone, optional notes
+        <textarea id="bulk-text" rows="7" spellcheck="false" autocomplete="off" placeholder="Sample Customer, 98000 00001, Optional note"></textarea>
+      </label>
+      <p class="hint">Comma or tab separated; wrap a field in double quotes if it contains a comma. A header row (name, phone, notes) is optional. A 10-digit phone number is saved as an Indian (+91) number; include the country code for any other country. Up to 2000 customers at a time.</p>
+      <div class="actions bulk-file-actions">
+        <input id="bulk-file" class="sr-only" type="file" accept=".csv,text/csv,text/plain">
+        <label class="button secondary bulk-file-label" for="bulk-file">Choose a .csv file</label>
+        <a id="bulk-template-link" class="button secondary" download="linekeep-customers-template.csv" href="data:text/csv;charset=utf-8,name%2Cphone%2Cnotes%0ASample%20Customer%2C98000%2000001%2COptional%20note%0A">Download CSV template</a>
+      </div>
+      <p class="hint">The file is read in this browser; it is not uploaded.</p>
+      <p id="bulk-summary" class="bulk-summary" role="status" aria-live="polite" aria-atomic="true"></p>
+      <label class="checkbox-filter"><input id="bulk-problems-only" type="checkbox">Show only rows with problems</label>
+      <div id="bulk-preview" class="table-wrap bulk-table" role="region" aria-label="Preview of the rows" tabindex="0" hidden></div>
+    </section>
+    <section id="bulk-step-assign" class="bulk-step" aria-labelledby="bulk-assign-heading" hidden>
+      <h3 id="bulk-assign-heading" tabindex="-1">2. Assign to employees</h3>
+      <fieldset class="choice-group"><legend>Who handles the new customers?</legend>
+        <label class="checkbox-filter"><input type="radio" name="bulk-mode" value="none" checked>Nobody (leave unassigned)</label>
+        <label class="checkbox-filter"><input type="radio" name="bulk-mode" value="one">One employee</label>
+        <label id="bulk-one-field" hidden>Employee<select id="bulk-one-employee"></select></label>
+        <label class="checkbox-filter"><input type="radio" name="bulk-mode" value="split">Split evenly across employees (round-robin)</label>
+        <div id="bulk-split-field" hidden>
+          <p class="hint">Customers are dealt out in order, one employee after another. Only active employees are listed.</p>
+          <div id="bulk-split-choices" class="choice-list"></div>
+        </div>
+      </fieldset>
+      <p id="bulk-assign-note" class="hint"></p>
+    </section>
+    <section id="bulk-step-intro" class="bulk-step" aria-labelledby="bulk-intro-heading" hidden>
+      <h3 id="bulk-intro-heading" tabindex="-1">3. Intro message</h3>
+      <label class="checkbox-filter"><input id="bulk-intro-on" type="checkbox">Send an intro WhatsApp message to new customers</label>
+      <div id="bulk-intro-body" hidden>
+        <p class="notice bulk-warning">WhatsApp limits how many new people a business can message per day, and Meta bills template messages per conversation. Only customers added now are messaged; existing ones never are.</p>
+        <label>Template<select id="bulk-template"></select></label>
+        <p id="bulk-template-status" class="hint" role="status" aria-live="polite"></p>
+        <p id="bulk-template-error" class="error-text" role="alert" hidden></p>
+        <button id="bulk-template-reload" class="secondary" type="button" hidden>Try again</button>
+        <div id="bulk-vars" class="bulk-vars"></div>
+        <p id="bulk-handler-note" class="hint" hidden>Handler variables need an employee for each customer. Go back and choose One employee or Split evenly to use them.</p>
+        <div id="bulk-header-box" class="bulk-header" hidden></div>
+        <input id="bulk-header-file" class="sr-only" type="file" tabindex="-1" aria-hidden="true">
+        <div class="bulk-preview-box"><h4 class="drawer-label">Preview with the first customer</h4><div id="bulk-intro-preview" class="bulk-bubble"></div></div>
+      </div>
+    </section>
+    <section id="bulk-step-confirm" class="bulk-step" aria-labelledby="bulk-confirm-heading" hidden>
+      <h3 id="bulk-confirm-heading" tabindex="-1">4. Confirm</h3>
+      <dl id="bulk-confirm-facts" class="device-facts"></dl>
+      <p class="hint">Customers are sent 25 at a time. If a request is interrupted you can retry it: customers that were already saved show as "Already exists" and are not messaged again.</p>
+    </section>
+    <section id="bulk-step-run" class="bulk-step" aria-labelledby="bulk-run-heading" hidden>
+      <h3 id="bulk-run-heading" tabindex="-1">Adding customers</h3>
+      <progress id="bulk-progress" max="1" value="0" aria-labelledby="bulk-run-heading"></progress>
+      <p id="bulk-run-status" role="status" aria-live="polite" aria-atomic="true"></p>
+      <div id="bulk-run-failure" class="notice error" hidden>
+        <p id="bulk-run-failure-text" role="alert"></p>
+        <div class="actions"><button id="bulk-retry" type="button">Retry this batch</button><button id="bulk-give-up" class="secondary" type="button">Stop here</button></div>
+      </div>
+      <div id="bulk-results" class="table-wrap bulk-table" role="region" aria-label="Results" tabindex="0" hidden></div>
+    </section>
+    <p id="bulk-error" class="error-text" role="alert" hidden></p>
+    <div class="actions">
+      <button id="bulk-cancel" class="secondary" type="button">Cancel</button>
+      <button id="bulk-stop" class="secondary" type="button" hidden>Stop after this batch</button>
+      <button id="bulk-download" class="secondary" type="button" hidden>Download results CSV</button>
+      <button id="bulk-back" class="secondary" type="button" hidden>Back</button>
+      <button id="bulk-next" type="button">Next</button>
+    </div>
   </dialog>
   <dialog id="handlers-dialog" aria-labelledby="handlers-title" aria-describedby="handlers-description">
     <h2 id="handlers-title">Handled by</h2>
