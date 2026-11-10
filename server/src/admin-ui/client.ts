@@ -2101,13 +2101,111 @@ export const clientJavaScript = String.raw`(() => {
     headNameButton.type = 'button';
     headName.append(headNameButton);
     const headSub = element('p', undefined, 'wa-head-sub');
+    const headPhone = element('span');
+    const handlerBtn = element('button', undefined, 'wa-handler-btn');
+    handlerBtn.type = 'button';
+    handlerBtn.setAttribute('aria-haspopup', 'true');
+    handlerBtn.setAttribute('aria-expanded', 'false');
+    headSub.append(headPhone, document.createTextNode(' · '), handlerBtn);
+    const handlerPanel = element('div', undefined, 'wa-handler-panel');
+    handlerPanel.hidden = true;
+    handlerPanel.setAttribute('role', 'group');
+    handlerPanel.setAttribute('aria-label', 'Choose who handles this customer');
+    const handlerChoices = element('div', undefined, 'wa-handler-choices');
+    const handlerError = element('p', undefined, 'wa-handler-error');
+    handlerError.setAttribute('role', 'alert');
+    handlerError.hidden = true;
+    const handlerSave = element('button', 'Save', 'wa-text-btn wa-handler-save');
+    handlerSave.type = 'button';
+    const handlerCancel = element('button', 'Cancel', 'wa-text-btn');
+    handlerCancel.type = 'button';
+    const handlerActions = element('div', undefined, 'wa-handler-actions');
+    handlerActions.append(handlerCancel, handlerSave);
+    handlerPanel.append(element('p', 'Handled by', 'wa-handler-title'), handlerChoices, handlerError, handlerActions);
+    let handlerList = [];
+    let handlerSaving = false;
     const back = waIconButton('back', 'Back to chats', 'wa-back');
     const openCustomer = element('button', 'View customer', 'wa-text-btn wa-open-customer');
     openCustomer.type = 'button';
     const head = element('header', undefined, 'wa-conv-head');
     const headText = element('div', undefined, 'wa-head-text');
     headText.append(headName, headSub);
-    head.append(back, headAvatar, headText, openCustomer);
+    head.append(back, headAvatar, headText, openCustomer, handlerPanel);
+    function renderHandlerButton() {
+      handlerBtn.textContent = (handlerList.length ? 'Handled by ' + handlerNames(handlerList) : 'Unassigned (assign)') + ' ▾';
+    }
+    function closeHandlerPanel(focusButton) {
+      if (handlerPanel.hidden) return;
+      handlerPanel.hidden = true;
+      handlerBtn.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('pointerdown', onHandlerOutside, true);
+      if (focusButton) handlerBtn.focus();
+    }
+    function onHandlerOutside(event) {
+      if (!handlerPanel.contains(event.target) && event.target !== handlerBtn) closeHandlerPanel(false);
+    }
+    async function openHandlerPanel() {
+      if (!customer) return;
+      const target = customer;
+      handlerError.hidden = true;
+      handlerPanel.hidden = false;
+      handlerBtn.setAttribute('aria-expanded', 'true');
+      document.addEventListener('pointerdown', onHandlerOutside, true);
+      handlerSave.disabled = true;
+      handlerChoices.replaceChildren(element('p', 'Loading employees…', 'hint'));
+      if (!directoryReady) await loadDirectory();
+      if (handlerPanel.hidden || customer !== target) return;
+      if (!directoryReady) {
+        handlerChoices.replaceChildren();
+        handlerError.textContent = 'Employee choices could not be loaded. Close and try again.';
+        handlerError.hidden = false;
+        return;
+      }
+      const chosen = new Set(handlerList.map((employee) => employee.id));
+      const active = Array.from(employees.values()).filter((employee) => employee.active);
+      handlerChoices.replaceChildren(...(active.length ? active.map((employee) => {
+        const label = element('label', undefined, 'checkbox-filter');
+        const box = element('input');
+        box.type = 'checkbox';
+        box.value = employee.id;
+        box.checked = chosen.has(employee.id);
+        label.append(box, element('span', employee.name));
+        return label;
+      }) : [element('p', 'No active employees exist yet. Create one in the Employees tab.', 'hint')]));
+      handlerSave.disabled = false;
+      const first = handlerChoices.querySelector('input');
+      if (first) first.focus();
+    }
+    handlerBtn.addEventListener('click', () => { if (handlerPanel.hidden) openHandlerPanel(); else closeHandlerPanel(true); });
+    handlerCancel.addEventListener('click', () => closeHandlerPanel(true));
+    handlerPanel.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeHandlerPanel(true); } });
+    handlerSave.addEventListener('click', async () => {
+      if (!customer || handlerSaving || handlerSave.disabled) return;
+      const target = customer;
+      const employeeIds = selectedEmployeeIds(handlerChoices);
+      handlerError.hidden = true;
+      handlerSaving = true;
+      handlerSave.disabled = true;
+      handlerSave.textContent = 'Saving…';
+      try {
+        const data = await api('/customers/' + encodeURIComponent(target.id) + '/employees', { method: 'PUT', body: JSON.stringify({ employeeIds }) });
+        const saved = readCustomer(data && data.customer);
+        applyCustomerUpdate(saved);
+        if (customer === target) {
+          handlerList = saved.employees;
+          renderHandlerButton();
+          closeHandlerPanel(true);
+        }
+        if (options.onHandlersChanged) options.onHandlersChanged(saved);
+      } catch (failure) {
+        handlerError.textContent = errorMessage(failure);
+        handlerError.hidden = false;
+      } finally {
+        handlerSaving = false;
+        handlerSave.disabled = false;
+        handlerSave.textContent = 'Save';
+      }
+    });
 
     const loadStatus = element('p', undefined, 'wa-status');
     loadStatus.setAttribute('role', 'status');
@@ -2729,7 +2827,12 @@ export const clientJavaScript = String.raw`(() => {
     headNameButton.addEventListener('click', (event) => { if (options.onOpenCustomer) options.onOpenCustomer(event.currentTarget); });
     const conversation = {
       controls,
-      open(target, subtitle) {
+      setHandlers(list) {
+        handlerList = Array.isArray(list) ? list : [];
+        renderHandlerButton();
+      },
+      open(target) {
+        closeHandlerPanel(false);
         customer = target;
         openToken++;
         markedKey = null;
@@ -2745,7 +2848,9 @@ export const clientJavaScript = String.raw`(() => {
         closeQuick(false);
         headAvatar.replaceChildren(waAvatar(target.name, target.id));
         headNameButton.textContent = target.name;
-        headSub.textContent = subtitle || target.phone;
+        headPhone.textContent = target.phone;
+        handlerList = [];
+        renderHandlerButton();
         load('reset');
       },
       close() {
@@ -4012,6 +4117,7 @@ export const clientJavaScript = String.raw`(() => {
     },
     onOpenCustomer: (opener) => { if (selectedChat) openDrawer(selectedChat, opener); },
     onSent: () => chatList.load(true),
+    onHandlersChanged: () => chatList.load(true),
     isDisplayed: () => activeTab === 'whatsapp' && Boolean(selectedChat) && !byId('chat-conversation').hidden && (!window.matchMedia('(max-width: 720px)').matches || chatLayout.dataset.view === 'thread')
   });
   function loadSendState() {
@@ -4023,7 +4129,8 @@ export const clientJavaScript = String.raw`(() => {
     chatLayout.dataset.view = 'thread';
     byId('chat-thread-empty').hidden = true;
     byId('chat-conversation').hidden = false;
-    chatConversation.open(chat.customer, chat.customer.phone + ' · ' + (chat.employees.length ? 'Handled by ' + handlerNames(chat.employees) : 'Unassigned'));
+    chatConversation.open(chat.customer);
+    chatConversation.setHandlers(chat.employees);
     if (window.matchMedia('(max-width: 720px)').matches) chatConversation.focusHeading();
   }
   whatsappForm.addEventListener('submit', (event) => { event.preventDefault(); clearTimeout(chatSearchTimer); chatList.load(true); });

@@ -248,6 +248,15 @@ dialog .bulk-file-actions { margin-top: 0; justify-content: flex-start; }
 .wa-head-avatar .wa-avatar { width: 40px; height: 40px; font-size: 15px; }
 .wa-head-text { flex: 1; min-width: 0; }
 .wa-head-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 500; }
+.wa-conv-head { position: relative; }
+.wa-head-sub .wa-handler-btn { min-height: 0; padding: 0 2px; border: 0; border-radius: 3px; background: transparent; color: var(--accent, #103F3A); font: inherit; font-weight: 500; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.wa-head-sub .wa-handler-btn:hover, .wa-head-sub .wa-handler-btn[aria-expanded="true"] { background: transparent; color: var(--accent, #103F3A); text-decoration-style: solid; }
+.wa-head-sub .wa-handler-btn:focus-visible { outline: 2px solid var(--accent, #103F3A); outline-offset: 2px; background: transparent; }
+.wa-handler-panel { position: absolute; z-index: 20; top: 100%; left: 56px; width: min(320px, calc(100% - 72px)); max-height: 60vh; overflow: auto; padding: 12px; border: 1px solid var(--border, #d9e0d6); border-radius: 10px; background: #fff; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14); }
+.wa-handler-title { margin: 0 0 8px; font-weight: 600; font-size: 14px; }
+.wa-handler-choices { display: grid; gap: 4px; }
+.wa-handler-error { margin: 8px 0 0; color: var(--error, #a02020); font-size: 13px; }
+.wa-handler-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .wa-head-sub { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wa-sub); font-size: 13px; }
 .wa .wa-back { display: none; margin-left: -8px; }
 .wa-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 6% 8px; background: var(--wa-bg); }
