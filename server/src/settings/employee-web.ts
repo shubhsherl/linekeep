@@ -27,6 +27,10 @@ export const whatsappTemplateSetting = z.strictObject({
   })).max(30),
   /** Authentication templates: also send the code as the button parameter. */
   buttonParam: z.boolean().optional(),
+  /** Send `sentence` (with `{{code}}` replaced) to the code's variable instead of the bare code. */
+  sentenceEnabled: z.boolean().optional(),
+  /** Validated and trimmed by the settings route; only meaningful when `sentenceEnabled`. */
+  sentence: z.string().max(2000).optional(),
 });
 export type WhatsAppTemplateSetting = z.infer<typeof whatsappTemplateSetting>;
 

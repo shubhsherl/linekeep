@@ -44,6 +44,29 @@ export function templateProblem(template: WhatsAppTemplate | undefined, setting:
   return null;
 }
 
+/** Longest sentence for the code's variable. */
+export const SENTENCE_MAX_LENGTH = 200;
+
+/** Why a (trimmed) sentence cannot go into a template variable, or null. Meta rejects line breaks, tabs and long runs of spaces there. */
+export function sentenceProblem(sentence: string): string | null {
+  if (!sentence) return "The sentence is empty; write a sentence that contains {{code}} where the 6-digit code goes";
+  if (sentence.length > SENTENCE_MAX_LENGTH) return `The sentence is ${sentence.length} characters; keep it to ${SENTENCE_MAX_LENGTH} or fewer`;
+  if (/[\r\n\t]/.test(sentence)) return "WhatsApp does not allow line breaks or tabs inside a template variable; write the sentence on one line";
+  if (/ {4,}/.test(sentence)) return "WhatsApp does not allow four or more spaces in a row inside a template variable";
+  if (!sentence.includes("{{code}}")) return "The sentence must contain {{code}} where the 6-digit code goes";
+  return null;
+}
+
+/** The template setting as stored: the sentence is trimmed and checked when on, and dropped when off. */
+export function normalisedTemplate(setting: WhatsAppTemplateSetting): WhatsAppTemplateSetting {
+  const { sentence: typed, sentenceEnabled, ...rest } = setting;
+  if (sentenceEnabled !== true) return { ...rest, sentenceEnabled: false };
+  const sentence = (typed ?? "").trim();
+  const problem = sentenceProblem(sentence);
+  if (problem) throw new ApiError(400, "invalid_sentence", problem);
+  return { ...rest, sentenceEnabled: true, sentence };
+}
+
 /** Turns a validated employee-web update into stored changes. Throws a 400 naming what is missing. */
 export async function employeeWebChanges(env: Env, snapshot: SettingsSnapshot, input: EmployeeWebInput): Promise<SettingChange[]> {
   const changes: SettingChange[] = [];
@@ -57,7 +80,7 @@ export async function employeeWebChanges(env: Env, snapshot: SettingsSnapshot, i
   }
   const templateChanged = Object.hasOwn(input, "whatsappTemplate");
   if (templateChanged) {
-    const value = input.whatsappTemplate ?? null;
+    const value = input.whatsappTemplate ? normalisedTemplate(input.whatsappTemplate) : null;
     changes.push({ key: employeeWebKeys.whatsappTemplate, value: value === null ? null : JSON.stringify(value) });
     next.whatsappTemplate = value;
   }

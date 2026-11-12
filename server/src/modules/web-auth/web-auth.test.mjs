@@ -25,6 +25,10 @@ const templates = [
     { type: "BUTTONS", buttons: [{ type: "OTP", otp_type: "COPY_CODE", text: "Copy code" }] }] },
   { name: "with_image", language: "en_US", status: "APPROVED", category: "MARKETING", components: [
     { type: "HEADER", format: "IMAGE" }, { type: "BODY", text: "Look at {{1}}" }] },
+  { name: "greeting_code", language: "en_US", status: "APPROVED", category: "MARKETING", components: [
+    { type: "HEADER", format: "TEXT", text: "Greetings from Elder marketing" },
+    { type: "BODY", text: "Hello, {{1}} Thank you", example: { body_text: [["123456"]] } },
+    { type: "FOOTER", text: "Please send STOP to unsubscribe." }] },
   { name: "no_variable", language: "en_US", status: "APPROVED", category: "UTILITY", components: [{ type: "BODY", text: "Hello" }] },
 ];
 
@@ -241,7 +245,7 @@ test("WhatsApp sign-in settings accept only templates that can carry a code", as
   assert.equal(normal.status, 200);
   const view = (await normal.json()).settings.employeeWeb;
   assert.deepEqual(view.methods, ["email", "whatsapp"]);
-  assert.deepEqual(view.whatsappTemplate, good);
+  assert.deepEqual(view.whatsappTemplate, { ...good, sentenceEnabled: false });
   const auth = await f.saveWeb({ whatsappTemplate: { name: "auth_code", language: "en_US", otpParam: 1, otherParams: [], buttonParam: true } });
   assert.equal(auth.status, 200);
   // The picker's template list marks which templates can carry a code, and never offers an authentication template for chat.
@@ -932,4 +936,72 @@ test("chat attachments and sends stay within the employee's own customers and fi
   assert.ok(list.some((item) => item.name === "login_code"));
   assert.equal((await f.web("/v1/web/whatsapp/templates", { session: bob })).status, 200);
   assert.equal((await f.web("/v1/web/whatsapp/templates")).status, 401);
+});
+
+test("a full sentence can replace the bare code in the code's variable", async (t) => {
+  const f = await fixture(t);
+  await f.createEmployee("Alice Synthetic", { email: "alice@example.test", phoneNumber: "+919800000001" });
+  const base = { name: "greeting_code", language: "en_US", otpParam: 1, otherParams: [] };
+  const save = (extra) => f.saveWeb({ whatsappOtp: true, whatsappTemplate: { ...base, ...extra } });
+  const bodyText = () => f.sends.at(-1).body.template.components.find((item) => item.type === "body").parameters[0].text;
+  const askPhone = async (ip) => { await f.resetCooldown(); return f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone: "9800000001" }, ip }); };
+  const sentence = "Your Linekeep sign-in code is {{code}}. It is valid for 10 minutes. Do not share it with anyone.";
+
+  // Validation: a clear reason for each way Meta would refuse the variable.
+  for (const [extra, pattern] of [
+    [{ sentenceEnabled: true }, /sentence is empty/],
+    [{ sentenceEnabled: true, sentence: "  \n " }, /sentence is empty/],
+    [{ sentenceEnabled: true, sentence: "Your code is ready" }, /must contain \{\{code\}\}/],
+    [{ sentenceEnabled: true, sentence: "Code {{code}}\nsecond line" }, /line breaks or tabs/],
+    [{ sentenceEnabled: true, sentence: "Code\t{{code}}" }, /line breaks or tabs/],
+    [{ sentenceEnabled: true, sentence: "Code    {{code}}" }, /four or more spaces/],
+    [{ sentenceEnabled: true, sentence: `${"x".repeat(200)} {{code}}` }, /characters; keep it to 200/],
+  ]) {
+    const refused = await save(extra);
+    assert.equal(refused.status, 400, JSON.stringify(extra));
+    const { error } = await refused.json();
+    assert.equal(error.code, "invalid_sentence");
+    assert.match(error.message, pattern);
+  }
+  assert.equal((await f.DB.prepare("SELECT count(*) AS n FROM app_settings WHERE key = 'employeeWeb.whatsappTemplate'").first()).n, 0, "nothing was stored");
+
+  // The sentence is trimmed and stored, and returned by GET (it is not secret).
+  const saved = await save({ sentenceEnabled: true, sentence: `\n  ${sentence} \n` });
+  assert.equal(saved.status, 200);
+  const stored = (await saved.json()).settings.employeeWeb.whatsappTemplate;
+  assert.deepEqual([stored.sentenceEnabled, stored.sentence], [true, sentence]);
+  assert.equal((await askPhone("198.51.100.1")).status, 202);
+  const sent = bodyText();
+  assert.match(sent, /^Your Linekeep sign-in code is \d{6}\. It is valid for 10 minutes\. Do not share it with anyone\.$/);
+  const code = sent.match(/\d{6}/)[0];
+  assert.equal(sent, sentence.replace("{{code}}", code));
+  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "whatsapp", phone: "9800000001", code } })).status, 200);
+
+  // The code is never logged, stored or returned by the settings.
+  const settingsText = JSON.stringify((await (await f.admin("GET", "/v1/admin/settings")).json()).settings.employeeWeb);
+  assert.ok(!settingsText.includes(code));
+  assert.ok(!f.logs.join("\n").includes(code));
+  assert.ok(!JSON.stringify((await f.DB.prepare("SELECT * FROM app_settings").all()).results).includes(code));
+  assert.ok(!JSON.stringify((await f.DB.prepare("SELECT * FROM web_login_codes").all()).results).includes(code));
+
+  // Every {{code}} is replaced.
+  assert.equal((await save({ sentenceEnabled: true, sentence: "{{code}} is your code ({{code}})" })).status, 200);
+  assert.equal((await askPhone("198.51.100.2")).status, 202);
+  assert.match(bodyText(), /^(\d{6}) is your code \(\1\)$/);
+
+  // Off: the bare code, and a leftover sentence is not kept.
+  const off = await save({ sentenceEnabled: false, sentence: "ignored {{code}}" });
+  assert.equal(off.status, 200);
+  const offView = (await off.json()).settings.employeeWeb.whatsappTemplate;
+  assert.deepEqual([offView.sentenceEnabled, offView.sentence], [false, undefined]);
+  assert.equal((await askPhone("198.51.100.3")).status, 202);
+  assert.match(bodyText(), /^\d{6}$/);
+
+  // An authentication template gets the sentence in the body and still the bare code on its button.
+  assert.equal((await f.saveWeb({ whatsappTemplate: { name: "auth_code", language: "en_US", otpParam: 1, otherParams: [], buttonParam: true, sentenceEnabled: true, sentence: "Use {{code}} to sign in" } })).status, 200);
+  assert.equal((await askPhone("198.51.100.4")).status, 202);
+  const auth = f.sends.at(-1).body.template.components;
+  const button = auth.find((item) => item.type === "button").parameters[0].text;
+  assert.match(button, /^\d{6}$/);
+  assert.equal(auth.find((item) => item.type === "body").parameters[0].text, `Use ${button} to sign in`);
 });

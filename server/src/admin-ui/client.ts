@@ -6756,15 +6756,31 @@ export const clientJavaScript = String.raw`(() => {
     }
     webTemplates.loaded = true;
   }
-  function webPreview(template, otpParam, others) {
+  const WEB_SENTENCE_DEFAULT = 'Your Linekeep sign-in code is {{code}}. It is valid for 10 minutes. Do not share it with anyone.';
+  const WEB_SAMPLE_CODE = '123456';
+  function webSentenceProblem(sentence) {
+    const text = sentence.trim();
+    if (!text) return 'Write a sentence that contains {{code}} where the 6-digit code goes.';
+    if (text.length > 200) return 'The sentence has ' + text.length + ' characters; keep it to 200 or fewer.';
+    if (/ {4,}/.test(text)) return 'WhatsApp does not allow four or more spaces in a row inside a template variable.';
+    if (!text.includes('{{code}}')) return 'The sentence must contain {{code}} where the 6-digit code goes.';
+    return '';
+  }
+  // The text the code's variable gets, with the sample code in place of the real one.
+  function webOtpText(choice) {
+    return choice.sentenceEnabled && choice.sentence.trim() ? choice.sentence.trim().split('{{code}}').join(WEB_SAMPLE_CODE) : WEB_SAMPLE_CODE;
+  }
+  function webFill(text, template, choice) {
     const values = new Map();
     template.variables.forEach((variable, index) => {
-      if (index + 1 === otpParam) { values.set(variable.key, '123456'); return; }
-      const other = others[index + 1] || {};
+      if (index + 1 === choice.otpParam) { values.set(variable.key, webOtpText(choice)); return; }
+      const other = choice.others[index + 1] || {};
       values.set(variable.key, other.source === 'custom' ? (other.value || '…') : 'Employee name');
     });
-    return [template.header, template.body, template.footer].filter(Boolean).join('\n')
-      .replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (all, key) => values.has(key) ? values.get(key) : all);
+    return text.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (all, key) => values.has(key) ? values.get(key) : all);
+  }
+  function webPreview(template, choice) {
+    return webFill([template.header, template.body, template.footer].filter(Boolean).join('\n'), template, choice);
   }
   function checklist(items) {
     const list = element('ul', undefined, 'cfg-checklist');
@@ -6811,7 +6827,7 @@ export const clientJavaScript = String.raw`(() => {
     ]));
 
     const saved = current.whatsappTemplate;
-    const choice = { name: saved ? saved.name : '', language: saved ? saved.language : '', otpParam: saved ? saved.otpParam : 1, buttonParam: saved ? saved.buttonParam === true : false, others: {} };
+    const choice = { name: saved ? saved.name : '', language: saved ? saved.language : '', otpParam: saved ? saved.otpParam : 1, buttonParam: saved ? saved.buttonParam === true : false, sentenceEnabled: saved ? saved.sentenceEnabled === true : false, sentence: saved && typeof saved.sentence === 'string' ? saved.sentence : '', others: {} };
     if (saved) for (const item of saved.otherParams || []) choice.others[item.index] = { source: item.source, value: item.value || '' };
     const templateBox = element('div');
     const whatsappChecks = element('div');
@@ -6859,6 +6875,23 @@ export const clientJavaScript = String.raw`(() => {
       const codeVar = selectField(ui, 'otpParam', 'Variable that receives the code', String(choice.otpParam), names);
       codeVar.input.addEventListener('change', () => { choice.otpParam = Number(codeVar.input.value); delete choice.others[choice.otpParam]; drawTemplate(); });
       templateBox.append(codeVar.node);
+      const sentenceSwitch = switchField(ui, 'sentenceEnabled', 'Send a full sentence instead of just the code', choice.sentenceEnabled);
+      const sentenceField = textField(ui, 'sentence', 'Sentence for {{' + template.variables[choice.otpParam - 1].key + '}}', choice.sentence, { hint: '{{code}} is replaced by the 6-digit code. Line breaks are not allowed in a template variable. Without a sentence the variable gets only the code.' });
+      sentenceField.input.maxLength = 200;
+      const sentenceError = element('p', undefined, 'error-text');
+      sentenceError.hidden = true;
+      function syncSentence() {
+        sentenceField.node.hidden = !choice.sentenceEnabled;
+        note(sentenceError, choice.sentenceEnabled ? webSentenceProblem(choice.sentence) : '');
+      }
+      sentenceSwitch.input.addEventListener('change', () => {
+        choice.sentenceEnabled = sentenceSwitch.input.checked;
+        if (choice.sentenceEnabled && !choice.sentence.trim()) { choice.sentence = WEB_SENTENCE_DEFAULT; sentenceField.input.value = WEB_SENTENCE_DEFAULT; }
+        syncSentence();
+        refreshPreview();
+      });
+      sentenceField.input.addEventListener('input', () => { choice.sentence = sentenceField.input.value; syncSentence(); refreshPreview(); });
+      templateBox.append(sentenceSwitch.node, sentenceField.node, sentenceError);
       template.variables.forEach((variable, index) => {
         const position = index + 1;
         if (position === choice.otpParam) return;
@@ -6877,9 +6910,16 @@ export const clientJavaScript = String.raw`(() => {
       if (authentication) templateBox.append(element('p', 'This is an authentication template: the code is also sent to its copy-code button.', 'hint'));
       const preview = element('pre', undefined, 'cfg-preview');
       preview.setAttribute('aria-label', 'Preview with a sample code');
-      function refreshPreview() { preview.textContent = webPreview(template, choice.otpParam, choice.others); }
+      const lengthWarning = element('p', undefined, 'notice');
+      lengthWarning.hidden = true;
+      function refreshPreview() {
+        preview.textContent = webPreview(template, choice);
+        const bodyLength = webFill(template.body, template, choice).length;
+        note(lengthWarning, bodyLength > 1024 ? 'The message body would be ' + bodyLength + ' characters, but WhatsApp allows at most 1024. Shorten the sentence.' : '');
+      }
+      syncSentence();
       refreshPreview();
-      templateBox.append(element('p', 'Preview (sample code 123456)', 'cfg-fixed-label'), preview);
+      templateBox.append(element('p', 'Preview of the WhatsApp message (sample code ' + WEB_SAMPLE_CODE + ')', 'cfg-fixed-label'), preview, lengthWarning);
     }
     emailOtp.input.addEventListener('change', updateMaster);
     whatsappOtp.input.addEventListener('change', drawTemplate);
@@ -6894,7 +6934,11 @@ export const clientJavaScript = String.raw`(() => {
         if (!choice.name) throw new Error('Choose a WhatsApp template first, or switch WhatsApp code off.');
         const others = Object.entries(choice.others).map(([index, item]) => ({ index: Number(index), source: item.source, ...(item.source === 'custom' ? { value: item.value } : {}) }))
           .filter((item) => item.index !== choice.otpParam);
-        body.whatsappTemplate = { name: choice.name, language: choice.language, otpParam: choice.otpParam, otherParams: others, buttonParam: choice.buttonParam === true };
+        if (choice.sentenceEnabled) {
+          const problem = webSentenceProblem(choice.sentence);
+          if (problem) throw new Error(problem);
+        }
+        body.whatsappTemplate = { name: choice.name, language: choice.language, otpParam: choice.otpParam, otherParams: others, buttonParam: choice.buttonParam === true, sentenceEnabled: choice.sentenceEnabled === true, ...(choice.sentenceEnabled ? { sentence: choice.sentence.trim() } : {}) };
       }
       await putSettings('employeeWeb', body);
       loadFeatures();

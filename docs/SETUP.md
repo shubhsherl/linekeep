@@ -174,6 +174,8 @@ You do not have to build or send the APK yourself. The server stores no APK; it 
 
 Employees can also use Linekeep on a computer at `https://<worker>/app`, signed in with a one-time code. In the admin: set each employee's **email** (for email codes) and **phone number** (for WhatsApp codes; the code is sent only to the number you stored, and two active employees cannot share a number) under **Employees**, open **Config → Employee web access**, turn on **Email code** and/or **WhatsApp code** (each shows what it still needs; email needs the Mailgun settings from **Daily email report**, no recipients required), then switch on **Allow employees to sign in on the web**, which stays off until at least one method is ready, and share the link. `/app*` and `/v1/web*` must stay **outside** Cloudflare Access: the Access application's destinations remain exactly `/admin*` and `/v1/admin*`. Employees see only their own customers, chats and calls, exactly like the Android app.
 
+For WhatsApp codes you can tick **Send a full sentence instead of just the code** under the chosen variable (for example "Your Linekeep sign-in code is {{code}}. It is valid for 10 minutes. Do not share it with anyone."); the preview shows the whole message with a sample code.
+
 ## 6. Enroll a phone
 
 1. Open Linekeep and tap **Scan QR code** on Home, then scan the QR code from the admin. Confirm the server name shown.

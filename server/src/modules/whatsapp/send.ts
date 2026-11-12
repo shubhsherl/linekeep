@@ -208,8 +208,10 @@ export interface OtpTemplateSend {
   otpParam: number;
   /** Values of the other body variables by 1-based position. */
   otherParams: ReadonlyMap<number, string>;
-  /** Authentication templates: send the code as the copy-code / URL button parameter too. */
+  /** Authentication templates: send the bare code as the copy-code / URL button parameter too. */
   buttonParam: boolean;
+  /** A full sentence for the code's variable; `{{code}}` is replaced by the code. Without it the variable gets the bare code. */
+  sentence?: string;
 }
 
 /**
@@ -230,7 +232,7 @@ export async function sendOtpTemplate(env: Env, to: string, send: OtpTemplateSen
     throw new WhatsAppSendFailedError(false);
   }
   const params = template.variables.map((variable, index) => {
-    const value = index + 1 === send.otpParam ? code : send.otherParams.get(index + 1);
+    const value = index + 1 === send.otpParam ? (send.sentence ? send.sentence.replaceAll("{{code}}", code) : code) : send.otherParams.get(index + 1);
     if (value === undefined) throw new WhatsAppSendFailedError(false);
     return { key: variable.key, named: template.named, value };
   });

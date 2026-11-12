@@ -43,6 +43,7 @@ export async function deliverWhatsAppCode(env: Env, employee: SignInEmployee, se
     await sendOtpTemplate(env, employee.phoneNumber, {
       name: template.name, language: template.language, otpParam: template.otpParam, otherParams: others,
       buttonParam: template.buttonParam === true,
+      ...(template.sentenceEnabled && template.sentence ? { sentence: template.sentence } : {}),
     }, code);
     logOutcome("whatsapp", null);
   } catch (error) {
