@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordActivity, requestActor } from "../../activity/record";
+import { callTarget } from "../../activity/targets";
 import { callPhoneKey, createCustomerRepository } from "../../data/customers";
 import { createEmployeeCallRepository } from "../../data/employee-calls";
 import { requireFeature } from "../../settings/gate";
@@ -54,6 +56,12 @@ export function createWebCallRoutes() {
     const audioUrl = new URL(context.req.url);
     audioUrl.pathname = `${audioUrl.pathname}/audio`;
     const { url, expiresAt } = await playbackCapability(context.env.TOKEN_HASH_SECRET, recording.objectKey, audioUrl);
+    const logId = callId.parse(context.req.param("callId"));
+    const entry = await context.env.DB.prepare("SELECT remote_number FROM call_logs WHERE id = ?").bind(logId).first<{ remote_number: string | null }>();
+    await recordActivity(context, {
+      ...requestActor(context), category: "call", action: "recording_played",
+      target: await callTarget(context.env.DB, logId, entry?.remote_number), details: { callId: logId },
+    });
     return context.json({ requestId: context.get("requestId"), url, expiresAt, contentType: recording.contentType });
   });
 

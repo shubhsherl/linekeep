@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 
+import { recordActivity, requestSecurity } from "../../activity/record";
 import { normalizePhone } from "../../data/customers";
 import { normalizeEmail } from "../../data/identity";
 import { isLocalDevelopment } from "../../http/admin-auth";
@@ -117,10 +118,21 @@ export function createWebRoutes() {
       `ip:${await keys.mac("ip", context.req.header("CF-Connecting-IP") ?? "unknown")}`, LOGIN_REQUESTS_PER_IP_PER_HOUR,
     );
     if (!ipVerdict.allowed) throw rateLimited(ipVerdict);
+    // Only a request for a real employee is logged; the lookup happens for every refused identifier, so it tells nothing.
+    const refuse = async (limit: "cooldown" | "hourly", verdict: { retryAfterSeconds: number }): Promise<never> => {
+      const known = await repository.findEmployee(resolved.identifier);
+      if (known) {
+        await recordActivity(context, {
+          actor: { type: "employee", id: known.id, name: known.name }, channel: "web", category: "signin", action: "rate_limited",
+          details: { method: input.method, limit }, security: requestSecurity(context),
+        });
+      }
+      throw rateLimited(verdict);
+    };
     const wait = await repository.cooldownSeconds(counter);
-    if (wait > 0) throw rateLimited({ retryAfterSeconds: wait });
+    if (wait > 0) return refuse("cooldown", { retryAfterSeconds: wait });
     const verdict = await repository.hit(counter, LOGIN_REQUESTS_PER_IDENTIFIER_PER_HOUR);
-    if (!verdict.allowed) throw rateLimited(verdict);
+    if (!verdict.allowed) return refuse("hourly", verdict);
 
     const employee = await repository.findEmployee(resolved.identifier);
     const code = keys.code();
@@ -130,6 +142,10 @@ export function createWebRoutes() {
       codeHash: await keys.mac("otp", `${id}:${code}`),
     });
     if (employee) {
+      await recordActivity(context, {
+        actor: { type: "employee", id: employee.id, name: employee.name }, channel: "web", category: "signin", action: "code_requested",
+        details: { method: input.method }, security: requestSecurity(context),
+      });
       // Local development only (localhost and ENVIRONMENT=development and WEB_OTP_DEV_LOG=true): lets a developer
       // sign in without a mail or WhatsApp account. It is never active on a deployed Worker.
       if (context.env.WEB_OTP_DEV_LOG === "true" && isLocalDevelopment(context.env, new URL(context.req.url))) {
@@ -156,12 +172,23 @@ export function createWebRoutes() {
     const attempt = await repository.takeAttempt(resolved.key, input.method);
     const given = await keys.mac("otp", `${attempt?.id ?? "wlc_none"}:${input.code}`);
     const matches = constantTimeEqual(given, attempt?.codeHash ?? await keys.mac("otp", "wlc_none:decoy"));
+    if (attempt?.employeeId && !matches) {
+      // A wrong guess at a code issued to a real employee. The code that was typed is never recorded.
+      await recordActivity(context, {
+        actor: { type: "employee", id: attempt.employeeId }, channel: "web", category: "signin", action: "sign_in_failed",
+        details: { method: input.method, reason: "wrong_code" }, security: requestSecurity(context),
+      });
+    }
     if (!attempt || !attempt.employeeId || !matches) throw invalidCode();
     if (!(await repository.redeemCode(attempt.id))) throw invalidCode();
     const employee = await repository.findEmployee(resolved.identifier);
     if (!employee || employee.id !== attempt.employeeId) throw invalidCode();
 
     const session = await repository.createSession(employee.id);
+    await recordActivity(context, {
+      actor: { type: "employee", id: employee.id, name: employee.name }, channel: "web", category: "signin", action: "signed_in",
+      details: { method: input.method }, security: requestSecurity(context),
+    });
     context.header("Set-Cookie", sessionCookie(session.token));
     context.set("webSession", { id: "", employee, expiresAt: session.expiresAt });
     context.set("webToken", session.token);
@@ -182,6 +209,12 @@ export function createWebRoutes() {
         }
       }
       await webAuthRepository(context.env).endSession(token);
+      if (session) {
+        await recordActivity(context, {
+          actor: { type: "employee", id: session.employee.id, name: session.employee.name }, channel: "web", category: "signin",
+          action: "signed_out", security: requestSecurity(context),
+        });
+      }
     }
     context.header("Set-Cookie", clearedSessionCookie);
     return context.json({ requestId: context.get("requestId"), signedOut: true });

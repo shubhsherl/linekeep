@@ -1,3 +1,4 @@
+import { recordActivity } from "../../activity/record";
 import { createCustomerRepository, type Customer } from "../../data/customers";
 import { createWhatsAppConfigRepository, ruleMatches, type AutoReply } from "../../data/whatsapp-config";
 import type { Env } from "../../env";
@@ -36,13 +37,19 @@ export async function runAutoReply(env: Env, message: { customerId: string; exte
       const handler = await handlerOf(env, customer);
       const values = { name: customer.name, handler_name: handler.name, handler_phone: handler.phone };
       const clientMessageId = crypto.randomUUID();
+      const logged = (details: { type: string; templateName?: string }) => recordActivity({ env }, {
+        actor: { type: "system" }, channel: "system", category: "whatsapp", action: "auto_reply_sent",
+        target: { type: "customer", id: customer.id, label: customer.name }, details,
+      });
       if (matched.reply.type === "text") {
         await sendToCustomer(env, customer, { clientMessageId, text: fillPlaceholders(matched.reply.text, values) }, null);
+        await logged({ type: "text" });
       } else {
         const params = matched.reply.params.map((param) =>
           param.source === "custom" ? param.value ?? "" : param.source === "customer_name" ? values.name
             : param.source === "handler_name" ? values.handler_name : values.handler_phone);
         await sendToCustomer(env, customer, { clientMessageId, template: { name: matched.reply.name, language: matched.reply.language, params } }, null);
+        await logged({ type: "template", templateName: matched.reply.name });
       }
     } catch {
       await repository.markLogFailed(logId);

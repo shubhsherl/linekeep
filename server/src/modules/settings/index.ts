@@ -2,6 +2,7 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z, ZodError } from "zod";
 
+import { recordActivity, requestActor } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import type { Env } from "../../env";
 import { ApiError } from "../../http/errors";
@@ -10,7 +11,7 @@ import { mailProblems } from "../../reporting/mail";
 import { pushAccount } from "../../push/fcm";
 import { pushClientConfig } from "../../push/client-config";
 import { canEncrypt } from "../../settings/crypto";
-import { fieldByKey, featureKeys, sections, type Section } from "../../settings/fields";
+import { activityKeys, fieldByKey, featureKeys, MAX_ACTIVITY_RETENTION_DAYS, sections, type Section } from "../../settings/fields";
 import { whatsappTemplateSetting } from "../../settings/employee-web";
 import { employeeWebChanges, type EmployeeWebInput } from "./employee-web";
 import {
@@ -39,6 +40,7 @@ const bodies = {
     enabled: nullable(z.boolean()), emailOtp: nullable(z.boolean()), whatsappOtp: nullable(z.boolean()),
     whatsappTemplate: nullable(whatsappTemplateSetting),
   }),
+  activity: z.strictObject({ retentionDays: nullable(z.number().int().min(0).max(MAX_ACTIVITY_RETENTION_DAYS)) }),
 } satisfies Record<Section, z.ZodType>;
 
 const hints: Record<string, string> = {
@@ -137,6 +139,7 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
     const importable = importableFields(deployment, await freshSnapshot(deployment));
     if (importable.some((field) => field.secret)) requireEncryption(deployment);
     await saveSettings(deployment, importable.map((field) => ({ key: field.key, value: field.value, secret: field.secret })));
+    await recordActivity(context, { ...requestActor(context), category: "admin", action: "settings_imported", details: { keys: importable.map((field) => field.key) } });
     return context.json({ requestId: context.get("requestId"), imported: importable.map((field) => field.key) });
   });
 
@@ -195,6 +198,9 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
         throw invalid("Turn WhatsApp off before turning Customers off");
       }
       if (next.customers === "false" && next.whatsapp === "true") throw invalid("WhatsApp needs Customers");
+    } else if (section === "activity") {
+      const days = (input as { retentionDays?: number | null }).retentionDays;
+      if (days !== undefined) changes.push({ key: activityKeys.retentionDays, value: days === null ? null : String(days) });
     } else if (section === "employeeWeb") {
       changes.push(...await employeeWebChanges(applySettings(deployment, snapshot), snapshot, input as EmployeeWebInput));
     } else {
@@ -230,6 +236,10 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
 
     if (changes.some((change) => change.secret && change.value !== null)) requireEncryption(deployment);
     await saveSettings(deployment, changes);
+    // Which settings changed, never their values.
+    if (changes.length > 0) {
+      await recordActivity(context, { ...requestActor(context), category: "admin", action: "settings_saved", details: { section, keys: changes.map((change) => change.key) } });
+    }
     return context.json({
       requestId: context.get("requestId"),
       ...view(deployment, await freshSnapshot(deployment), section),

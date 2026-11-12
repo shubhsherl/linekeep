@@ -198,13 +198,38 @@ All routes need an administrator:
 | Route | Purpose |
 |---|---|
 | `GET /v1/admin/settings` | Current settings; secrets only as `{set, source: "database"\|"deployment"\|"none"}`, plus `deployment.importable` |
-| `PUT /v1/admin/settings/{features\|whatsapp\|email\|push}` | Partial update: absent = unchanged, `null` = clear, a string replaces a secret; `whatsapp.verifyToken: {"generate": true}` returns `generatedVerifyToken` once |
+| `PUT /v1/admin/settings/{features\|whatsapp\|email\|push\|employeeWeb\|activity}` | Partial update: absent = unchanged, `null` = clear, a string replaces a secret; `whatsapp.verifyToken: {"generate": true}` returns `generatedVerifyToken` once |
 | `POST /v1/admin/settings/import-deployment` | Copy deployment values that are not yet in the database; returns `{imported}` |
 | `POST /v1/admin/settings/whatsapp/test` | Check the token and phone number id against Meta's Graph API |
 | `POST /v1/admin/settings/email/test` | Send a test email to the recipients |
 | `GET /v1/admin/features` | `{customers, whatsapp}` for tab visibility |
 
 **Feature switches.** Customers and WhatsApp are off on a new install; while off, their admin and device routes answer `404 feature_disabled` and the WhatsApp webhook answers 404. WhatsApp needs Customers. The migration switches them on when customers or WhatsApp data already exist, and an install that already has `WHATSAPP_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` variables keeps both on until someone turns them off, so deploying does not interrupt a working setup. Push token registration is not gated.
+
+## Activity log
+
+Everything employees and administrators do is recorded in one append-only table, `activity_log` (migration `0022_activity_log.sql`), and shown in the dashboard's **Activity** tab. `recordActivity` / `recordActivityBatch` / `recordMergedActivity` (`src/activity/record.ts`) never throw and never make a request wait: on a Worker the insert runs in `waitUntil`, and a failed write is only counted in the log (`{"job":"activity-log","status":"error","dropped":1}`). A request without an execution context (tests) awaits it.
+
+**What a row holds.** `id` (`act_*`), `occurred_at` (UTC, ms), `actor_type` (`employee`, `admin`, `system`, `customer`), `actor_id` and `actor_name` (a snapshot; an administrator is the verified Cloudflare Access e-mail, `local` / "Local admin" in development), `category`, `action`, `target_type` (`customer`, `employee`, `device`, `call`, `template`), `target_id`, `target_label` (snapshot), `channel` (`app`, `web`, `admin`, `system`), `details` (small flat JSON) and, for `signin` rows only, `ip` (`CF-Connecting-IP`) and `user_agent`. Never stored: message text, notes, phone numbers, e-mail addresses, codes, tokens, setting values, file names or contents. The allowed actions and the allowed `details` keys of each are in `src/activity/catalog.ts`; anything else is dropped. A name that is only a phone number is stored masked (`••••1234`).
+
+| Category | Actions (`details`) |
+|---|---|
+| `signin` | `code_requested` (method), `signed_in` (method), `sign_in_failed` (method, reason), `signed_out`, `rate_limited` (method, limit), `session_revoked` (count; admin). Only for a code requested for, or a session of, a real employee. |
+| `device` | `enrolled` (model, androidVersion, appVersion, recovered), `revoked`, `recovery_invited`, `reassigned` (toEmployee), `invitation_created`, `invitation_revoked`, `call_sync` (calls, batches), `recording_uploaded` (count, bytes), `app_version_changed` (from, to). `call_sync` and `recording_uploaded` are one row per phone and 15 minutes: a later event in the window adds to the row's numbers and moves its time; `details.since` is when the row began. Heartbeats are not logged. |
+| `customer` | `created` (source `employee_app`/`employee_web`/`admin`/`bulk_import`/`whatsapp_inbound`, assigned), `updated` (fields), `assigned` / `unassigned` (employees), `archived` |
+| `whatsapp` | `message_sent` / `message_failed` (type, templateName, mediaKind), `attachment_uploaded` (kind, bytes), `message_received` (type; actor `customer`, hidden in the feed unless asked for), `auto_reply_sent` (system), `bulk_intro_sent` (sent, failed, skipped, templateName) |
+| `call` | `recording_played` (callId; logged when playback is opened), `call_log_deleted`, `recording_deleted`. The target is the customer when the call's number belongs to one. |
+| `admin` | `employee_created`, `employee_updated` (fields: name, phone, email), `settings_saved` (section, keys), `settings_imported` (keys), `template_cache_refreshed` (count), `auto_replies_changed` / `quick_messages_changed` (change), `template_images_changed` (change, template) |
+
+Not logged on purpose: reads (opening a chat or a customer, viewing calls or analytics), heartbeats, polling, failed requests for unknown identifiers (so guessing addresses adds nothing), recording-retention deletions and delivery receipts.
+
+**Last active.** `employee_activity_summary` holds one row per employee, written at most once every five minutes from any authenticated phone or web request (`touchEmployeeActivity`); `GET /v1/admin/employees` items carry it as `lastActiveAt`.
+
+**Reading it.** `GET /v1/admin/activity` (admin only) takes `employeeId` (an employee id, or `admin` / `system`; an employee's id also finds what administrators did to them), `category`, `action`, `channel`, `customerId`, `from` / `to` (IST calendar days, inclusive), `q` (literal match on actor, target label and the action's words), `includeCustomerMessages` (default `false`), `cursor` and `limit` (default 50, max 200), newest first, and answers `{items, nextCursor}`. `GET /v1/admin/activity/export` takes the same filters and returns up to 5000 rows as CSV (`X-Activity-Truncated: true` when there were more); cells that a spreadsheet would run as formulas are prefixed with `'`, and the address and browser appear on sign-in rows only.
+
+**Retention.** The daily job deletes rows older than `activity.retentionDays` (settings section `activity`, `PUT /v1/admin/settings/activity {"retentionDays": 0..3650 | null}`; default 90, `0` keeps everything), shown on the Config page under **Activity log**.
+
+**Backfill.** The migration also fills the table from earlier data, bounded to 90 days and with `details.backfilled = true`: outbound messages with `sent_by_employee_id`, `customers.created_by_employee_id`, web sessions, phone enrolments and revocations, and each employee's last-seen time. Row ids are derived from the source row (`act_bf_*`) and inserted with `INSERT OR IGNORE`, so running those statements again changes nothing. Messages sent by an administrator or automatically before this release cannot be reconstructed.
 
 ## Android app download
 

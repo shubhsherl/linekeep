@@ -150,10 +150,12 @@ export function createCallHistoryRepository(
       }
     },
 
-    async markDeleted(id: string): Promise<void> {
-      await db.prepare(
+    /** True when this call removed the entry (false when it was already gone or never existed). */
+    async markDeleted(id: string): Promise<boolean> {
+      const result = await db.prepare(
         "UPDATE call_logs SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
       ).bind(timestamp(clock), boundedId.parse(id)).run();
+      return result.meta.changes > 0;
     },
 
     async list(input: z.input<typeof listInput> = {}): Promise<{

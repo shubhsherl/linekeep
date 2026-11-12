@@ -2,6 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Context } from "hono";
 import { z } from "zod";
 
+import { recordActivity, recordActivityBatch, requestActor, type ActivityEvent } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import { BULK_MAX_ROWS, importCustomers } from "../../data/customers-bulk";
 import type { Env } from "../../env";
@@ -78,6 +79,24 @@ export async function bulkCreateCustomers(context: Context<AppBindings>) {
     }));
     fetches = sent.fetches;
     created.forEach((row, position) => intros.set(row.index, sent.results[position] ?? { status: "failed", reason: "send_failed" }));
+  }
+
+  const who = requestActor(context);
+  const events: ActivityEvent[] = created.map((row) => ({
+    ...who, category: "customer", action: "created", target: { type: "customer", id: row.id, label: row.name },
+    details: { source: "bulk_import", assigned: row.assigned ? 1 : 0 },
+  }));
+  await recordActivityBatch(context, events);
+  if (prepared) {
+    const outcomes = [...intros.values()];
+    await recordActivity(context, {
+      ...who, category: "whatsapp", action: "bulk_intro_sent", details: {
+        sent: outcomes.filter((outcome) => outcome.status === "sent").length,
+        failed: outcomes.filter((outcome) => outcome.status === "failed").length,
+        skipped: outcomes.filter((outcome) => outcome.status === "skipped").length,
+        templateName: prepared.template.name,
+      },
+    });
   }
 
   const groups = new Map<string, { employeeId: string; customers: { id: string; name: string }[] }>();

@@ -137,6 +137,7 @@ export const clientJavaScript = String.raw`(() => {
       select.value = selected;
     }
     renderAnalyticsEmployeeChoices();
+    updateActivityEmployees();
     updateInvitationAvailability();
   }
   function readPage(data) {
@@ -648,6 +649,7 @@ export const clientJavaScript = String.raw`(() => {
       ...(employee.phoneNumber ? [element('p', 'Phone number: ' + employee.phoneNumber)] : []),
       element('p', 'Web sign-in email: ' + (employee.email || 'none') + ' · Web sessions: ' + (Number(employee.webSessions) || 0)),
       element('p', (employee.active ? 'Active' : 'Inactive') + ' · Created ' + dateText(employee.createdAt)));
+    if (employee.lastActiveAt !== undefined) details.append(element('p', 'Last active: ' + (employee.lastActiveAt ? istFull(employee.lastActiveAt) : 'never')));
     const actions = element('div', undefined, 'actions');
     const edit = button('Edit details', () => {
       actions.hidden = true;
@@ -703,9 +705,10 @@ export const clientJavaScript = String.raw`(() => {
         error.textContent = '';
         try {
           const data = await api('/employees/' + encodeURIComponent(employee.id), { method: 'PATCH', body: JSON.stringify({ name, phoneNumber: phoneInput.value.trim() || null, email: emailInput.value.trim() || null }) });
-          rememberEmployee(data.employee);
+          const updated = data.employee.lastActiveAt === undefined ? { ...data.employee, lastActiveAt: employee.lastActiveAt } : data.employee;
+          rememberEmployee(updated);
           updateEmployees();
-          const replacement = renderEmployee(data.employee);
+          const replacement = renderEmployee(updated);
           card.replaceWith(replacement);
           replacement.querySelector('button').focus();
           message('employee-status', 'Saved details for ' + data.employee.name + '.');
@@ -753,6 +756,11 @@ export const clientJavaScript = String.raw`(() => {
     }
     const identity = element('div');
     identity.append(heading);
+    if (employee.lastActiveAt !== undefined) {
+      const lastActive = element('p', employee.lastActiveAt ? 'Last active ' + istWhen(employee.lastActiveAt) : 'Never active', 'hint');
+      if (employee.lastActiveAt) lastActive.title = istFull(employee.lastActiveAt);
+      identity.append(lastActive);
+    }
     if (warnings.length) {
       const chips = element('p', undefined, 'actions');
       for (const text of warnings) chips.append(element('span', text, 'badge pending'));
@@ -1152,6 +1160,7 @@ export const clientJavaScript = String.raw`(() => {
       controls();
       list.setAttribute('aria-busy', 'true');
       message(options.errorId, '');
+      if (options.onError) options.onError(false, reset);
       message(options.statusId, 'Loading ' + options.noun[1] + '…');
       try {
         const params = new URLSearchParams(request.params);
@@ -1175,6 +1184,7 @@ export const clientJavaScript = String.raw`(() => {
         if (current !== version || error.name === 'AbortError') return;
         message(options.statusId, 'Could not load ' + options.noun[1] + '.');
         message(options.errorId, errorMessage(error) + (reset ? ' Use Refresh to try again.' : ' Use the load button to try again.'));
+        if (options.onError) options.onError(true, reset);
       } finally {
         if (current === version) {
           busy = false;
@@ -6245,6 +6255,7 @@ export const clientJavaScript = String.raw`(() => {
     byId('tplcache-panel').hidden = !whatsappAvailable();
     if (!whatsappAvailable() && !byId('config-section-whatsapp').hidden) selectConfigSection('features', false);
     if (activeTab && !tabAvailable(activeTab)) { location.hash = 'call-history'; showTab(); }
+    if (activityOpened && activityLinks !== features.customers) activityLog.load(true);
   }
   async function loadFeatures() {
     try {
@@ -6562,7 +6573,7 @@ export const clientJavaScript = String.raw`(() => {
   }
   function renderSettings(only) {
     renderImportBanner();
-    const pages = { features: renderFeaturesPage, whatsapp: renderWhatsappPage, email: renderEmailPage, push: renderPushPage, employeeWeb: renderWebPage };
+    const pages = { features: renderFeaturesPage, whatsapp: renderWhatsappPage, email: renderEmailPage, push: renderPushPage, employeeWeb: renderWebPage, activity: renderActivityLogPage };
     for (const [name, render] of Object.entries(pages)) if (!only || only === name) render();
   }
 
@@ -7073,6 +7084,409 @@ export const clientJavaScript = String.raw`(() => {
     ui.body.append(link);
   }
 
+  // ---- Activity log (read-only trail of who did what; every server string is rendered as text) ----
+  const ACT_CHANNELS = { app: 'App', web: 'Web', admin: 'Admin', system: 'System' };
+  const ACT_ACTORS = { employee: 'Employee', admin: 'Administrator', system: 'System', customer: 'Customer' };
+  const ACT_CATEGORY_NAMES = { signin: 'Sign-in', device: 'Devices', customer: 'Customers', whatsapp: 'WhatsApp', call: 'Calls', admin: 'Admin changes' };
+  const ACT_TARGET_FALLBACK = { customer: 'a customer', employee: 'an employee', device: 'a phone', call: 'a call', template: 'a template' };
+  const ACT_SOURCES = { employee_app: 'from the app', employee_web: 'on the web', admin: 'from the admin', bulk_import: 'bulk import', whatsapp_inbound: 'from an inbound WhatsApp message' };
+  const ACT_MEDIA = { image: 'a photo', video: 'a video', audio: 'an audio message', document: 'a file', sticker: 'a sticker' };
+  const ACT_KINDS = { image: 'photo', video: 'video', audio: 'audio', document: 'file' };
+  const ACT_SECTIONS = { features: 'features', whatsapp: 'WhatsApp Business', email: 'daily email report', push: 'push notification', employeeWeb: 'employee web access', activity: 'activity log', app: 'Android app' };
+  const ACT_CHANGES = { created: 'created', updated: 'updated', deleted: 'deleted', reordered: 'reordered' };
+  const ACT_LABELS = { bytes: 'Size', ip: 'IP address', toEmployee: 'Moved to', callId: 'Call ID', androidVersion: 'Android version', appVersion: 'App version', templateName: 'Template' };
+  const ACT_VALUES = { email: 'Email', whatsapp: 'WhatsApp', wrong_code: 'Wrong code', employee_app: 'Employee app', employee_web: 'Employee web app', admin: 'Admin', bulk_import: 'Bulk import', whatsapp_inbound: 'Inbound WhatsApp message' };
+  const ACT_ENUM_KEYS = ['method', 'reason', 'source', 'type', 'kind', 'mediaKind', 'change', 'section'];
+  const ACT_CATEGORIES = Object.keys(ACT_CATEGORY_NAMES);
+  const ACT_DEFAULT_RETENTION = 90;
+  let activityOpened = false;
+  let activityLinks = true;
+  let activityApplied = new URLSearchParams();
+  let activitySearchTimer;
+  let activityRowCount = 0;
+
+  function actLookup(map, key) { return typeof key === 'string' && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : ''; }
+  function actHuman(key) {
+    const text = String(key).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().toLowerCase();
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  function actNum(value) { return typeof value === 'number' && Number.isFinite(value) ? value : 0; }
+  function actText(value) { return typeof value === 'string' ? value : ''; }
+  function actNames(value) { return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry) : []; }
+  function actUnit(count, one, many) { return count + ' ' + plural(count, one, many); }
+
+  // India time (IST) helpers. Values are ISO UTC strings from the server.
+  function istDate(value) {
+    const ms = new Date(value).getTime();
+    return Number.isNaN(ms) ? null : new Date(ms + IST_OFFSET_MS);
+  }
+  function istClock(date) { return pad2(date.getUTCHours()) + ':' + pad2(date.getUTCMinutes()); }
+  function istFull(value) {
+    const date = istDate(value);
+    if (!date) return 'Not available';
+    return weekdayShort[date.getUTCDay()] + ' ' + date.getUTCDate() + ' ' + monthNames[date.getUTCMonth()] + ' ' + date.getUTCFullYear() + ', ' + istClock(date) + ':' + pad2(date.getUTCSeconds()) + ' IST';
+  }
+  function istWhen(value) {
+    const date = istDate(value);
+    if (!date) return 'Not available';
+    const ago = Date.now() - new Date(value).getTime();
+    if (ago >= 0 && ago < 60000) return 'Just now';
+    if (ago >= 0 && ago < 3600000) return Math.floor(ago / 60000) + ' min ago';
+    const today = istToday();
+    const day = date.toISOString().slice(0, 10);
+    if (day === today) return 'Today ' + istClock(date);
+    return date.getUTCDate() + ' ' + monthNames[date.getUTCMonth()] + (day.slice(0, 4) === today.slice(0, 4) ? '' : ' ' + date.getUTCFullYear()) + ', ' + istClock(date);
+  }
+  function actBrowser(agent) {
+    const ua = actText(agent);
+    if (!ua) return '';
+    const pick = (pattern) => { const match = pattern.exec(ua); return match ? match[1] : ''; };
+    let browser = '';
+    if (/Edg\//.test(ua)) browser = 'Edge ' + pick(/Edg\/(\d+)/);
+    else if (/OPR\//.test(ua)) browser = 'Opera ' + pick(/OPR\/(\d+)/);
+    else if (/Firefox\//.test(ua)) browser = 'Firefox ' + pick(/Firefox\/(\d+)/);
+    else if (/Chrome\//.test(ua)) browser = 'Chrome ' + pick(/Chrome\/(\d+)/);
+    else if (/Safari\//.test(ua)) browser = 'Safari ' + pick(/Version\/(\d+)/);
+    let system = '';
+    if (/Android/.test(ua)) system = 'Android';
+    else if (/iPhone|iPad|iPod/.test(ua)) system = 'iOS';
+    else if (/Windows/.test(ua)) system = 'Windows';
+    else if (/Mac OS X|Macintosh/.test(ua)) system = 'macOS';
+    else if (/Linux|X11/.test(ua)) system = 'Linux';
+    const short = (browser.trim() + (system ? ' on ' + system : '')).trim();
+    return short || (ua.length > 80 ? ua.slice(0, 80) + '…' : ua);
+  }
+
+  // Customer names open the existing customer drawer, but only while the Customers feature is on.
+  function actCustomerNode(id, label, className) {
+    if (typeof id === 'string' && id && features.customers) {
+      const opener = button(label, () => openDrawer({ id, name: label }, opener), 'link-button act-link ' + className);
+      opener.title = 'View customer';
+      return opener;
+    }
+    return element('span', label, className);
+  }
+  function actTarget(item) {
+    const label = actText(item.targetLabel) || actLookup(ACT_TARGET_FALLBACK, item.targetType) || 'something';
+    return actCustomerNode(item.targetType === 'customer' ? item.targetId : null, label, 'act-target');
+  }
+  function actActorName(item) {
+    if (actText(item.actorName)) return item.actorName;
+    if (item.actorType === 'customer' && actText(item.targetLabel)) return item.targetLabel;
+    return item.actorType === 'system' ? 'System' : 'Someone';
+  }
+  function actActorNode(item) {
+    const strong = element('strong', undefined, 'act-actor');
+    if (item.actorType === 'customer') strong.append(actCustomerNode(item.actorId, actActorName(item), 'act-actor-link'));
+    else strong.textContent = actActorName(item);
+    return strong;
+  }
+  function actSendKind(d) {
+    if (d.type === 'template') return 'a template' + (actText(d.templateName) ? ' (' + d.templateName + ')' : '');
+    if (d.type === 'media') return actLookup(ACT_MEDIA, d.mediaKind) || 'a photo or file';
+    return 'a text message';
+  }
+  // Returns the parts that follow the bold actor name: strings and nodes. Unknown actions fall back to the action text.
+  function actSentence(item) {
+    const d = item.details && typeof item.details === 'object' && !Array.isArray(item.details) ? item.details : {};
+    const target = () => actTarget(item);
+    const method = d.method === 'whatsapp' ? 'WhatsApp' : d.method === 'email' ? 'email' : '';
+    const fields = actNames(d.fields).map((entry) => entry.replace(/_/g, ' '));
+    const fieldNote = fields.length ? ' (' + fields.join(', ') + ')' : '';
+    const names = actNames(d.employees);
+    const withCustomer = item.targetType === 'customer' ? [' with ', target()] : [];
+    switch (item.category + '/' + item.action) {
+      case 'signin/code_requested': return ['asked for a web sign-in code' + (method ? ' (' + method + ')' : '')];
+      case 'signin/signed_in': return ['signed in on the web'];
+      case 'signin/sign_in_failed': return ['entered a wrong sign-in code'];
+      case 'signin/signed_out': return ['signed out of the web app'];
+      case 'signin/rate_limited': return ['was blocked by the sign-in rate limit'];
+      case 'signin/session_revoked': return ['signed ', target(), typeof d.count === 'number' ? ' out of ' + actUnit(d.count, 'web session', 'web sessions') : ' out of the web app'];
+      case 'device/enrolled': { const model = actText(d.model) || actText(item.targetLabel); return ['enrolled a phone' + (model ? ' (' + model + ')' : '')]; }
+      case 'device/revoked': return ['revoked a phone' + (actText(item.targetLabel) ? ' (' + item.targetLabel + ')' : '')];
+      case 'device/recovery_invited': return ['created a recovery code for a phone'];
+      case 'device/reassigned': return ['moved a phone to ' + (actText(d.toEmployee) || 'another employee')];
+      case 'device/invitation_created': return ['created an enrollment code for ', target()];
+      case 'device/invitation_revoked': return ['revoked an enrollment code'];
+      case 'device/call_sync': return ['synced ' + actUnit(actNum(d.calls), 'call', 'calls') + ' from the phone'];
+      case 'device/recording_uploaded': { const size = typeof d.bytes === 'number' ? waFileSize(d.bytes) : ''; return ['uploaded ' + actUnit(actNum(d.count), 'recording', 'recordings') + (size ? ' (' + size + ')' : '')]; }
+      case 'device/app_version_changed': return ['updated the app' + (actText(d.from) && actText(d.to) ? ' from ' + d.from + ' to ' + d.to : '')];
+      case 'customer/created': { const how = actLookup(ACT_SOURCES, d.source); return ['added customer ', target(), how ? ' (' + how + ')' : '']; }
+      case 'customer/updated': return ['edited details of ', target(), fieldNote];
+      case 'customer/assigned': return ['assigned ', target(), ' to ' + (names.length ? names.join(', ') : 'an employee')];
+      case 'customer/unassigned': return ['unassigned ', target(), ' from ' + (names.length ? names.join(', ') : 'an employee')];
+      case 'customer/archived': return ['archived customer ', target()];
+      case 'whatsapp/message_sent': return ['sent ' + actSendKind(d) + ' to ', target()];
+      case 'whatsapp/message_failed': return ['tried to send ' + actSendKind(d) + ' to ', target(), ' but WhatsApp rejected it'];
+      case 'whatsapp/attachment_uploaded': {
+        const kind = actLookup(ACT_KINDS, d.kind) || actText(d.kind);
+        const size = typeof d.bytes === 'number' ? waFileSize(d.bytes) : '';
+        return ['uploaded ' + (kind ? (/^[aeiou]/.test(kind) ? 'an ' : 'a ') + kind + ' ' : 'an ') + 'attachment' + (size ? ' (' + size + ')' : '')];
+      }
+      case 'whatsapp/message_received': return ['sent ' + (actText(d.type) ? 'a ' + d.type + ' message' : 'a message')];
+      case 'whatsapp/auto_reply_sent': return ['sent an automatic reply to ', target()];
+      case 'whatsapp/bulk_intro_sent': return ['sent intro messages: ' + actNum(d.sent) + ' sent, ' + actNum(d.failed) + ' failed' + (actNum(d.skipped) ? ', ' + d.skipped + ' skipped' : '')];
+      case 'call/recording_played': return ['played a call recording'].concat(withCustomer);
+      case 'call/call_log_deleted': return ['deleted a call log'].concat(withCustomer);
+      case 'call/recording_deleted': return ['deleted a call recording'].concat(withCustomer);
+      case 'admin/employee_created': return ['added employee ', target()];
+      case 'admin/employee_updated': return ['edited employee ', target(), fieldNote];
+      case 'admin/settings_saved': {
+        const section = actLookup(ACT_SECTIONS, d.section) || (actText(d.section) ? actHuman(d.section).toLowerCase() : '');
+        const keys = actNames(d.keys);
+        return ['saved ' + (section ? section + ' ' : '') + 'settings' + (keys.length ? ' (' + keys.join(', ') + ')' : '')];
+      }
+      case 'admin/settings_imported': return ['imported settings from the deployment'];
+      case 'admin/template_cache_refreshed': return ['refreshed the WhatsApp template list'];
+      case 'admin/auto_replies_changed': return [(actLookup(ACT_CHANGES, d.change) || 'changed') + ' an auto-reply rule'];
+      case 'admin/quick_messages_changed': return [(actLookup(ACT_CHANGES, d.change) || 'changed') + ' a quick message'];
+      case 'admin/template_images_changed': {
+        const verb = d.change === 'set' ? 'set' : d.change === 'removed' ? 'removed' : 'changed';
+        return actText(d.template) ? [verb + ' the default image of template ', element('span', d.template, 'act-target')] : [verb + ' the default image of a template'];
+      }
+      default: return [actText(item.action).replace(/_/g, ' ')];
+    }
+  }
+  function actValue(key, value) {
+    if (Array.isArray(value)) return value.filter((entry) => ['string', 'number', 'boolean'].includes(typeof entry)).join(', ');
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    if (typeof value === 'number') return key === 'bytes' ? waFileSize(value) : value.toLocaleString();
+    if (typeof value === 'string') {
+      if (!ACT_ENUM_KEYS.includes(key)) return value;
+      return actLookup(ACT_VALUES, value) || (/^[a-z]+(_[a-z]+)*$/.test(value) ? actHuman(value) : value);
+    }
+    return '';
+  }
+  function actFacts(item) {
+    const list = element('dl', undefined, 'device-facts act-facts');
+    const add = (label, value) => { if (value) list.append(fact(label, value)); };
+    add('Time (IST)', istFull(item.occurredAt));
+    add('Who', actActorName(item) + ' · ' + (actLookup(ACT_ACTORS, item.actorType) || 'Unknown'));
+    add('Where', actLookup(ACT_CHANNELS, item.channel));
+    add('Type', actLookup(ACT_CATEGORY_NAMES, item.category) || actHuman(item.category));
+    add('Action', actHuman(item.action));
+    const targetName = actText(item.targetLabel) || actText(item.targetId);
+    if (item.targetType && targetName) add(actHuman(item.targetType), targetName);
+    const details = item.details && typeof item.details === 'object' && !Array.isArray(item.details) ? item.details : {};
+    for (const key of Object.keys(details)) {
+      if (key === 'since') {
+        // Merged rows (syncs, uploads) say when the burst started; the row's own time is the latest one.
+        if (typeof details.since === 'string' && !Number.isNaN(Date.parse(details.since))) add('First at (IST)', istFull(details.since));
+        continue;
+      }
+      const text = actValue(key, details[key]);
+      add(actLookup(ACT_LABELS, key) || actHuman(key), text);
+    }
+    add('IP address', actText(item.ip));
+    if (actText(item.userAgent)) {
+      const browser = fact('Browser', actBrowser(item.userAgent));
+      browser.querySelector('dd').title = item.userAgent;
+      list.append(browser);
+    }
+    return list;
+  }
+  function renderActivityRow(item) {
+    if (!item || (typeof item.id !== 'string' && typeof item.id !== 'number') || typeof item.occurredAt !== 'string' || typeof item.category !== 'string' || typeof item.action !== 'string') {
+      throw new Error('An activity entry could not be read. Please refresh.');
+    }
+    const row = element('article', undefined, 'act-row');
+    row.dataset.activityId = String(item.id);
+    row.dataset.category = item.category;
+    const time = element('time', istWhen(item.occurredAt), 'act-time');
+    time.dateTime = item.occurredAt;
+    time.title = istFull(item.occurredAt);
+    const sentence = element('p', undefined, 'act-sentence');
+    sentence.append(actActorNode(item), ' ');
+    for (const part of actSentence(item)) sentence.append(part);
+    const main = element('div', undefined, 'act-main');
+    main.append(sentence);
+    const channel = actLookup(ACT_CHANNELS, item.channel);
+    const badge = element('span', channel || 'Unknown', 'badge act-channel' + (channel ? ' act-channel-' + item.channel : ''));
+    badge.title = 'Where it happened: ' + (channel || 'unknown');
+    const detailsId = 'act-details-' + (++activityRowCount);
+    const toggle = element('button', 'Details', 'secondary act-toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', detailsId);
+    toggle.setAttribute('aria-label', 'Details: ' + sentence.textContent);
+    const panel = element('div', undefined, 'act-details');
+    panel.id = detailsId;
+    panel.hidden = true;
+    toggle.addEventListener('click', () => {
+      const open = toggle.getAttribute('aria-expanded') !== 'true';
+      if (open && !panel.firstChild) panel.append(actFacts(item));
+      toggle.setAttribute('aria-expanded', String(open));
+      panel.hidden = !open;
+    });
+    const meta = element('div', undefined, 'act-meta');
+    meta.append(badge, toggle);
+    row.append(time, main, meta, panel);
+    return row;
+  }
+
+  function activityParams() {
+    const params = new URLSearchParams();
+    const set = (key, value) => { if (value) params.set(key, value); };
+    set('employeeId', byId('activity-employee').value);
+    set('category', byId('activity-category').value);
+    set('channel', byId('activity-channel').value);
+    set('from', byId('activity-from').value);
+    set('to', byId('activity-to').value);
+    set('q', byId('activity-q').value.trim());
+    if (byId('activity-customer-messages').getAttribute('aria-pressed') === 'true') params.set('includeCustomerMessages', 'true');
+    return params;
+  }
+  function activityProblem() {
+    const from = byId('activity-from').value;
+    const to = byId('activity-to').value;
+    if (from && Number.isNaN(parseDay(from))) return 'Choose a valid start date.';
+    if (to && Number.isNaN(parseDay(to))) return 'Choose a valid end date.';
+    if (from && to && from > to) return 'The start date must be on or before the end date.';
+    return '';
+  }
+  function updateActivityPresets() {
+    const from = byId('activity-from').value;
+    const to = byId('activity-to').value;
+    for (const chip of byId('activity-presets').querySelectorAll('button[data-preset]')) {
+      const range = chip.dataset.preset === 'all' ? { from: '', to: '' } : presetRange(chip.dataset.preset);
+      chip.setAttribute('aria-pressed', String(range.from === from && range.to === to));
+    }
+  }
+  // The filters live in the page address (#activity?category=call&from=...) so a view can be bookmarked. replaceState keeps focus and history untouched.
+  function writeActivityHash() {
+    const query = activityApplied.toString();
+    byId('activity-export').href = '/v1/admin/activity/export' + (query ? '?' + query : '');
+    if (location.hash.split('?')[0] === '#activity') history.replaceState(null, '', location.pathname + location.search + '#activity' + (query ? '?' + query : ''));
+  }
+  function setActivityEmployee(id) {
+    const select = byId('activity-employee');
+    if (id && !Array.from(select.options).some((option) => option.value === id)) {
+      const option = element('option', id);
+      option.value = id;
+      select.append(option);
+    }
+    select.value = id;
+  }
+  function setActivityChoice(id, value) {
+    const select = byId(id);
+    if (Array.from(select.options).some((option) => option.value === value)) select.value = value;
+  }
+  function readActivityHash() {
+    const index = location.hash.indexOf('?');
+    if (index < 0) return;
+    const params = new URLSearchParams(location.hash.slice(index + 1));
+    const employeeId = (params.get('employeeId') || '').slice(0, 100);
+    if (employeeId) setActivityEmployee(employeeId);
+    setActivityChoice('activity-category', params.get('category') || '');
+    setActivityChoice('activity-channel', params.get('channel') || '');
+    for (const key of ['from', 'to']) {
+      const day = params.get(key) || '';
+      if (!Number.isNaN(parseDay(day))) byId('activity-' + key).value = day;
+    }
+    byId('activity-q').value = (params.get('q') || '').slice(0, 200);
+    byId('activity-customer-messages').setAttribute('aria-pressed', String(params.get('includeCustomerMessages') === 'true'));
+  }
+  function updateActivityEmployees() {
+    const select = byId('activity-employee');
+    const selected = select.value;
+    const choices = document.createDocumentFragment();
+    const add = (value, text) => {
+      const option = element('option', text);
+      option.value = value;
+      choices.append(option);
+    };
+    add('', 'Everyone');
+    add('admin', 'Administrators');
+    add('system', 'System');
+    for (const employee of employees.values()) add(employee.id, employee.name + (employee.active === false ? ' (inactive)' : ''));
+    select.replaceChildren(choices);
+    setActivityEmployee(selected);
+  }
+  function activityRequest() { return { path: '/activity', params: new URLSearchParams(activityApplied) }; }
+  const activityLog = cursorList({
+    listId: 'activity-list', moreId: 'activity-more', statusId: 'activity-status', errorId: 'activity-error', noun: ['event', 'events'],
+    request: activityRequest,
+    beforeReset: () => { activityLinks = features.customers; },
+    render: renderActivityRow,
+    empty: () => emptyState('No activity matches these filters', 'Try a wider date range or clear the filters. Customer messages stay hidden unless you turn them on.'),
+    onLoaded: () => { if (!byId('activity-list').querySelector('.act-row')) message('activity-status', 'No activity matches these filters.'); },
+    onError: (failed, reset) => { byId('activity-retry').hidden = !(failed && reset); }
+  });
+  function applyActivityFilters() {
+    clearTimeout(activitySearchTimer);
+    const problem = activityProblem();
+    message('activity-filter-error', problem);
+    if (problem) return;
+    activityApplied = activityParams();
+    updateActivityPresets();
+    writeActivityHash();
+    activityLog.load(true);
+  }
+  function openActivity(entering) {
+    if (!activityOpened) {
+      activityOpened = true;
+      readActivityHash();
+      applyActivityFilters();
+    } else if (entering) writeActivityHash();
+  }
+  const activityForm = byId('activity-form');
+  activityForm.addEventListener('submit', (event) => { event.preventDefault(); applyActivityFilters(); });
+  activityForm.addEventListener('input', (event) => {
+    if (event.target.type !== 'search') return;
+    clearTimeout(activitySearchTimer);
+    activitySearchTimer = setTimeout(applyActivityFilters, 350);
+  });
+  activityForm.addEventListener('change', (event) => { if (event.target.type !== 'search') applyActivityFilters(); });
+  activityForm.addEventListener('keydown', (event) => { if (event.key === 'Enter' && event.target.type === 'search') { event.preventDefault(); applyActivityFilters(); } });
+  activityForm.addEventListener('reset', () => {
+    byId('activity-customer-messages').setAttribute('aria-pressed', 'false');
+    setTimeout(applyActivityFilters, 0);
+  });
+  byId('activity-presets').addEventListener('click', (event) => {
+    const chip = event.target.closest('button[data-preset]');
+    if (!chip) return;
+    const range = chip.dataset.preset === 'all' ? { from: '', to: '' } : presetRange(chip.dataset.preset);
+    byId('activity-from').value = range.from;
+    byId('activity-to').value = range.to;
+    applyActivityFilters();
+  });
+  byId('activity-customer-messages').addEventListener('click', (event) => {
+    const chip = event.currentTarget;
+    chip.setAttribute('aria-pressed', String(chip.getAttribute('aria-pressed') !== 'true'));
+    applyActivityFilters();
+  });
+  byId('activity-refresh').addEventListener('click', applyActivityFilters);
+  byId('activity-retry').addEventListener('click', () => activityLog.load(true));
+
+  // Config: how long activity is kept (0 keeps it forever; blank uses the default).
+  function renderActivityLogPage() {
+    const ui = settingsPage('activity', 'settings-activity-body');
+    const current = settingsSection('activity');
+    const stored = Number.isInteger(current.retentionDays) ? current.retentionDays : ACT_DEFAULT_RETENTION;
+    const stores = formPanel('What is stored', 'The Activity tab lists who did what: sign-ins and sign-outs, device enrolment and syncs, customer changes, WhatsApp messages sent and received (type only, never the text), call recording plays and deletions, and admin changes.');
+    stores.append(element('p', 'It records who did it, when, and which customer; never message text, notes, phone numbers, OTP codes or file contents. Sign-in events also keep IP address and browser. Rows older than the retention period are deleted daily.', 'muted'));
+    const days = textField(ui, 'retentionDays', 'Keep activity for (days)', String(stored), { type: 'number', inputMode: 'numeric', step: '1', hint: 'Keep activity for this many days; 0 keeps it forever. Leave blank to use the default of ' + ACT_DEFAULT_RETENTION + ' days.' });
+    days.input.min = '0';
+    days.input.max = '3650';
+    const retention = formPanel('Retention');
+    retention.append(fieldGrid(days));
+    const form = settingsForm(ui, async () => {
+      const text = days.value();
+      let retentionDays = null;
+      if (text !== '') {
+        retentionDays = Number(text);
+        if (!/^\d+$/.test(text) || retentionDays > 3650) {
+          days.input.focus();
+          throw new Error('Enter a whole number of days from 0 to 3650, or leave it blank to use the default of ' + ACT_DEFAULT_RETENTION + ' days.');
+        }
+      }
+      await putSettings('activity', { retentionDays });
+      note(byId(ui.status.id), 'Saved.');
+    });
+    form.append(stores, retention, actionRow(ui, saveButton(ui)), ui.status, ui.error);
+    ui.body.append(form);
+  }
+
   function enterConfig() {
     settingsState.importedNote = '';
     loadSettings();
@@ -7087,9 +7501,9 @@ export const clientJavaScript = String.raw`(() => {
   }
   let employeesLoaded = false;
   let activeTab = null;
-  const tabNames = ['call-history', 'analytics', 'customers', 'whatsapp', 'employees', 'config'];
-  const tabTitles = { 'call-history': 'Call history', analytics: 'Call analytics', customers: 'Customers', whatsapp: 'WhatsApp chats', employees: 'Employees', config: 'Config' };
-  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', analytics: 'Call volume, talk time, connect rates and busy hours across your team.', customers: 'Customers, who handles them, and their chats and calls.', whatsapp: 'Stored WhatsApp conversations with customers.', employees: 'Manage people, enrolled devices and handovers.', config: 'Features, WhatsApp, daily email, push notifications, the Android app and automatic replies.' };
+  const tabNames = ['call-history', 'analytics', 'customers', 'whatsapp', 'employees', 'activity', 'config'];
+  const tabTitles = { 'call-history': 'Call history', analytics: 'Call analytics', customers: 'Customers', whatsapp: 'WhatsApp chats', employees: 'Employees', activity: 'Activity', config: 'Config' };
+  const tabDescriptions = { 'call-history': 'Calls and recordings, together.', analytics: 'Call volume, talk time, connect rates and busy hours across your team.', customers: 'Customers, who handles them, and their chats and calls.', whatsapp: 'Stored WhatsApp conversations with customers.', employees: 'Manage people, enrolled devices and handovers.', activity: 'Who signed in, synced, messaged and changed what, newest first.', config: 'Features, WhatsApp, daily email, push notifications, the Android app and automatic replies.' };
   function showTab() {
     const hashTab = location.hash.slice(1).split('?')[0];
     const selected = tabNames.includes(hashTab) && tabAvailable(hashTab) ? hashTab : 'call-history';
@@ -7117,6 +7531,7 @@ export const clientJavaScript = String.raw`(() => {
     byId('page-title').textContent = title;
     byId('page-description').textContent = tabDescriptions[selected];
     if (selected === 'analytics') openAnalytics(entering);
+    if (selected === 'activity') openActivity(entering);
     if (selected === 'employees' && !employeesLoaded) {
       employeesLoaded = true;
       employeeList.load();

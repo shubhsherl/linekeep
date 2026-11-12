@@ -4,13 +4,13 @@ import type { Env } from "../env";
 import { firebaseClientConfig } from "../push/client-config";
 import { pushAccount } from "../push/fcm";
 
-export const sections = ["features", "whatsapp", "email", "push", "employeeWeb"] as const;
+export const sections = ["features", "whatsapp", "email", "push", "employeeWeb", "activity"] as const;
 export type Section = (typeof sections)[number];
 
 /** A dashboard-managed value. `env` is the deployment variable it overrides; stored text always has the env's own format. */
 export interface Field {
   readonly key: string;
-  readonly section: Exclude<Section, "features" | "employeeWeb">;
+  readonly section: Exclude<Section, "features" | "employeeWeb" | "activity">;
   readonly name: string;
   readonly env: keyof Env;
   readonly secret: boolean;
@@ -77,6 +77,17 @@ const definitions: Field[] = specs.map((spec) => ({ ...spec, key: `${spec.sectio
 export const fields: readonly Field[] = definitions;
 export const fieldByKey: ReadonlyMap<string, Field> = new Map(definitions.map((field) => [field.key, field]));
 
+/** How long activity log rows are kept: whole days, 0 keeps them forever. */
+export const activityKeys = { retentionDays: "activity.retentionDays" } as const;
+export const DEFAULT_ACTIVITY_RETENTION_DAYS = 90;
+export const MAX_ACTIVITY_RETENTION_DAYS = 3650;
+
+export function activityRetentionDays(values: ReadonlyMap<string, string>): number {
+  const stored = values.get(activityKeys.retentionDays);
+  const days = stored !== undefined && /^\d{1,4}$/.test(stored) ? Number(stored) : DEFAULT_ACTIVITY_RETENTION_DAYS;
+  return Math.min(days, MAX_ACTIVITY_RETENTION_DAYS);
+}
+
 export const featureKeys = { customers: "feature.customers", whatsapp: "feature.whatsapp" } as const;
 export type FeatureName = keyof typeof featureKeys;
 export interface Features { customers: boolean; whatsapp: boolean }
@@ -84,6 +95,7 @@ export interface Features { customers: boolean; whatsapp: boolean }
 /** Run-state written by scheduled jobs; plain text, not user-editable. */
 export const jobKeys = {
   emailLastSent: "job.email.lastSent", retentionLastRun: "job.retention.lastRun", attachmentsLastRun: "job.whatsappAttachments.lastRun",
+  activityLastRun: "job.activity.lastRun",
 } as const;
 
 /**

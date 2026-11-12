@@ -21,6 +21,7 @@ export const adminHtml = `<!doctype html>
     <a id="customers-tab" role="tab" href="#customers" aria-controls="customers-panel" aria-selected="false" tabindex="-1">Customers</a>
     <a id="whatsapp-tab" role="tab" href="#whatsapp" aria-controls="whatsapp-panel" aria-selected="false" tabindex="-1">WhatsApp<span id="whatsapp-unread" class="tab-badge" hidden><span id="whatsapp-unread-count" aria-hidden="true"></span><span id="whatsapp-unread-text" class="sr-only"></span></span></a>
     <a id="employees-tab" role="tab" href="#employees" aria-controls="employees-panel" aria-selected="false" tabindex="-1">Employees</a>
+    <a id="activity-tab" role="tab" href="#activity" aria-controls="activity-panel" aria-selected="false" tabindex="-1">Activity</a>
     <a id="config-tab" role="tab" href="#config" aria-controls="config-panel" aria-selected="false" tabindex="-1">Config</a>
     </nav>
     <span class="private-label">Private workspace</span>
@@ -235,6 +236,7 @@ export const adminHtml = `<!doctype html>
       <section class="panel" aria-labelledby="directory-heading">
         <div class="section-heading"><div><h2 id="directory-heading" tabindex="-1">Employees</h2></div><button id="employees-refresh" class="secondary" type="button">Refresh directory</button></div>
         <p class="muted">Manage employees even before their first recording. Device handovers do not require employees to repeat setup.</p>
+        <p class="hint">“Last active” on each employee counts any app or web activity: calls synced, customer and chat actions, and web sign-ins.</p>
         <form id="employee-form"><fieldset class="create-employee"><legend>Create employee</legend>
           <label>Full name<input name="name" autocomplete="name" required maxlength="200"></label>
           <label>Phone number (optional)<input name="phoneNumber" type="tel" autocomplete="off" maxlength="32" placeholder="+919876543210" aria-describedby="employee-phone-help"></label>
@@ -277,6 +279,43 @@ export const adminHtml = `<!doctype html>
         <nav class="pagination" aria-label="Invitation pages"><button id="invitations-previous" class="secondary" type="button" disabled>Previous</button><span id="invitations-page">Page 1</span><button id="invitations-next" class="secondary" type="button" disabled>Next</button></nav>
       </section>
     </section>
+    <section id="activity-panel" role="tabpanel" aria-labelledby="activity-tab" hidden>
+      <section class="panel filters" aria-labelledby="activity-heading">
+        <div class="section-heading"><div><h2 id="activity-heading" tabindex="-1">Activity log</h2></div>
+          <div class="actions"><a id="activity-export" class="button secondary" href="/v1/admin/activity/export" download>Export CSV</a><button id="activity-refresh" class="secondary" type="button">Refresh</button></div></div>
+        <p class="hint">Who did what, newest first: sign-ins, devices, customers, WhatsApp, calls and admin changes. Dates and times are India time (IST, UTC+05:30). Export CSV downloads up to 5,000 rows matching the filters below.</p>
+        <div id="activity-presets" class="preset-row" role="group" aria-label="Quick date ranges">
+          <button class="secondary chip" type="button" data-preset="all" aria-pressed="true">All dates</button>
+          <button class="secondary chip" type="button" data-preset="today" aria-pressed="false">Today</button>
+          <button class="secondary chip" type="button" data-preset="yesterday" aria-pressed="false">Yesterday</button>
+          <button class="secondary chip" type="button" data-preset="7" aria-pressed="false">Last 7 days</button>
+          <button class="secondary chip" type="button" data-preset="30" aria-pressed="false">Last 30 days</button>
+        </div>
+        <form id="activity-form" novalidate>
+          <div class="filter-grid">
+            <label>Person<select id="activity-employee" name="employeeId"><option value="">Everyone</option></select></label>
+            <label>Type<select id="activity-category" name="category"><option value="">All activity</option><option value="signin">Sign-in</option><option value="device">Devices</option><option value="customer">Customers</option><option value="whatsapp">WhatsApp</option><option value="call">Calls</option><option value="admin">Admin changes</option></select></label>
+            <label>Where<select id="activity-channel" name="channel"><option value="">Anywhere</option><option value="app">App</option><option value="web">Web</option><option value="admin">Admin</option><option value="system">System</option></select></label>
+            <label class="date-filter">From (IST)<input id="activity-from" name="from" type="date"></label>
+            <label class="date-filter">To (IST)<input id="activity-to" name="to" type="date"></label>
+            <label class="wide">Search<input id="activity-q" name="q" type="search" placeholder="Person, customer or action" maxlength="200" autocomplete="off"></label>
+          </div>
+          <div class="form-footer"><div>
+              <button id="activity-customer-messages" class="secondary chip" type="button" aria-pressed="false" aria-describedby="activity-customer-messages-help">Customer messages</button>
+              <p id="activity-customer-messages-help" class="hint">Messages that customers send you on WhatsApp are hidden by default. Turn this on to include them.</p></div>
+            <div class="actions"><button id="activity-clear" type="reset" class="secondary">Clear filters</button></div></div>
+          <p id="activity-filter-error" class="error-text" role="alert" hidden></p>
+        </form>
+      </section>
+      <section id="activity-results" aria-labelledby="activity-results-heading" aria-busy="false">
+        <div class="results-heading"><h2 id="activity-results-heading">Activity</h2></div>
+        <p id="activity-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p id="activity-error" class="notice error" role="alert" hidden></p>
+        <button id="activity-retry" class="secondary act-retry" type="button" hidden>Retry</button>
+        <div id="activity-list" class="call-list act-list" aria-busy="false"></div>
+        <div class="pagination"><button id="activity-more" class="secondary" type="button" hidden>Load more activity</button></div>
+      </section>
+    </section>
     <section id="config-panel" role="tabpanel" aria-labelledby="config-tab" hidden>
       <div class="cfg-layout">
         <nav class="cfg-nav" aria-label="Configuration sections">
@@ -288,6 +327,7 @@ export const adminHtml = `<!doctype html>
             <li><button class="cfg-nav-item" type="button" data-section="push">Push notifications</button></li>
             <li><button class="cfg-nav-item" type="button" data-section="web">Employee web access</button></li>
             <li><button class="cfg-nav-item" type="button" data-section="app">Android app</button></li>
+            <li><button class="cfg-nav-item" type="button" data-section="activity">Activity log</button></li>
           </ul>
         </nav>
         <div class="cfg-content">
@@ -344,6 +384,10 @@ export const adminHtml = `<!doctype html>
           <section id="config-section-app" class="cfg-section" aria-labelledby="config-app-heading" hidden>
             <h2 id="config-app-heading" class="cfg-section-title" tabindex="-1">Android app</h2>
             <div id="settings-app-body" class="cfg-body"></div>
+          </section>
+          <section id="config-section-activity" class="cfg-section" aria-labelledby="config-activity-heading" hidden>
+            <h2 id="config-activity-heading" class="cfg-section-title" tabindex="-1">Activity log</h2>
+            <div id="settings-activity-body" class="cfg-body"></div>
           </section>
           <section id="config-section-whatsapp" class="cfg-section" aria-labelledby="config-whatsapp-heading" hidden>
             <h2 id="config-whatsapp-heading" class="cfg-section-title" tabindex="-1">Auto replies and quick messages</h2>

@@ -23,6 +23,7 @@ import {
   createAdminCustomerRoutes,
   createDeviceCustomerRoutes,
 } from "./modules/customers";
+import { createAdminActivityRoutes } from "./modules/activity";
 import { createAdminAnalyticsRoutes } from "./modules/analytics";
 import { createDeviceEmployeeRoutes } from "./modules/device-employee";
 import { createWhatsAppWebhookRoutes } from "./modules/whatsapp";
@@ -142,6 +143,7 @@ export function createApp() {
   app.route("/v1/admin", createAdminWhatsAppMediaRoutes(requireAdmin));
   app.route("/v1/admin", createAdminWhatsAppOutboundRoutes(requireAdmin));
   app.route("/v1/admin", createAdminAnalyticsRoutes(requireAdmin));
+  app.route("/v1/admin", createAdminActivityRoutes(requireAdmin));
   app.route("/v1/admin", createAdminSettingsRoutes(requireAdmin));
   app.route("/v1/admin", createAdminAppRoutes(requireAdmin));
   app.route("/", createPublicDownloadRoutes());

@@ -2,6 +2,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordActivity, requestActor } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import {
   ConfigLimitError, ConfigOrderError, autoReplyCreate, autoReplyUpdate, createWhatsAppConfigRepository,
@@ -27,6 +28,8 @@ export function createAdminWhatsAppConfigRoutes(authorize: MiddlewareHandler<App
     }, authorize);
   }
   const repository = (db: D1Database) => createWhatsAppConfigRepository(db);
+  const changed = (context: Parameters<typeof requestActor>[0], action: "auto_replies_changed" | "quick_messages_changed", change: string) =>
+    recordActivity(context, { ...requestActor(context), category: "admin", action, details: { change } });
 
   routes.get("/whatsapp/auto-replies", async (context) =>
     context.json({ requestId: context.get("requestId"), items: await repository(context.env.DB).listRules() }));
@@ -37,7 +40,9 @@ export function createAdminWhatsAppConfigRoutes(authorize: MiddlewareHandler<App
   routes.post("/whatsapp/auto-replies/reorder", async (context) => {
     try {
       const { ids } = reorderInput.parse(await context.req.json());
-      return context.json({ requestId: context.get("requestId"), items: await repository(context.env.DB).reorderRules(ids) });
+      const items = await repository(context.env.DB).reorderRules(ids);
+      await changed(context, "auto_replies_changed", "reordered");
+      return context.json({ requestId: context.get("requestId"), items });
     } catch (error) {
       if (error instanceof ConfigOrderError) throw new HTTPException(400, { message: "ids must list every rule exactly once" });
       throw error;
@@ -46,6 +51,7 @@ export function createAdminWhatsAppConfigRoutes(authorize: MiddlewareHandler<App
   routes.post("/whatsapp/auto-replies", async (context) => {
     try {
       const created = await repository(context.env.DB).createRule(autoReplyCreate.parse(await context.req.json()));
+      await changed(context, "auto_replies_changed", "created");
       return context.json({ requestId: context.get("requestId"), rule: created }, 201);
     } catch (error) {
       if (error instanceof ConfigLimitError) return limitError(context, "rules");
@@ -55,10 +61,12 @@ export function createAdminWhatsAppConfigRoutes(authorize: MiddlewareHandler<App
   routes.patch("/whatsapp/auto-replies/:ruleId", async (context) => {
     const updated = await repository(context.env.DB).updateRule(id.parse(context.req.param("ruleId")), autoReplyUpdate.parse(await context.req.json()));
     if (!updated) throw new HTTPException(404, { message: "Rule not found" });
+    await changed(context, "auto_replies_changed", "updated");
     return context.json({ requestId: context.get("requestId"), rule: updated });
   });
   routes.delete("/whatsapp/auto-replies/:ruleId", async (context) => {
     await repository(context.env.DB).deleteRule(id.parse(context.req.param("ruleId")));
+    await changed(context, "auto_replies_changed", "deleted");
     return context.json({ requestId: context.get("requestId"), status: "deleted" });
   });
 
@@ -67,6 +75,7 @@ export function createAdminWhatsAppConfigRoutes(authorize: MiddlewareHandler<App
   routes.post("/whatsapp/quick-messages", async (context) => {
     try {
       const created = await repository(context.env.DB).createQuickMessage(quickMessageCreate.parse(await context.req.json()));
+      await changed(context, "quick_messages_changed", "created");
       return context.json({ requestId: context.get("requestId"), message: created }, 201);
     } catch (error) {
       if (error instanceof ConfigLimitError) return limitError(context, "quick messages");
@@ -76,10 +85,12 @@ export function createAdminWhatsAppConfigRoutes(authorize: MiddlewareHandler<App
   routes.patch("/whatsapp/quick-messages/:messageId", async (context) => {
     const updated = await repository(context.env.DB).updateQuickMessage(id.parse(context.req.param("messageId")), quickMessageUpdate.parse(await context.req.json()));
     if (!updated) throw new HTTPException(404, { message: "Quick message not found" });
+    await changed(context, "quick_messages_changed", "updated");
     return context.json({ requestId: context.get("requestId"), message: updated });
   });
   routes.delete("/whatsapp/quick-messages/:messageId", async (context) => {
     await repository(context.env.DB).deleteQuickMessage(id.parse(context.req.param("messageId")));
+    await changed(context, "quick_messages_changed", "deleted");
     return context.json({ requestId: context.get("requestId"), status: "deleted" });
   });
   return routes;

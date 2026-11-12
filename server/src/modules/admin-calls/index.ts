@@ -2,6 +2,8 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordActivity, requestActor } from "../../activity/record";
+import { callTarget } from "../../activity/targets";
 import type { AppBindings } from "../../app";
 import {
   adminCallDto as callDto,
@@ -256,6 +258,11 @@ export function createAdminCallRoutes(
     const audioUrl = new URL(context.req.url);
     audioUrl.pathname = `${audioUrl.pathname.slice(0, -"playback".length)}audio`;
     const { url, expiresAt } = await playbackCapability(context.env.TOKEN_HASH_SECRET, call.objectKey, audioUrl);
+    // Logged when the recording is opened, not for every range request the player makes afterwards.
+    await recordActivity(context, {
+      ...requestActor(context), category: "call", action: "recording_played",
+      target: await callTarget(context.env.DB, call.id, call.remoteNumber), details: { callId: call.id },
+    });
     return context.json({
       requestId: context.get("requestId"),
       url,
@@ -289,6 +296,12 @@ export function createAdminCallRoutes(
       await calls.markDeleted(callId);
       // Close an in-flight PUT between the first deletion and the tombstone.
       await context.env.RECORDINGS.delete(call.objectKey);
+      if (call.uploadStatus !== "deleted") {
+        await recordActivity(context, {
+          ...requestActor(context), category: "call", action: "recording_deleted",
+          target: await callTarget(context.env.DB, call.id, call.remoteNumber),
+        });
+      }
     }
     return context.json({
       requestId: context.get("requestId"),

@@ -22,6 +22,8 @@ export interface Employee {
   /** Another active employee has the same phone number (WhatsApp sign-in by phone would be ambiguous). */
   phoneShared: boolean;
   active: boolean;
+  /** When the employee last used the app or the web app (updated at most every five minutes); null if never seen. */
+  lastActiveAt: string | null;
   createdAt: string;
 }
 
@@ -207,6 +209,7 @@ type EmployeeRow = {
   email: string | null;
   web_sessions: number;
   phone_shared: number;
+  last_active_at: string | null;
   active: number;
   created_at: string;
 };
@@ -247,7 +250,8 @@ const employeeColumns = `id, name, phone_number, email, active, created_at,
     AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND s.idle_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) AS web_sessions,
   (employees.active = 1 AND employees.phone_number IS NOT NULL AND EXISTS (SELECT 1 FROM employees o
     WHERE o.active = 1 AND o.id <> employees.id AND o.phone_number IS NOT NULL
-      AND substr(replace(o.phone_number, '+', ''), -10) = substr(replace(employees.phone_number, '+', ''), -10))) AS phone_shared`;
+      AND substr(replace(o.phone_number, '+', ''), -10) = substr(replace(employees.phone_number, '+', ''), -10))) AS phone_shared,
+  (SELECT a.last_active_at FROM employee_activity_summary a WHERE a.employee_id = employees.id) AS last_active_at`;
 const invitationColumns =
   "id, employee_id, expires_at, redeemed_at, revoked_at, created_at, purpose, device_id, recovery_device_id";
 const deviceColumns = `id, employee_id, model, manufacturer, android_version, one_ui_version,
@@ -265,6 +269,7 @@ function employee(row: EmployeeRow): Employee {
     webSessions: row.web_sessions,
     phoneShared: row.phone_shared === 1,
     active: row.active === 1,
+    lastActiveAt: row.last_active_at ?? null,
     createdAt: row.created_at,
   };
 }

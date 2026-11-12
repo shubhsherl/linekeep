@@ -3,6 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordActivity, requestActor } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import {
   createWhatsAppAttachmentRepository, MAX_TEMPLATE_IMAGE_NAME, mayUseAttachment, type AttachmentOwner,
@@ -57,6 +58,10 @@ async function uploadAttachment<B extends AppBindings>(context: Context<B>, owne
     await env.RECORDINGS.delete(objectKey);
     throw error;
   }
+  // The kind and size only: neither the file name nor its contents.
+  await recordActivity(context, {
+    ...requestActor(context), category: "whatsapp", action: "attachment_uploaded", details: { kind: type.kind, bytes: bytes.byteLength },
+  });
   return context.json({
     requestId: context.get("requestId"), attachmentId: id, kind: type.kind, mimeType: type.mimeType, fileName: name, size: bytes.byteLength,
   }, 201);
@@ -126,6 +131,7 @@ export function createAdminWhatsAppOutboundRoutes(authorize: MiddlewareHandler<A
     if (!config?.wabaId) return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp templates are not configured"), 503);
     try {
       const loaded = await getTemplates(context.env, config, { refresh: true });
+      await recordActivity(context, { ...requestActor(context), category: "admin", action: "template_cache_refreshed", details: { count: loaded.templates.length } });
       return context.json({ requestId, count: loaded.templates.length, fetchedAt: loaded.fetchedAt });
     } catch (error) {
       if (error instanceof TemplateRefreshTooSoonError) {
@@ -167,10 +173,13 @@ export function createAdminWhatsAppOutboundRoutes(authorize: MiddlewareHandler<A
         formats.length === 0 ? "No approved template has this name" : `This template's header is not an ${file.kind}`), 400);
     }
     await repository.setTemplateImage(name, file.id);
+    await recordActivity(context, { ...requestActor(context), category: "admin", action: "template_images_changed", target: { type: "template", id: name, label: name }, details: { change: "set", template: name } });
     return context.json({ requestId, item: { templateName: name, attachmentId: file.id, kind: file.kind, mimeType: file.mimeType, fileName: file.fileName, size: file.size } });
   });
   routes.delete("/whatsapp/template-images/:templateName", async (context) => {
-    await createWhatsAppAttachmentRepository(context.env.DB).clearTemplateImage(templateName.parse(context.req.param("templateName")));
+    const name = templateName.parse(context.req.param("templateName"));
+    await createWhatsAppAttachmentRepository(context.env.DB).clearTemplateImage(name);
+    await recordActivity(context, { ...requestActor(context), category: "admin", action: "template_images_changed", target: { type: "template", id: name, label: name }, details: { change: "removed", template: name } });
     return context.json({ requestId: context.get("requestId"), status: "deleted" });
   });
   return routes;

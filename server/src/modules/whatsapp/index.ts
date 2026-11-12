@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
+import { recordActivityBatch, type ActivityEvent } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import { createWhatsAppRepository } from "../../data/whatsapp";
 import { defer } from "../../http/defer";
@@ -41,15 +42,23 @@ export function createWhatsAppWebhookRoutes() {
     const repository = createWhatsAppRepository(context.env.DB);
     // Any failure answers 5xx so Meta redelivers; every write below is idempotent.
     const replies: Promise<void>[] = [];
+    const events: ActivityEvent[] = [];
     for (const message of inbound) {
       const stored = await repository.receive({ ...message, to: null });
       // Only a message stored for the first time can trigger a reply; Meta's redeliveries are inserted as no-ops.
       if (stored?.inserted) {
+        const customer = { type: "customer" as const, id: stored.customerId };
+        if (stored.customerCreated) {
+          events.push({ actor: { type: "customer", id: stored.customerId }, channel: "system", category: "customer", action: "created", target: customer, details: { source: "whatsapp_inbound" } });
+        }
+        // The message type only: never its text, the sender's number or the media.
+        events.push({ actor: { type: "customer", id: stored.customerId }, channel: "system", category: "whatsapp", action: "message_received", target: customer, details: { type: message.type } });
         replies.push(notifyNewMessage(context.env, stored.customerId));
         if (message.media) replies.push(storeInboundMedia(context.env, stored.messageId).then(() => undefined));
         replies.push(runAutoReply(context.env, { customerId: stored.customerId, externalId: message.externalId, body: message.body, sentAt: message.sentAt }));
       }
     }
+    await recordActivityBatch(context, events);
     for (const status of statuses) await repository.applyStatus(status.externalId, status.status, status.at);
     // Reply after answering Meta, which expects a quick 200; without an execution context (tests) wait for it.
     if (replies.length > 0) await defer(context, Promise.all(replies));

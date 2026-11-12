@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordMergedActivity } from "../../activity/record";
 import {
   createCallRepository,
   InvalidCallStateError,
@@ -387,6 +388,11 @@ export function createRecordingRoutes(): Hono<DeviceBindings> {
     }
     if (!completed)
       throw new HTTPException(404, { message: "Recording was not found" });
+    const device = c.get("device");
+    await recordMergedActivity(c, {
+      actor: { type: "employee", id: device.employeeId }, channel: "app", category: "device", action: "recording_uploaded",
+      target: { type: "device", id: device.id, label: device.model ?? null },
+    }, { count: 1, bytes: object.size });
     return c.json({
       requestId: c.get("requestId"),
       callId: completed.id,

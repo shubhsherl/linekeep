@@ -2,6 +2,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordActivity, requestActor, touchEmployeeActivity } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import {
   createIdentityRepository,
@@ -52,6 +53,7 @@ export const requireDevice: MiddlewareHandler<DeviceBindings> = async (
   if (!device)
     throw new HTTPException(401, { message: "Device authentication required" });
   context.set("device", device);
+  await touchEmployeeActivity(context, device.employeeId, "app");
   await next();
 };
 
@@ -184,6 +186,14 @@ export function createDeviceIdentityRoutes() {
       throw new HTTPException(401, {
         message: "Invitation is invalid or expired",
       });
+    await recordActivity(context, {
+      actor: { type: "employee", id: registered.employee.id, name: registered.employee.name }, channel: "app",
+      category: "device", action: "enrolled", target: { type: "device", id: registered.device.id, label: registered.device.model ?? null },
+      details: {
+        model: registered.device.model, androidVersion: registered.device.androidVersion,
+        appVersion: registered.device.appVersion, recovered: registered.device.invitationId !== registered.device.lastInvitationId,
+      },
+    });
     return context.json(
       {
         requestId: context.get("requestId"),
@@ -198,6 +208,7 @@ export function createDeviceIdentityRoutes() {
   });
   app.post("/heartbeat", requireDevice, async (context) => {
     const input = heartbeatInput.parse(await context.req.json());
+    const previousVersion = context.get("device").appVersion;
     const updated = await identityRepository(context.env).recordHeartbeat(
       context.get("device").id,
       input,
@@ -206,6 +217,13 @@ export function createDeviceIdentityRoutes() {
       throw new HTTPException(401, {
         message: "Device authentication required",
       });
+    // Heartbeats themselves are not logged; only a changed app version is.
+    if (previousVersion && previousVersion !== input.appVersion) {
+      await recordActivity(context, {
+        ...requestActor(context), category: "device", action: "app_version_changed",
+        target: { type: "device", id: updated.id, label: updated.model ?? null }, details: { from: previousVersion, to: input.appVersion },
+      });
+    }
     return context.json({
       requestId: context.get("requestId"),
       serverTime: updated.lastSeenAt!,
@@ -241,11 +259,25 @@ export function createAdminIdentityRoutes(
   });
   app.patch("/employees/:employeeId", async (context) => {
     const input = employeePatchInput.parse(await context.req.json());
-    const employee = await identityRepository(context.env)
+    const repository = identityRepository(context.env);
+    const before = await repository.getEmployee(context.req.param("employeeId"));
+    const employee = await repository
       .updateEmployee(context.req.param("employeeId"), input)
       .catch((error: unknown) => { throw employeeEmailExists(error); });
     if (!employee)
       throw new HTTPException(404, { message: "Employee not found" });
+    // Field names only: the new name, phone number and email never enter the log.
+    const fields = [
+      ...(before && before.name !== employee.name ? ["name"] : []),
+      ...(before && before.phoneNumber !== employee.phoneNumber ? ["phone"] : []),
+      ...(before && before.email !== employee.email ? ["email"] : []),
+    ];
+    if (fields.length > 0) {
+      await recordActivity(context, {
+        ...requestActor(context), category: "admin", action: "employee_updated",
+        target: { type: "employee", id: employee.id, label: employee.name }, details: { fields },
+      });
+    }
     return context.json({ requestId: context.get("requestId"), employee });
   });
   app.delete("/employees/:employeeId/web-sessions", async (context) => {
@@ -254,6 +286,12 @@ export function createAdminIdentityRoutes(
     if (!(await repository.getEmployee(employeeId)))
       throw new HTTPException(404, { message: "Employee not found" });
     const revoked = await repository.revokeWebSessions(employeeId);
+    if (revoked > 0) {
+      await recordActivity(context, {
+        ...requestActor(context), category: "signin", action: "session_revoked",
+        target: { type: "employee", id: employeeId }, details: { count: revoked },
+      });
+    }
     return context.json({ requestId: context.get("requestId"), employeeId, revoked });
   });
   app.get("/devices", async (context) => {
@@ -285,6 +323,10 @@ export function createAdminIdentityRoutes(
         message: "Device must be live and the employee active",
       });
     }
+    await recordActivity(context, {
+      ...requestActor(context), category: "device", action: "reassigned",
+      target: { type: "device", id: device.id, label: device.model ?? null }, details: { toEmployee: device.employee.name },
+    });
     return context.json({ requestId: context.get("requestId"), device });
   });
   app.post("/devices/:deviceId/revoke", async (context) => {
@@ -294,6 +336,10 @@ export function createAdminIdentityRoutes(
     const device = await repository.getManagedDevice(
       context.req.param("deviceId"),
     );
+    await recordActivity(context, {
+      ...requestActor(context), category: "device", action: "revoked",
+      target: { type: "device", id: context.req.param("deviceId"), label: device?.model ?? null },
+    });
     return context.json({ requestId: context.get("requestId"), device });
   });
   app.post("/devices/:deviceId/recovery-invitations", async (context) => {
@@ -307,6 +353,10 @@ export function createAdminIdentityRoutes(
         throw new HTTPException(404, { message: "Device not found" });
       throw new HTTPException(409, { message: "Device must be live and the employee active" });
     }
+    await recordActivity(context, {
+      ...requestActor(context), category: "device", action: "recovery_invited",
+      target: { type: "device", id: context.req.param("deviceId") },
+    });
     return context.json({
       requestId: context.get("requestId"),
       invitationCode: invitation.invitationCode,
@@ -341,6 +391,10 @@ export function createAdminIdentityRoutes(
       );
       if (!invitation)
         throw new HTTPException(404, { message: "Invitation not found" });
+      await recordActivity(context, {
+        ...requestActor(context), category: "device", action: "invitation_revoked",
+        target: { type: "employee", id: context.req.param("employeeId") },
+      });
       return context.json({ requestId: context.get("requestId"), invitation });
     },
   );
@@ -349,6 +403,10 @@ export function createAdminIdentityRoutes(
     const employee = await identityRepository(context.env)
       .createEmployee(input)
       .catch((error: unknown) => { throw employeeEmailExists(error); });
+    await recordActivity(context, {
+      ...requestActor(context), category: "admin", action: "employee_created",
+      target: { type: "employee", id: employee.id, label: employee.name },
+    });
     return context.json(
       {
         requestId: context.get("requestId"),
@@ -365,6 +423,10 @@ export function createAdminIdentityRoutes(
     );
     if (!invitation)
       throw new HTTPException(404, { message: "Active employee not found" });
+    await recordActivity(context, {
+      ...requestActor(context), category: "device", action: "invitation_created",
+      target: { type: "employee", id: context.req.param("employeeId") },
+    });
     return context.json(
       {
         requestId: context.get("requestId"),

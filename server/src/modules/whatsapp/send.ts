@@ -136,6 +136,8 @@ export async function headerFile(env: Env, template: WhatsAppTemplate, overrideI
 export async function sendToCustomer(
   env: Env, customer: Customer, input: WhatsAppSendInput, employeeId: string | null, owner: AttachmentOwner | null = null,
   apiBase: string = owner?.type === "device" ? "/v1/device" : "/v1/admin",
+  /** Called once for a message this call stored and tried to send (not for a repeated client id); must not throw. */
+  observe?: (outcome: { message: WhatsAppMessage; failed: boolean }) => Promise<unknown> | unknown,
 ): Promise<WhatsAppMessage> {
   const config = whatsappConfig(env);
   if (!config) throw new WhatsAppUnavailableError();
@@ -193,12 +195,15 @@ export async function sendToCustomer(
     await repository.markSent(id, externalId);
   } catch (error) {
     await repository.markFailed(id);
+    await observe?.({ message: queued.message, failed: true });
     if (template) await noteTemplateSendFailure(env, error);
     // Meta's own 24-hour check disagrees with ours only for free-form content; templates are always allowed.
     if (!template && error instanceof WhatsAppSendError && error.code === REENGAGEMENT_ERROR_CODE) throw new WhatsAppWindowClosedError();
     throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
   }
-  return (await repository.get(id)) ?? queued.message;
+  const sent = (await repository.get(id)) ?? queued.message;
+  await observe?.({ message: sent, failed: false });
+  return sent;
 }
 
 /** How the employee web app's sign-in code goes into a template, with every value already resolved. */

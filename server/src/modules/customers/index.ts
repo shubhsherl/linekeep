@@ -3,6 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordActivity, requestActor } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import { callHistoryCursor } from "../../data/call-history";
 import {
@@ -13,6 +14,7 @@ import {
   CustomerPhoneExistsError,
   createCustomerRepository,
   customerEmployeesInput,
+  type Customer,
   type CustomerCursor,
   type CustomerScope,
 } from "../../data/customers";
@@ -104,6 +106,15 @@ function pageBody(requestId: string, page: { nextCursor: CustomerCursor | null }
   return { requestId, nextCursor: page.nextCursor ? encodeCursor(page.nextCursor) : null };
 }
 
+const customerFields = ["name", "phone", "email", "notes", "source", "district", "state", "country"] as const;
+
+/** Names of the fields that differ: what the log keeps of an edit, never the values. */
+function changedFields(before: Customer, after: Customer): string[] {
+  return customerFields.filter((field) => before[field] !== after[field]);
+}
+
+const targetOf = (customer: { id: string; name: string }) => ({ type: "customer" as const, id: customer.id, label: customer.name });
+
 /** The shared handlers only differ in who may see which customer. */
 function customerReadRoutes<B extends AppBindings>(
   resolveScope: (context: Context<B>) => CustomerScope | undefined,
@@ -154,8 +165,15 @@ async function sendMessage<B extends AppBindings>(
   const found = await createCustomerRepository(context.env.DB).getCustomer(customerId.parse(customerKey), scope);
   if (!found) throw new HTTPException(404, { message: "Customer not found" });
   const input = whatsappSendInput.parse(await context.req.json());
+  const who = requestActor(context);
+  const kind = "template" in input ? { type: "template", templateName: input.template.name }
+    : "attachmentId" in input ? { type: "media" } : { type: "text" };
+  const log = (action: "message_sent" | "message_failed", message?: { messageType: string }) => recordActivity(context, {
+    ...who, category: "whatsapp", action, target: targetOf(found),
+    details: { ...kind, ...(kind.type === "media" && message ? { mediaKind: message.messageType } : {}) },
+  });
   try {
-    const sent = await sendToCustomer(context.env as Env, found, input, employeeId, owner, apiBase);
+    const sent = await sendToCustomer(context.env as Env, found, input, employeeId, owner, apiBase, (outcome) => log(outcome.failed ? "message_failed" : "message_sent", outcome.message));
     return context.json({ requestId, message: sent }, 201);
   } catch (error) {
     if (error instanceof WhatsAppUnavailableError) {
@@ -209,6 +227,10 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
         await context.req.json(),
       );
       await defer(context, notifyAssigned(context.env, created, created.employees.map((employee) => employee.id)));
+      await recordActivity(context, {
+        ...requestActor(context), category: "customer", action: "created", target: targetOf(created),
+        details: { source: "admin", assigned: created.employees.length },
+      });
       return context.json({ requestId: context.get("requestId"), customer: created }, 201);
     } catch (error) {
       if (error instanceof CustomerPhoneExistsError) {
@@ -222,11 +244,17 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
   });
   routes.patch("/customers/:customerId", async (context) => {
     try {
-      const updated = await createCustomerRepository(context.env.DB).updateCustomer(
-        customerId.parse(context.req.param("customerId")),
-        await context.req.json(),
-      );
-      if (!updated) throw new HTTPException(404, { message: "Customer not found" });
+      const repository = createCustomerRepository(context.env.DB);
+      const id = customerId.parse(context.req.param("customerId"));
+      const before = await repository.getCustomer(id);
+      const updated = await repository.updateCustomer(id, await context.req.json());
+      if (!updated || !before) throw new HTTPException(404, { message: "Customer not found" });
+      const fields = changedFields(before, updated);
+      if (fields.length > 0) {
+        await recordActivity(context, {
+          ...requestActor(context), category: "customer", action: "updated", target: targetOf(updated), details: { fields },
+        });
+      }
       return context.json({ requestId: context.get("requestId"), customer: updated });
     } catch (error) {
       if (error instanceof CustomerPhoneExistsError) {
@@ -239,11 +267,18 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
     try {
       const repository = createCustomerRepository(context.env.DB);
       const id = customerId.parse(context.req.param("customerId"));
-      const before = new Set(((await repository.getCustomer(id))?.employees ?? []).map((employee) => employee.id));
+      const previous = (await repository.getCustomer(id))?.employees ?? [];
+      const before = new Set(previous.map((employee) => employee.id));
       const updated = await repository.setCustomerEmployees(id, customerEmployeesInput.parse(await context.req.json()).employeeIds);
       if (!updated) throw new HTTPException(404, { message: "Customer not found" });
       // Only people who were not handling this customer before are told; removal is silent.
       await defer(context, notifyAssigned(context.env, updated, updated.employees.map((employee) => employee.id).filter((employeeId) => !before.has(employeeId))));
+      const now = new Set(updated.employees.map((employee) => employee.id));
+      const added = updated.employees.filter((employee) => !before.has(employee.id)).map((employee) => employee.name);
+      const removed = previous.filter((employee) => !now.has(employee.id)).map((employee) => employee.name);
+      const who = requestActor(context);
+      if (added.length > 0) await recordActivity(context, { ...who, category: "customer", action: "assigned", target: targetOf(updated), details: { employees: added } });
+      if (removed.length > 0) await recordActivity(context, { ...who, category: "customer", action: "unassigned", target: targetOf(updated), details: { employees: removed } });
       return context.json({ requestId: context.get("requestId"), customer: updated });
     } catch (error) {
       if (error instanceof CustomerAssignmentError) {
@@ -254,9 +289,13 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
   });
   routes.delete("/customers/:customerId", async (context) => {
     const id = customerId.parse(context.req.param("customerId"));
-    if (!(await createCustomerRepository(context.env.DB).archiveCustomer(id))) {
+    const repository = createCustomerRepository(context.env.DB);
+    const existing = await repository.getCustomer(id);
+    if (!(await repository.archiveCustomer(id))) {
       throw new HTTPException(404, { message: "Customer not found" });
     }
+    // Archiving an already archived customer changes nothing and logs nothing.
+    if (existing) await recordActivity(context, { ...requestActor(context), category: "customer", action: "archived", target: targetOf(existing) });
     return context.json({ requestId: context.get("requestId"), customerId: id, status: "archived" });
   });
   routes.get("/customers/:customerId/calls", async (context) => {
@@ -332,6 +371,10 @@ export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess
     if (existing) return existing;
     try {
       const created = await repository.createOwnCustomer(employeeId, body);
+      await recordActivity(context, {
+        ...requestActor(context), category: "customer", action: "created", target: targetOf(created),
+        details: { source: access.apiBase === "/v1/web" ? "employee_web" : "employee_app", assigned: 1 },
+      });
       return context.json({ requestId: context.get("requestId"), customer: created }, 201);
     } catch (error) {
       // Lost a race with another creator of the same number.
@@ -359,6 +402,10 @@ export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess
     }
     const updated = await repository.updateCustomer(id, changes, scope);
     if (!updated) throw new HTTPException(404, { message: "Customer not found" });
+    const fields = changedFields(current, updated);
+    if (fields.length > 0) {
+      await recordActivity(context, { ...requestActor(context), category: "customer", action: "updated", target: targetOf(updated), details: { fields } });
+    }
     return context.json({ requestId: context.get("requestId"), customer: updated });
   });
   routes.route("/", customerReadRoutes<DeviceBindings>(

@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { pushClientConfig, type FirebaseClientConfig } from "../push/client-config";
 import { pushAccount } from "../push/fcm";
-import { fieldByKey, featureKeys, fields, jobKeys, parseRecipients, type Features } from "./fields";
+import { activityRetentionDays, fieldByKey, featureKeys, fields, jobKeys, parseRecipients, type Features } from "./fields";
 import { emailOtpReady, readEmployeeWeb, usableMethods, whatsappOtpReady, whatsappProblems } from "./employee-web";
 import { mailTransportProblems } from "../reporting/mail";
 import { createSettingsStore, type SettingChange } from "./store";
@@ -132,6 +132,7 @@ export function describeSettings(deployment: Env, snapshot: SettingsSnapshot) {
       serviceAccount: { ...secretState(deployment, snapshot, "push.serviceAccount", false), projectId },
     },
     employeeWeb: describeEmployeeWeb(applySettings(deployment, snapshot), snapshot),
+    activity: { retentionDays: activityRetentionDays(snapshot.values) },
   };
 }
 

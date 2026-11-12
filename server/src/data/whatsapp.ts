@@ -89,17 +89,19 @@ export function createWhatsAppRepository(db: D1Database, clock: Clock = () => ne
      * Stores a customer's message, creating an unassigned customer for an unknown number.
      * Meta redelivers webhooks, so the provider id makes this idempotent.
      */
-    async receive(input: { externalId: string; from: string; name?: string; type: string; body?: string; sentAt: string; to: string | null; media?: { id: string; mimeType?: string; fileName?: string } }): Promise<{ customerId: string; messageId: string; inserted: boolean } | null> {
+    async receive(input: { externalId: string; from: string; name?: string; type: string; body?: string; sentAt: string; to: string | null; media?: { id: string; mimeType?: string; fileName?: string } }): Promise<{ customerId: string; messageId: string; inserted: boolean; customerCreated: boolean } | null> {
       const normalized = normalizePhone(input.from);
       if (!normalized) return null;
       const find = () => db.prepare("SELECT id FROM customers WHERE phone_key = ? AND archived_at IS NULL")
         .bind(normalized.phoneKey).first<{ id: string }>();
       let customerId = (await find())?.id;
+      let customerCreated = false;
       if (!customerId) {
         try {
           customerId = (await customers.createCustomer({
             name: input.name ?? normalized.phone, phone: normalized.phone, source: "whatsapp",
           })).id;
+          customerCreated = true;
         } catch (error) {
           if (!(error instanceof CustomerPhoneExistsError)) throw error;
           customerId = (await find())?.id;
@@ -115,7 +117,7 @@ export function createWhatsAppRepository(db: D1Database, clock: Clock = () => ne
       ).bind(messageId, customerId, input.externalId, input.type, input.body ?? null,
         normalized.phone, input.to, input.sentAt, timestamp(clock),
         input.media?.id ?? null, input.media?.mimeType ?? null, input.media?.fileName ?? null).run();
-      return { customerId, messageId, inserted: result.meta.changes > 0 };
+      return { customerId, messageId, inserted: result.meta.changes > 0, customerCreated };
     },
   };
 }

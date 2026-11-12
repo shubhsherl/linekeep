@@ -2,6 +2,7 @@ import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { recordActivity, recordMergedActivity, requestActor } from "../../activity/record";
 import type { AppBindings } from "../../app";
 import {
   CallHistoryAuthorizationError,
@@ -79,6 +80,12 @@ export function createDeviceCallHistoryRoutes() {
       const accepted = await createCallHistoryRepository(context.env.DB).upsertBatch(
         context.get("device").id, input,
       );
+      // One row per phone and 15 minutes, with the calls added up: not one per batch, never one per call.
+      const device = context.get("device");
+      await recordMergedActivity(context, {
+        actor: { type: "employee", id: device.employeeId }, channel: "app", category: "device", action: "call_sync",
+        target: { type: "device", id: device.id, label: device.model ?? null },
+      }, { calls: input.entries.length, batches: 1 });
       return context.json({ requestId: context.get("requestId"), accepted });
     } catch (error) {
       if (error instanceof CallHistoryAuthorizationError) {
@@ -127,7 +134,11 @@ export function createAdminCallHistoryRoutes(authorize: MiddlewareHandler<AppBin
   });
   routes.delete("/call-logs/:callLogId", async (context) => {
     const callLogId = z.string().min(1).max(256).parse(context.req.param("callLogId"));
-    await createCallHistoryRepository(context.env.DB).markDeleted(callLogId);
+    if (await createCallHistoryRepository(context.env.DB).markDeleted(callLogId)) {
+      await recordActivity(context, {
+        ...requestActor(context), category: "call", action: "call_log_deleted", target: { type: "call", id: callLogId },
+      });
+    }
     return context.json({
       requestId: context.get("requestId"),
       callLogId,

@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 
+import { touchEmployeeActivity } from "../../activity/record";
 import type { Device } from "../../data/identity";
 import { createWebAuthRepository, WEB_SESSION_ABSOLUTE_MS, type WebAuthRepository, type WebSession } from "../../data/web-auth";
 import type { AppBindings } from "../../app";
@@ -93,6 +94,7 @@ export const requireWebEmployee: MiddlewareHandler<WebBindings> = async (context
     id: `web_${session.employee.id}`, employeeId: session.employee.id, phoneNumbers: [], assignedAt: at, createdAt: at,
   };
   context.set("device", device);
+  await touchEmployeeActivity(context, session.employee.id, "web");
   await next();
 };
 

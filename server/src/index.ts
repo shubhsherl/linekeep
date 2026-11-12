@@ -1,6 +1,7 @@
 import { createApp } from "./app";
 import { istDate, sendCallSummary } from "./reporting/call-summary";
 import { purgeExpiredRecordings, retentionDays } from "./retention/recordings";
+import { purgeExpiredActivity } from "./retention/activity";
 import { purgeStaleAttachments } from "./retention/attachments";
 import { jobKeys } from "./settings/fields";
 import { readJob, writeJob } from "./settings/jobs";
@@ -45,6 +46,17 @@ export default {
       }
     } catch {
       failures.push(new Error("WhatsApp attachment cleanup failed"));
+    }
+    try {
+      // Old activity log rows are removed once per IST day.
+      const today = istDate(controller.scheduledTime);
+      if ((await readJob<{ date?: unknown }>(env.DB, jobKeys.activityLastRun))?.date !== today) {
+        const removed = await purgeExpiredActivity(env, new Date(controller.scheduledTime));
+        if (removed > 0) console.log(JSON.stringify({ job: "activity-retention", removed }));
+        await writeJob(env, jobKeys.activityLastRun, { date: today });
+      }
+    } catch {
+      failures.push(new Error("Activity log retention failed"));
     }
     if (failures.length) throw failures[0];
   },

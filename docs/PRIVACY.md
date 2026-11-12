@@ -29,9 +29,16 @@ Linekeep's source code is open source. This policy covers only the Service opera
 - The calls and recordings the employee's phone shares with the Service, and the chats the employee reads (so we can show unread counts).
 - If the web app is switched on, the employee's sign-in email address, and for each browser they sign in on a session record (a hash of its cookie and its timestamps). Sign-in codes are sent to the employee by email or WhatsApp and are kept only as a short-lived hash.
 
+- An **activity log** of what employees do in the Service, kept so the employer can see who did what and when: sign-ins and sign-outs to the web app (with the IP address and browser used, and failed or rate-limited attempts), the phone being enrolled, revoked or updated, batches of call history and recordings synced from the phone (counts and sizes, merged into one entry per phone per 15 minutes), customers added, edited, assigned or archived (which fields changed, never their new values), WhatsApp messages sent (the customer, the type of message and the template name, never the text) and files uploaded (kind and size), and call recordings played or deleted. The employee's "last active" time is also kept. Opening a chat or viewing a customer's calls is not logged.
+
 ### About administrators
 
 - The email address used to sign in to the dashboard, and which chats each administrator has read.
+- The same activity log records administrators' changes: adding or editing employees (which fields, not the values), phone and customer changes, settings saved (which settings, never the values), call recordings played or deleted, and messages sent from the dashboard.
+
+### About customers in the activity log
+
+The activity log notes that a customer's message arrived (the type of message only, never its text) and the automatic replies we send. It stores the customer's name as it was at the time; a customer whose name is only a phone number is shown masked to its last four digits. Message text, notes, phone numbers, one-time codes and file contents are never written to the activity log.
 
 ### What we do not collect
 
@@ -70,6 +77,7 @@ The database and files are stored in Cloudflare's infrastructure, in its Asia-Pa
 - **Call recordings:** deleted automatically from storage after 30 days.
 - **Call records, customer details and WhatsApp conversations:** kept for as long as we have a business relationship with you and as needed for our records, then deleted. You can ask us to delete them earlier (see below).
 - **Employee data:** kept while the employee uses the Service, and removed on request when they leave.
+- **Activity log:** entries older than 90 days are deleted automatically (an administrator can shorten the period, or choose to keep entries longer, in the dashboard's Config page). Only administrators can see it; employees cannot see the log, but they are told that their activity in Linekeep is recorded for the employer. Sign-in entries (IP address and browser) are in the same log and follow the same retention.
 
 ## Security
 
