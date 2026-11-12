@@ -11,6 +11,8 @@ import { pushAccount } from "../../push/fcm";
 import { pushClientConfig } from "../../push/client-config";
 import { canEncrypt } from "../../settings/crypto";
 import { fieldByKey, featureKeys, sections, type Section } from "../../settings/fields";
+import { readEmployeeWeb, whatsappTemplateSetting } from "../../settings/employee-web";
+import { employeeWebChanges, type EmployeeWebInput } from "./employee-web";
 import {
   applySettings, describeSettings, importableFields, invalidateSettings, loadSettings, resolveFeatures, saveSettings,
   type SettingsSnapshot,
@@ -33,6 +35,10 @@ const bodies = {
     recipients: nullable(z.array(z.string().max(320)).max(1000)),
   }),
   push: z.strictObject({ serviceAccount: text, clientConfig: nullable(z.record(z.string(), z.unknown())) }),
+  employeeWeb: z.strictObject({
+    enabled: nullable(z.boolean()), emailOtp: nullable(z.boolean()), whatsappOtp: nullable(z.boolean()),
+    whatsappTemplate: nullable(whatsappTemplateSetting),
+  }),
 } satisfies Record<Section, z.ZodType>;
 
 const hints: Record<string, string> = {
@@ -112,8 +118,11 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
 
   routes.get("/features", async (context) => {
     const deployment = deploymentOf(context);
-    const { customers, whatsapp } = resolveFeatures(deployment, await loadSettings(deployment));
-    return context.json({ requestId: context.get("requestId"), customers, whatsapp });
+    const snapshot = await loadSettings(deployment);
+    const { customers, whatsapp } = resolveFeatures(deployment, snapshot);
+    return context.json({
+      requestId: context.get("requestId"), customers, whatsapp, employeeWeb: readEmployeeWeb(snapshot.values).enabled,
+    });
   });
 
   routes.get("/settings", async (context) => {
@@ -184,6 +193,8 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
         throw invalid("Turn WhatsApp off before turning Customers off");
       }
       if (next.customers === "false" && next.whatsapp === "true") throw invalid("WhatsApp needs Customers");
+    } else if (section === "employeeWeb") {
+      changes.push(...await employeeWebChanges(applySettings(deployment, snapshot), snapshot, input as EmployeeWebInput));
     } else {
       const merged = new Map(snapshot.values);
       for (const [name, value] of Object.entries(input)) {

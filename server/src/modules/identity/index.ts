@@ -6,12 +6,14 @@ import type { AppBindings } from "../../app";
 import {
   createIdentityRepository,
   directoryCursor,
+  EmployeeEmailExistsError,
   phoneNumbersInput,
   type Device,
   type IdentityRepository,
 } from "../../data/identity";
 import { id, nonnegativeInteger, utcTimestamp } from "../../data/values";
 import type { Env } from "../../env";
+import { ApiError } from "../../http/errors";
 import { enrollmentQr } from "./enrollment-qr";
 
 export type DeviceBindings = AppBindings & {
@@ -52,6 +54,23 @@ export const requireDevice: MiddlewareHandler<DeviceBindings> = async (
   await next();
 };
 
+/**
+ * How an employee-facing router learns who is calling: `authorize` sets the `device` variable (a phone's bearer
+ * credential, or the web session's employee) and `apiBase` prefixes the media URLs the router returns.
+ */
+export interface EmployeeAccess {
+  authorize: MiddlewareHandler<DeviceBindings>;
+  apiBase: string;
+}
+
+export const deviceAccess: EmployeeAccess = { authorize: requireDevice, apiBase: "/v1/device" };
+
+function employeeEmailExists(error: unknown): unknown {
+  return error instanceof EmployeeEmailExistsError
+    ? new ApiError(409, "employee_email_exists", "Another employee already uses this email")
+    : error;
+}
+
 const deviceInfo = z.object({
   model: z.string().trim().min(1).max(128).optional(),
   manufacturer: z.string().trim().min(1).max(128).optional(),
@@ -71,13 +90,16 @@ const heartbeatInput = z.object({
   deviceId: id.optional(),
   phoneNumbers: phoneNumbersInput.optional(),
 });
+const employeeEmail = z.string().trim().max(254).nullable().optional();
 const employeeInput = z.object({
   name: z.string().trim().min(1).max(200),
   phoneNumber: z.string().trim().min(1).max(64).optional(),
+  email: employeeEmail,
 });
 const employeePatchInput = z.strictObject({
   name: z.string().trim().min(1).max(200).optional(),
   phoneNumber: z.string().trim().min(1).max(64).nullable().optional(),
+  email: employeeEmail,
 });
 
 const directoryQuery = z.strictObject({
@@ -214,13 +236,20 @@ export function createAdminIdentityRoutes(
   });
   app.patch("/employees/:employeeId", async (context) => {
     const input = employeePatchInput.parse(await context.req.json());
-    const employee = await identityRepository(context.env).updateEmployee(
-      context.req.param("employeeId"),
-      input,
-    );
+    const employee = await identityRepository(context.env)
+      .updateEmployee(context.req.param("employeeId"), input)
+      .catch((error: unknown) => { throw employeeEmailExists(error); });
     if (!employee)
       throw new HTTPException(404, { message: "Employee not found" });
     return context.json({ requestId: context.get("requestId"), employee });
+  });
+  app.delete("/employees/:employeeId/web-sessions", async (context) => {
+    const repository = identityRepository(context.env);
+    const employeeId = context.req.param("employeeId");
+    if (!(await repository.getEmployee(employeeId)))
+      throw new HTTPException(404, { message: "Employee not found" });
+    const revoked = await repository.revokeWebSessions(employeeId);
+    return context.json({ requestId: context.get("requestId"), employeeId, revoked });
   });
   app.get("/devices", async (context) => {
     const query = revocableDirectoryQuery
@@ -312,9 +341,9 @@ export function createAdminIdentityRoutes(
   );
   app.post("/employees", async (context) => {
     const input = employeeInput.parse(await context.req.json());
-    const employee = await identityRepository(context.env).createEmployee(
-      input,
-    );
+    const employee = await identityRepository(context.env)
+      .createEmployee(input)
+      .catch((error: unknown) => { throw employeeEmailExists(error); });
     return context.json(
       {
         requestId: context.get("requestId"),

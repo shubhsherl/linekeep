@@ -29,13 +29,20 @@ const errors = {
 
 /** An error with its own stable code and a message safe to show an administrator (never values or secrets). */
 export class ApiError extends Error {
-  constructor(readonly status: 400 | 404 | 409 | 413 | 429 | 502 | 503, readonly code: string, message: string) {
+  constructor(
+    readonly status: 400 | 401 | 403 | 404 | 409 | 413 | 429 | 502 | 503,
+    readonly code: string,
+    message: string,
+    /** Extra response headers, such as `Retry-After`. */
+    readonly headers: Record<string, string> = {},
+  ) {
     super(message);
   }
 }
 
 export const handleError: ErrorHandler<AppBindings> = (error, context) => {
   if (error instanceof ApiError) {
+    for (const [name, value] of Object.entries(error.headers)) context.header(name, value);
     return context.json({ requestId: context.get("requestId"), error: { code: error.code, message: error.message } }, error.status);
   }
   const status =

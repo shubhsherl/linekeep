@@ -33,6 +33,8 @@ import { createAdminWhatsAppOutboundRoutes, createDeviceWhatsAppOutboundRoutes }
 
 import { createAdminSettingsRoutes } from "./modules/settings";
 import { createAdminAppRoutes, createPublicDownloadRoutes } from "./modules/app-download";
+import { createWebRoutes } from "./modules/web-auth";
+import { createWebAppRoutes } from "./web-app";
 import type { Env } from "./env";
 import type { Features } from "./settings/fields";
 import { applySettings, loadSettings, resolveFeatures } from "./settings/service";
@@ -92,7 +94,7 @@ export function createApp() {
     if (context.req.method !== "POST" && context.req.method !== "PATCH")
       return next();
     // Chat attachments are raw files; their routes bound the size themselves.
-    if (context.req.method === "POST" && /^\/v1\/(?:admin|device)\/whatsapp\/attachments$/.test(context.req.path)) return next();
+    if (context.req.method === "POST" && /^\/v1\/(?:admin|device|web)\/whatsapp\/attachments$/.test(context.req.path)) return next();
     // A request that declares an empty body (a browser or phone POSTing with no payload) has nothing to type-check.
     if (
       context.req.raw.body &&
@@ -131,6 +133,7 @@ export function createApp() {
   app.route("/v1/device", createDeviceWhatsAppMediaRoutes());
   app.route("/v1/device", createDeviceWhatsAppOutboundRoutes());
   app.route("/v1/device", createDevicePushRoutes());
+  app.route("/v1/web", createWebRoutes());
   app.route("/v1/admin", createAdminIdentityRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCallRoutes(requireAdmin));
   app.route("/v1/admin", createAdminCallHistoryRoutes(requireAdmin));
@@ -147,6 +150,7 @@ export function createApp() {
   app.use("/admin/*", requireAdminPage);
   app.get("/admin/", (context) => context.redirect("/admin", 308));
   app.route("/admin", createAdminUi());
+  app.route("/app", createWebAppRoutes());
 
   app.notFound((context) =>
     context.json(

@@ -15,7 +15,7 @@ import {
 } from "../../whatsapp/attachments";
 import { whatsappConfig } from "../../whatsapp/cloud";
 import { fetchTemplates } from "../../whatsapp/templates";
-import { requireDevice, type DeviceBindings } from "../identity";
+import { deviceAccess, type DeviceBindings, type EmployeeAccess } from "../identity";
 import { serveStoredFile } from "./media";
 import { listTemplates, WhatsAppSendFailedError, WhatsAppUnavailableError } from "./send";
 
@@ -152,12 +152,12 @@ export function createAdminWhatsAppOutboundRoutes(authorize: MiddlewareHandler<A
   return routes;
 }
 
-/** Mount at /v1/device: an employee uploads files for their own sends and reads the same template list. */
-export function createDeviceWhatsAppOutboundRoutes() {
+/** Mount at /v1/device (or /v1/web): an employee uploads files for their own sends and reads the same template list. */
+export function createDeviceWhatsAppOutboundRoutes(access: EmployeeAccess = deviceAccess) {
   const routes = new Hono<DeviceBindings>();
-  routes.post("/whatsapp/attachments", requireDevice, uploadLimit, (context) =>
+  routes.post("/whatsapp/attachments", access.authorize, uploadLimit, (context) =>
     uploadAttachment(context, { type: "device", id: context.get("device").id }));
-  routes.get("/whatsapp/templates", requireDevice, (context) => templatesResponse(context, "/v1/device"));
-  routes.get("/whatsapp/templates/:templateName/header-image", requireDevice, (context) => headerImageResponse(context));
+  routes.get("/whatsapp/templates", access.authorize, (context) => templatesResponse(context, access.apiBase));
+  routes.get("/whatsapp/templates/:templateName/header-image", access.authorize, (context) => headerImageResponse(context));
   return routes;
 }

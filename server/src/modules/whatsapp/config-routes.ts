@@ -7,7 +7,7 @@ import {
   ConfigLimitError, ConfigOrderError, autoReplyCreate, autoReplyUpdate, createWhatsAppConfigRepository,
   quickMessageCreate, quickMessageUpdate,
 } from "../../data/whatsapp-config";
-import { requireDevice, type DeviceBindings } from "../identity";
+import { deviceAccess, type DeviceBindings, type EmployeeAccess } from "../identity";
 
 const id = z.string().min(1).max(256);
 const reorderInput = z.strictObject({ ids: z.array(id).max(100) });
@@ -85,10 +85,10 @@ export function createAdminWhatsAppConfigRoutes(authorize: MiddlewareHandler<App
   return routes;
 }
 
-/** Mount at /v1/device: employees' phones read the shared quick messages. */
-export function createDeviceWhatsAppConfigRoutes() {
+/** Mount at /v1/device (or /v1/web): employees read the shared quick messages. */
+export function createDeviceWhatsAppConfigRoutes(access: EmployeeAccess = deviceAccess) {
   const routes = new Hono<DeviceBindings>();
-  routes.get("/whatsapp/quick-messages", requireDevice, async (context) => {
+  routes.get("/whatsapp/quick-messages", access.authorize, async (context) => {
     context.header("Cache-Control", "no-store");
     return context.json({ requestId: context.get("requestId"), items: await createWhatsAppConfigRepository(context.env.DB).listQuickMessages() });
   });

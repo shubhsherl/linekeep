@@ -100,8 +100,8 @@ const chatInput = z.strictObject({
 });
 
 export type CustomerCursor = z.infer<typeof callHistoryCursor>;
-/** Restricts reads to customers assigned to this employee (device access). */
-export interface CustomerScope { employeeId: string }
+/** Restricts reads to customers assigned to this employee (device or web access). `apiBase` prefixes media URLs. */
+export interface CustomerScope { employeeId: string; apiBase?: string }
 
 export interface Customer {
   id: string;
@@ -510,7 +510,7 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
         ORDER BY m.sent_at DESC, m.id DESC LIMIT ?`,
       ).bind(customerId, ...(value.cursor ? [value.cursor.sortAt, value.cursor.id] : []),
         value.limit + 1).all<MessageRow>();
-      return paged(rows.results.map((row) => message(row, scope ? "/v1/device" : "/v1/admin")), value.limit,
+      return paged(rows.results.map((row) => message(row, scope ? scope.apiBase ?? "/v1/device" : "/v1/admin")), value.limit,
         (item) => ({ sortAt: item.sentAt, id: item.id }));
     },
 

@@ -133,10 +133,11 @@ export async function headerFile(env: Env, template: WhatsAppTemplate, overrideI
  */
 export async function sendToCustomer(
   env: Env, customer: Customer, input: WhatsAppSendInput, employeeId: string | null, owner: AttachmentOwner | null = null,
+  apiBase: string = owner?.type === "device" ? "/v1/device" : "/v1/admin",
 ): Promise<WhatsAppMessage> {
   const config = whatsappConfig(env);
   if (!config) throw new WhatsAppUnavailableError();
-  const repository = createWhatsAppRepository(env.DB, undefined, owner?.type === "device" ? "/v1/device" : "/v1/admin");
+  const repository = createWhatsAppRepository(env.DB, undefined, apiBase);
   const id = `wam_${input.clientMessageId}`;
   const existing = await repository.get(id);
   if (existing) {
@@ -195,4 +196,47 @@ export async function sendToCustomer(
     throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
   }
   return (await repository.get(id)) ?? queued.message;
+}
+
+/** How the employee web app's sign-in code goes into a template, with every value already resolved. */
+export interface OtpTemplateSend {
+  name: string; language: string;
+  /** 1-based position of the body variable that receives the code. */
+  otpParam: number;
+  /** Values of the other body variables by 1-based position. */
+  otherParams: ReadonlyMap<number, string>;
+  /** Authentication templates: send the code as the copy-code / URL button parameter too. */
+  buttonParam: boolean;
+}
+
+/**
+ * Sends a one-time sign-in code to an employee's WhatsApp number with an approved template, which Meta allows
+ * outside the 24-hour window. Nothing is stored (the recipient is not a customer) and nothing is logged. Failures
+ * carry no provider text.
+ */
+export async function sendOtpTemplate(env: Env, to: string, send: OtpTemplateSend, code: string): Promise<void> {
+  const config = whatsappConfig(env);
+  if (!config?.wabaId) throw new WhatsAppUnavailableError();
+  let template: WhatsAppTemplate | undefined;
+  try {
+    template = (await fetchTemplates(config, { name: send.name })).find((item) => item.language === send.language);
+  } catch (error) {
+    throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
+  }
+  if (!template?.otpCapable || send.otpParam < 1 || send.otpParam > template.variables.length) {
+    throw new WhatsAppSendFailedError(false);
+  }
+  const params = template.variables.map((variable, index) => {
+    const value = index + 1 === send.otpParam ? code : send.otherParams.get(index + 1);
+    if (value === undefined) throw new WhatsAppSendFailedError(false);
+    return { key: variable.key, named: template.named, value };
+  });
+  try {
+    await sendCloudMessage(config, to.replace(/\D/g, ""), {
+      type: "template", name: template.name, language: template.language, params,
+      ...(send.buttonParam ? { buttonCode: code } : {}),
+    });
+  } catch (error) {
+    throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
+  }
 }

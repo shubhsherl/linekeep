@@ -7,7 +7,7 @@ import { createCustomerRepository } from "../../data/customers";
 import { createWhatsAppRepository } from "../../data/whatsapp";
 import type { Env } from "../../env";
 import { downloadMedia, whatsappConfig } from "../../whatsapp/cloud";
-import { requireDevice, type DeviceBindings } from "../identity";
+import { deviceAccess, type DeviceBindings, type EmployeeAccess } from "../identity";
 
 const messageId = z.string().regex(/^wam_[0-9a-f-]{36}$/).or(z.string().regex(/^wam_[A-Za-z0-9_-]{1,64}$/));
 
@@ -92,10 +92,10 @@ export function createAdminWhatsAppMediaRoutes(authorize: MiddlewareHandler<AppB
   return routes;
 }
 
-/** Mount at /v1/device: an employee sees media only from customers assigned to them. */
-export function createDeviceWhatsAppMediaRoutes() {
+/** Mount at /v1/device (or /v1/web): an employee sees media only from customers assigned to them. */
+export function createDeviceWhatsAppMediaRoutes(access: EmployeeAccess = deviceAccess) {
   const routes = new Hono<DeviceBindings>();
-  routes.get("/whatsapp/messages/:messageId/media", requireDevice, (context) => {
+  routes.get("/whatsapp/messages/:messageId/media", access.authorize, (context) => {
     const { employeeId } = context.get("device");
     return serve(context.env, context.req.raw, messageId.parse(context.req.param("messageId")),
       async (customerId) => (await createCustomerRepository(context.env.DB).getCustomer(customerId, { employeeId })) !== null);

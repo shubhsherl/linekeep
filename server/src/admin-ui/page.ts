@@ -239,6 +239,8 @@ export const adminHtml = `<!doctype html>
           <label>Full name<input name="name" autocomplete="name" required maxlength="200"></label>
           <label>Phone number (optional)<input name="phoneNumber" type="tel" autocomplete="off" maxlength="32" placeholder="+919876543210" aria-describedby="employee-phone-help"></label>
           <p id="employee-phone-help" class="hint">Used only to fill WhatsApp template messages (for example, who the customer should call).</p>
+          <label>Email (optional)<input name="email" type="email" autocomplete="off" maxlength="254" placeholder="name@example.com" aria-describedby="employee-email-help"></label>
+          <p id="employee-email-help" class="hint">The address this employee signs in with on the web app (one-time codes are sent here). Each address can belong to one employee.</p>
           <button type="submit">Create employee</button>
         </fieldset><p id="employee-status" role="status" aria-live="polite"></p><p id="employee-error" class="error-text" role="alert" hidden></p></form>
         <p id="employees-status" role="status" aria-live="polite"></p><p id="employees-error" class="error-text" role="alert" hidden></p>
@@ -284,6 +286,7 @@ export const adminHtml = `<!doctype html>
             <li id="config-nav-whatsapp" hidden><button class="cfg-nav-item" type="button" data-section="whatsapp">Auto replies &amp; quick messages</button></li>
             <li><button class="cfg-nav-item" type="button" data-section="email">Daily email report</button></li>
             <li><button class="cfg-nav-item" type="button" data-section="push">Push notifications</button></li>
+            <li><button class="cfg-nav-item" type="button" data-section="web">Employee web access</button></li>
             <li><button class="cfg-nav-item" type="button" data-section="app">Android app</button></li>
           </ul>
         </nav>
@@ -326,6 +329,10 @@ export const adminHtml = `<!doctype html>
           <section id="config-section-push" class="cfg-section" aria-labelledby="config-push-heading" hidden>
             <h2 id="config-push-heading" class="cfg-section-title" tabindex="-1">Push notifications</h2>
             <div id="settings-push-body" class="cfg-body"></div>
+          </section>
+          <section id="config-section-web" class="cfg-section" aria-labelledby="config-web-heading" hidden>
+            <h2 id="config-web-heading" class="cfg-section-title" tabindex="-1">Employee web access</h2>
+            <div id="settings-web-body" class="cfg-body"></div>
           </section>
           <section id="config-section-app" class="cfg-section" aria-labelledby="config-app-heading" hidden>
             <h2 id="config-app-heading" class="cfg-section-title" tabindex="-1">Android app</h2>

@@ -14,6 +14,7 @@ import {
   createCustomerRepository,
   customerEmployeesInput,
   type CustomerCursor,
+  type CustomerScope,
 } from "../../data/customers";
 import type { Env } from "../../env";
 import { defer } from "../../http/defer";
@@ -22,7 +23,7 @@ import { ApiError } from "../../http/errors";
 import { requireFeature } from "../../settings/gate";
 import { BULK_BODY_LIMIT, bulkCreateCustomers } from "./bulk";
 import { createWhatsAppReadRepository } from "../../data/whatsapp-reads";
-import { requireDevice, type DeviceBindings } from "../identity";
+import { deviceAccess, type DeviceBindings, type EmployeeAccess } from "../identity";
 import type { AttachmentOwner } from "../../data/whatsapp-attachments";
 import { whatsappSendInput } from "../../data/whatsapp-send";
 import {
@@ -105,7 +106,7 @@ function pageBody(requestId: string, page: { nextCursor: CustomerCursor | null }
 
 /** The shared handlers only differ in who may see which customer. */
 function customerReadRoutes<B extends AppBindings>(
-  resolveScope: (context: Context<B>) => { employeeId: string } | undefined,
+  resolveScope: (context: Context<B>) => CustomerScope | undefined,
   parseList: (url: string) => ListQuery,
 ) {
   const routes = new Hono<B>();
@@ -145,14 +146,16 @@ function errorBody(requestId: string, code: string, message: string) {
  * Shared by the admin and device routes; `employeeId` is the device's employee, or null for an administrator.
  * `owner` decides which staged attachments the sender may use.
  */
-async function sendMessage<B extends AppBindings>(context: Context<B>, customerKey: string, employeeId: string | null, owner: AttachmentOwner) {
+async function sendMessage<B extends AppBindings>(
+  context: Context<B>, customerKey: string, employeeId: string | null, owner: AttachmentOwner, apiBase?: string,
+) {
   const requestId = context.get("requestId");
   const scope = employeeId === null ? undefined : { employeeId };
   const found = await createCustomerRepository(context.env.DB).getCustomer(customerId.parse(customerKey), scope);
   if (!found) throw new HTTPException(404, { message: "Customer not found" });
   const input = whatsappSendInput.parse(await context.req.json());
   try {
-    const sent = await sendToCustomer(context.env as Env, found, input, employeeId, owner);
+    const sent = await sendToCustomer(context.env as Env, found, input, employeeId, owner, apiBase);
     return context.json({ requestId, message: sent }, 201);
   } catch (error) {
     if (error instanceof WhatsAppUnavailableError) {
@@ -289,17 +292,17 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
 }
 
 /**
- * Mount at /v1/device. The bearer credential identifies the device's current employee, who
- * sees only assigned customers; anything else is a 404, never a 403.
+ * Mount at /v1/device (or /v1/web). The credential identifies the employee, who sees only assigned customers;
+ * anything else is a 404, never a 403.
  */
-export function createDeviceCustomerRoutes() {
+export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess) {
   const routes = new Hono<DeviceBindings>();
   // Path-scoped: this router shares /v1/device with unauthenticated registration.
   for (const path of ["/customers", "/customers/*", "/whatsapp/*"]) {
     routes.use(path, async (context, next) => {
       context.header("Cache-Control", "no-store");
       await next();
-    }, requireDevice, requireFeature(path.startsWith("/whatsapp") ? "whatsapp" : "customers"));
+    }, access.authorize, requireFeature(path.startsWith("/whatsapp") ? "whatsapp" : "customers"));
   }
   // Registered before the generic `/customers/:customerId` read so `lookup` is not taken for an id.
   routes.get("/customers/lookup", async (context) => {
@@ -359,7 +362,7 @@ export function createDeviceCustomerRoutes() {
     return context.json({ requestId: context.get("requestId"), customer: updated });
   });
   routes.route("/", customerReadRoutes<DeviceBindings>(
-    (context) => ({ employeeId: context.get("device").employeeId }),
+    (context) => ({ employeeId: context.get("device").employeeId, apiBase: access.apiBase }),
     (url) => deviceListQuery.parse(queryValues(url)),
   ));
   routes.get("/whatsapp/chats", async (context) => {
@@ -387,6 +390,7 @@ export function createDeviceCustomerRoutes() {
     return context.json({ requestId: context.get("requestId"), customerId: id, unreadCount: 0 });
   });
   routes.post("/customers/:customerId/messages", (context) =>
-    sendMessage(context, context.req.param("customerId"), context.get("device").employeeId, { type: "device", id: context.get("device").id }));
+    sendMessage(context, context.req.param("customerId"), context.get("device").employeeId,
+      { type: "device", id: context.get("device").id }, access.apiBase));
   return routes;
 }

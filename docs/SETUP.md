@@ -170,6 +170,10 @@ You do not have to build or send the APK yourself. The server stores no APK; it 
 
 `/download` and `/download/linekeep.apk` (a redirect to the GitHub release) are public by design and must stay reachable without an Access login. The setup script protects only `/admin*` and `/v1/admin*`, so they are. If you created the Access application by hand for the whole hostname, narrow it to those four paths (see [Cloudflare Access](../server/README.md#cloudflare-access)); do not add `/download*` to it. A fork that publishes its own releases changes `COMMUNITY_APK_REPO` in `server/src/modules/app-download/community-build.ts`.
 
+### Let employees use a browser
+
+Employees can also use Linekeep on a computer at `https://<worker>/app`, signed in with a one-time code sent to their email (or WhatsApp). In the admin: add each employee's email under **Employees**, open **Config → Employee web access**, follow its steps (email needs the Mailgun settings from **Daily email report**; no recipients are required), turn it on, and share the link. `/app*` and `/v1/web*` must stay **outside** Cloudflare Access: the Access application's destinations remain exactly `/admin*` and `/v1/admin*`. Employees see only their own customers, chats and calls, exactly like the Android app.
+
 ## 6. Enroll a phone
 
 1. Open Linekeep and tap **Scan QR code** on Home, then scan the QR code from the admin. Confirm the server name shown.

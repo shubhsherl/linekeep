@@ -6,6 +6,8 @@ export interface Env {
   ENVIRONMENT: Environment;
   MAX_RECORDING_BYTES: string;
   LOCAL_ADMIN_SECRET?: string;
+  /** Local development only: "true" prints sign-in codes to the console of a Worker on localhost. Ignored anywhere else. */
+  WEB_OTP_DEV_LOG?: string;
   TOKEN_HASH_SECRET?: string;
   CALL_SUMMARY_ENABLED?: string;
   /** IST "HH:MM" the daily summary is sent (rounded down to :00/:30); unset means 18:00. */

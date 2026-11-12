@@ -646,6 +646,7 @@ export const clientJavaScript = String.raw`(() => {
     const details = element('details', undefined, 'row-details');
     details.append(element('summary', 'Employee details'), element('p', 'Employee ID: ' + employee.id),
       ...(employee.phoneNumber ? [element('p', 'Phone number: ' + employee.phoneNumber)] : []),
+      element('p', 'Web sign-in email: ' + (employee.email || 'none') + ' · Web sessions: ' + (Number(employee.webSessions) || 0)),
       element('p', (employee.active ? 'Active' : 'Inactive') + ' · Created ' + dateText(employee.createdAt)));
     const actions = element('div', undefined, 'actions');
     const edit = button('Edit details', () => {
@@ -669,6 +670,15 @@ export const clientJavaScript = String.raw`(() => {
       phoneInput.autocomplete = 'off';
       phoneInput.placeholder = '+919876543210';
       phoneLabel.append(phoneInput);
+      const emailLabel = element('label', 'Email for web sign-in (optional)');
+      const emailInput = element('input');
+      emailInput.name = 'email';
+      emailInput.type = 'email';
+      emailInput.value = employee.email || '';
+      emailInput.maxLength = 254;
+      emailInput.autocomplete = 'off';
+      emailInput.placeholder = 'name@example.com';
+      emailLabel.append(emailInput);
       const status = element('p');
       status.setAttribute('role', 'status');
       const error = element('p', '', 'error-text');
@@ -678,7 +688,7 @@ export const clientJavaScript = String.raw`(() => {
       save.type = 'submit';
       const cancel = button('Cancel', () => { form.remove(); actions.hidden = false; edit.focus(); });
       controls.append(save, cancel);
-      fields.append(label, element('p', 'Correcting a name updates this same employee on historical recordings. If a phone is changing hands, cancel and reassign the device to another employee instead.', 'hint'), phoneLabel, element('p', 'Used only to fill WhatsApp template messages (for example, who the customer should call).', 'hint'), controls);
+      fields.append(label, element('p', 'Correcting a name updates this same employee on historical recordings. If a phone is changing hands, cancel and reassign the device to another employee instead.', 'hint'), phoneLabel, element('p', 'Used only to fill WhatsApp template messages (for example, who the customer should call).', 'hint'), emailLabel, element('p', 'The address this employee signs in with on the web app. Changing or clearing it signs the employee out of the web app everywhere.', 'hint'), controls);
       form.append(fields, status, error);
       card.append(form);
       input.focus();
@@ -692,7 +702,7 @@ export const clientJavaScript = String.raw`(() => {
         status.textContent = 'Saving details…';
         error.textContent = '';
         try {
-          const data = await api('/employees/' + encodeURIComponent(employee.id), { method: 'PATCH', body: JSON.stringify({ name, phoneNumber: phoneInput.value.trim() || null }) });
+          const data = await api('/employees/' + encodeURIComponent(employee.id), { method: 'PATCH', body: JSON.stringify({ name, phoneNumber: phoneInput.value.trim() || null, email: emailInput.value.trim() || null }) });
           rememberEmployee(data.employee);
           updateEmployees();
           const replacement = renderEmployee(data.employee);
@@ -721,7 +731,20 @@ export const clientJavaScript = String.raw`(() => {
       byId('devices-heading').focus();
     });
     devices.setAttribute('aria-label', 'Devices for ' + employee.name);
-    actions.append(edit, invitations, devices);
+    const sessions = Number(employee.webSessions) || 0;
+    const signOut = button('Sign out everywhere', async () => {
+      signOut.disabled = true;
+      message('employees-error', '');
+      try {
+        await api('/employees/' + encodeURIComponent(employee.id) + '/web-sessions', { method: 'DELETE' });
+        const replacement = renderEmployee({ ...employee, webSessions: 0 });
+        card.replaceWith(replacement);
+        message('employee-status', 'Signed ' + employee.name + ' out of every web browser.');
+      } catch (failure) { message('employees-error', errorMessage(failure)); signOut.disabled = false; }
+    });
+    signOut.disabled = sessions === 0;
+    signOut.setAttribute('aria-label', 'Sign out ' + employee.name + ' of the web app everywhere (' + sessions + ' ' + (sessions === 1 ? 'session' : 'sessions') + ')');
+    actions.append(edit, invitations, devices, signOut);
     const top = element('div', undefined, 'management-top');
     top.append(heading, actions);
     card.append(top, details);
@@ -813,12 +836,13 @@ export const clientJavaScript = String.raw`(() => {
     const formData = new FormData(form);
     const name = String(formData.get('name') || '').trim();
     const phoneNumber = String(formData.get('phoneNumber') || '').trim();
+    const email = String(formData.get('email') || '').trim();
     message('employee-error', '');
     if (!name || name.length > 200) { message('employee-error', 'Enter a name between 1 and 200 characters.'); form.elements.namedItem('name').focus(); return; }
     fields.disabled = true;
     message('employee-status', 'Creating employee…');
     try {
-      const data = await api('/employees', { method: 'POST', body: JSON.stringify(phoneNumber ? { name, phoneNumber } : { name }) });
+      const data = await api('/employees', { method: 'POST', body: JSON.stringify({ name, ...(phoneNumber ? { phoneNumber } : {}), ...(email ? { email } : {}) }) });
       if (!data || !data.employee || typeof data.employee.id !== 'string' || typeof data.employee.name !== 'string') throw new Error('The employee response could not be read. Refresh the directory before creating a duplicate.');
       rememberEmployee(data.employee);
       updateEmployees();
@@ -6478,7 +6502,7 @@ export const clientJavaScript = String.raw`(() => {
   }
   function renderSettings(only) {
     renderImportBanner();
-    const pages = { features: renderFeaturesPage, whatsapp: renderWhatsappPage, email: renderEmailPage, push: renderPushPage };
+    const pages = { features: renderFeaturesPage, whatsapp: renderWhatsappPage, email: renderEmailPage, push: renderPushPage, employeeWeb: renderWebPage };
     for (const [name, render] of Object.entries(pages)) if (!only || only === name) render();
   }
 
@@ -6656,6 +6680,122 @@ export const clientJavaScript = String.raw`(() => {
     const lastText = last && typeof last === 'object' ? 'Last report: ' + String(last.date) + ' · ' + String(last.status) : 'No report has been sent yet.';
     schedule.append(element('p', lastText, 'hint'));
     form.append(panel, schedule, actionRow(ui, saveButton(ui), test), ui.status, ui.error);
+    ui.body.append(form);
+  }
+
+  // ---- Config: employee web access (sign in at /app with an emailed or WhatsApp one-time code) ----
+  const webTemplates = { loaded: false, items: [], error: '' };
+  async function loadWebTemplates() {
+    try {
+      const data = await api('/whatsapp/templates');
+      webTemplates.items = Array.isArray(data.items) ? data.items.filter((item) => item && item.otpCapable === true) : [];
+      webTemplates.error = '';
+    } catch (error) {
+      webTemplates.items = [];
+      webTemplates.error = errorMessage(error);
+    }
+    webTemplates.loaded = true;
+  }
+  function webPreview(template, otpParam, others) {
+    const values = new Map();
+    template.variables.forEach((variable, index) => {
+      if (index + 1 === otpParam) { values.set(variable.key, '123456'); return; }
+      const other = others[index + 1] || {};
+      values.set(variable.key, other.source === 'custom' ? (other.value || '…') : 'Employee name');
+    });
+    return [template.header, template.body, template.footer].filter(Boolean).join('\n')
+      .replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (all, key) => values.has(key) ? values.get(key) : all);
+  }
+  function renderWebPage() {
+    const ui = settingsPage('web', 'settings-web-body');
+    const current = settingsSection('employeeWeb');
+    const needs = current.prerequisites || {};
+    const emailMissing = needs.email && Array.isArray(needs.email.missing) ? needs.email.missing : [];
+    const emailReady = needs.email && needs.email.configured === true;
+    const whatsappReady = needs.whatsapp && needs.whatsapp.configured === true;
+    ui.body.append(stepsBlock('Let employees use Linekeep on a computer', [
+      'Add each employee’s work email under Employees (when you create them, or with Edit details). Only employees with an email can sign in, and each email can belong to one employee.',
+      'Choose how employees receive their sign-in code. Email needs the Mailgun domain, sending key and From address under Daily email report (no recipients needed). WhatsApp needs an approved template, below.',
+      'For WhatsApp: choose the template, then choose which variable receives the code. Authentication templates also send the code to their copy-code button. Preview shows a sample.',
+      'Turn on Employee web access and click Save. Share the link below. Employees open it, enter their email, then the 6-digit code they receive.',
+      'In Cloudflare Access, keep the protected destinations as /admin* and /v1/admin* only. The employee app at /app has its own sign-in and must not be behind Access.'
+    ]));
+    const enabled = switchField(ui, 'enabled', 'Employee web access', current.enabled);
+    const emailOtp = switchField(ui, 'emailOtp', 'Send sign-in codes by email', current.emailOtp !== false);
+    const whatsappOtp = switchField(ui, 'whatsappOtp', 'Send sign-in codes on WhatsApp', current.whatsappOtp);
+
+    const emailPanel = formPanel('Email codes', 'The code is emailed to the employee through the Mailgun account under Daily email report.');
+    emailPanel.append(emailOtp.node, element('p', emailReady ? 'Email is ready.' : 'Email is not ready yet. Missing or invalid in Daily email report: ' + (emailMissing.filter((item) => item !== 'recipients').join(', ') || 'Mailgun settings') + '.', emailReady ? 'hint' : 'notice'));
+
+    const saved = current.whatsappTemplate;
+    const choice = { name: saved ? saved.name : '', language: saved ? saved.language : '', otpParam: saved ? saved.otpParam : 1, buttonParam: saved ? saved.buttonParam === true : false, others: {} };
+    if (saved) for (const item of saved.otherParams || []) choice.others[item.index] = { source: item.source, value: item.value || '' };
+    const templateBox = element('div');
+    const whatsappPanel = formPanel('WhatsApp codes', 'The code is sent from your WhatsApp Business number with an approved template. Templates are allowed outside the 24-hour window.');
+    whatsappPanel.append(whatsappOtp.node, templateBox);
+    function drawTemplate() {
+      templateBox.replaceChildren();
+      if (!whatsappOtp.input.checked) return;
+      if (!whatsappReady) { templateBox.append(element('p', 'WhatsApp is not set up yet. Add the access token, Phone number ID and WhatsApp Business Account ID under WhatsApp Business first.', 'notice')); return; }
+      if (!webTemplates.loaded) { templateBox.append(element('p', 'Loading templates…', 'hint')); loadWebTemplates().then(drawTemplate); return; }
+      if (webTemplates.error) { templateBox.append(element('p', 'Templates could not be loaded. ' + webTemplates.error + ' Turn on WhatsApp Business under Features to choose a template.', 'error-text')); return; }
+      const options = webTemplates.items;
+      if (!options.length) { templateBox.append(element('p', 'No approved template can carry a code. In Meta, create an Authentication template, or a utility template with no media header and a variable such as {{1}} for the code.', 'notice')); return; }
+      const key = (item) => item.name + ' · ' + item.language;
+      const picker = selectField(ui, 'template', 'Template', choice.name ? choice.name + ' · ' + choice.language : '', [['', 'Choose a template…'], ...options.map((item) => [key(item), key(item) + ' (' + String(item.category || '').toLowerCase() + ')'])]);
+      picker.input.addEventListener('change', () => {
+        const chosen = options.find((item) => key(item) === picker.input.value);
+        Object.assign(choice, chosen ? { name: chosen.name, language: chosen.language, otpParam: 1, buttonParam: false, others: {} } : { name: '', language: '', otpParam: 1, buttonParam: false, others: {} });
+        drawTemplate();
+      });
+      templateBox.append(picker.node);
+      const template = options.find((item) => item.name === choice.name && item.language === choice.language);
+      if (!template) return;
+      const names = template.variables.map((variable, index) => [String(index + 1), '{{' + variable.key + '}}' + (variable.example ? ' (e.g. ' + variable.example + ')' : '')]);
+      const codeVar = selectField(ui, 'otpParam', 'Variable that receives the code', String(choice.otpParam), names);
+      codeVar.input.addEventListener('change', () => { choice.otpParam = Number(codeVar.input.value); delete choice.others[choice.otpParam]; drawTemplate(); });
+      templateBox.append(codeVar.node);
+      template.variables.forEach((variable, index) => {
+        const position = index + 1;
+        if (position === choice.otpParam) return;
+        const other = choice.others[position] || (choice.others[position] = { source: 'employee_name', value: '' });
+        const row = element('div', undefined, 'filter-grid cfg-grid');
+        const source = selectField(ui, 'source-' + position, 'Value for {{' + variable.key + '}}', other.source, [['employee_name', 'The employee’s name'], ['custom', 'Fixed text']]);
+        const custom = textField(ui, 'value-' + position, 'Fixed text', other.value, { hint: 'Used as-is for every employee.' });
+        custom.node.hidden = other.source !== 'custom';
+        source.input.addEventListener('change', () => { other.source = source.input.value; custom.node.hidden = other.source !== 'custom'; refreshPreview(); });
+        custom.input.addEventListener('input', () => { other.value = custom.input.value; refreshPreview(); });
+        row.append(source.node, custom.node);
+        templateBox.append(row);
+      });
+      const authentication = (template.buttons || []).some((item) => item.type === 'OTP');
+      choice.buttonParam = authentication;
+      if (authentication) templateBox.append(element('p', 'This is an authentication template: the code is also sent to its copy-code button.', 'hint'));
+      const preview = element('pre', undefined, 'cfg-preview');
+      preview.setAttribute('aria-label', 'Preview with a sample code');
+      function refreshPreview() { preview.textContent = webPreview(template, choice.otpParam, choice.others); }
+      refreshPreview();
+      templateBox.append(element('p', 'Preview (sample code 123456)', 'cfg-fixed-label'), preview);
+    }
+    whatsappOtp.input.addEventListener('change', drawTemplate);
+    drawTemplate();
+
+    const link = formPanel('Link for employees', 'Share this address. Employees sign in with their own email; nothing else is public.');
+    link.append(fixedValue(ui, 'url', 'Employee web app link', location.origin + '/app'));
+    const form = settingsForm(ui, async () => {
+      const body = { enabled: enabled.value(), emailOtp: emailOtp.value(), whatsappOtp: whatsappOtp.value() };
+      if (whatsappOtp.value()) {
+        if (!choice.name) throw new Error('Choose a WhatsApp template first.');
+        const others = Object.entries(choice.others).map(([index, item]) => ({ index: Number(index), source: item.source, ...(item.source === 'custom' ? { value: item.value } : {}) }))
+          .filter((item) => item.index !== choice.otpParam);
+        body.whatsappTemplate = { name: choice.name, language: choice.language, otpParam: choice.otpParam, otherParams: others, buttonParam: choice.buttonParam === true };
+      }
+      await putSettings('employeeWeb', body);
+      note(byId(ui.status.id), 'Saved.');
+    });
+    const panel = formPanel('Employee web access');
+    panel.append(enabled.node, element('p', current.methods && current.methods.length ? 'Employees can sign in with: ' + current.methods.join(' and ') + '.' : 'No sign-in method is ready yet, so access cannot be turned on.', 'hint'));
+    form.append(panel, emailPanel, whatsappPanel, link, actionRow(ui, saveButton(ui)), ui.status, ui.error);
     ui.body.append(form);
   }
 

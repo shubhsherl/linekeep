@@ -4,13 +4,13 @@ import type { Env } from "../env";
 import { firebaseClientConfig } from "../push/client-config";
 import { pushAccount } from "../push/fcm";
 
-export const sections = ["features", "whatsapp", "email", "push"] as const;
+export const sections = ["features", "whatsapp", "email", "push", "employeeWeb"] as const;
 export type Section = (typeof sections)[number];
 
 /** A dashboard-managed value. `env` is the deployment variable it overrides; stored text always has the env's own format. */
 export interface Field {
   readonly key: string;
-  readonly section: Exclude<Section, "features">;
+  readonly section: Exclude<Section, "features" | "employeeWeb">;
   readonly name: string;
   readonly env: keyof Env;
   readonly secret: boolean;

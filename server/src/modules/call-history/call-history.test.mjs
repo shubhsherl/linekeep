@@ -28,7 +28,13 @@ async function fixture(t, throughMigration) {
   if (!throughMigration) await enableFeatures(DB);
   let now = new Date(start);
   const identity = createIdentityRepository(DB, tokenSecret, () => now);
-  const employee = await identity.createEmployee({ name: "History employee" });
+  // A database frozen at an old migration predates the employee email column the repository now writes.
+  const employee = throughMigration
+    ? { id: "emp_00000000-0000-4000-8000-000000000001" }
+    : await identity.createEmployee({ name: "History employee" });
+  if (throughMigration) {
+    await DB.prepare("INSERT INTO employees (id, name, created_at) VALUES (?, 'History employee', ?)").bind(employee.id, start).run();
+  }
   async function register(employeeId = employee.id) {
     const invite = await identity.createInvitation(employeeId, "2026-09-25T00:00:00Z");
     return identity.redeemInvitation(invite.invitationCode, { model: "Synthetic history device" });

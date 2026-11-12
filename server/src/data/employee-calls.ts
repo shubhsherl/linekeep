@@ -7,6 +7,8 @@ import { utcTimestamp } from "./values";
 const listInput = z.strictObject({
   callType: callType.optional(),
   number: z.string().max(256).optional(),
+  /** Last ten digits of the number, as `callPhoneKey` computes them; exact match instead of `number`'s substring match. */
+  phoneKey: z.string().regex(/^\d{10}$/).optional(),
   from: utcTimestamp.optional(),
   to: utcTimestamp.optional(),
   hasRecording: z.boolean().optional(),
@@ -34,6 +36,17 @@ const completedLink = `x.call_log_id IS NOT NULL AND x.upload_status = 'complete
 /** Read-only call history of one employee. Every query is bound to that employee's id in SQL. */
 export function createEmployeeCallRepository(db: D1Database) {
   return {
+    /** The employee's own completed recording of one call-log entry, or null (unknown call, someone else's, none, deleted). */
+    async recordingFor(employeeId: string, callLogId: string): Promise<{ objectKey: string; contentType: string; displayName: string } | null> {
+      const row = await db.prepare(
+        `SELECT x.object_key, x.content_type, x.display_name FROM calls x
+        JOIN call_logs h ON h.id = x.call_log_id
+        WHERE x.call_log_id = ? AND h.employee_id = ? AND x.employee_id = ? AND h.deleted_at IS NULL AND ${completedLink}
+        ORDER BY x.created_at DESC, x.id DESC LIMIT 1`,
+      ).bind(callLogId, employeeId, employeeId).first<{ object_key: string; content_type: string; display_name: string }>();
+      return row ? { objectKey: row.object_key, contentType: row.content_type, displayName: row.display_name } : null;
+    },
+
     async list(employeeId: string, input: z.input<typeof listInput> = {}): Promise<{
       items: EmployeeCallItem[];
       nextCursor: CallHistoryCursor | null;
@@ -41,6 +54,7 @@ export function createEmployeeCallRepository(db: D1Database) {
       const value = listInput.parse(input);
       const conditions = ["h.employee_id = ?", "h.deleted_at IS NULL"];
       const bindings: (string | number)[] = [employeeId];
+      if (value.phoneKey !== undefined) { conditions.push("h.phone_key = ?"); bindings.push(value.phoneKey); }
       if (value.number !== undefined) {
         conditions.push("h.remote_number LIKE ? ESCAPE '\\'");
         bindings.push(`%${value.number.replace(/[\\%_]/g, "\\$&")}%`);

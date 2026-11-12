@@ -1,4 +1,4 @@
-import { Hono, type MiddlewareHandler } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
@@ -133,6 +133,88 @@ function byteRange(
   return { offset, length: Math.min(end, size - 1) - offset + 1 };
 }
 
+/**
+ * Streams one stored recording with validators and byte ranges. The caller has already authorized the request
+ * (administrator, or the employee's own recording) and checked the playback capability.
+ */
+export async function serveRecordingAudio<B extends AppBindings>(
+  context: Context<B>,
+  recording: { objectKey: string; contentType: string; displayName: string },
+  download: boolean,
+): Promise<Response> {
+  const object = await context.env.RECORDINGS.head(recording.objectKey);
+  if (!object)
+    throw new HTTPException(404, { message: "Recording audio not found" });
+  context.header("Content-Type", recording.contentType);
+  context.header("ETag", object.httpEtag);
+  context.header("Accept-Ranges", "bytes");
+  context.header("Content-Disposition", disposition(recording.displayName, download));
+  context.header("Last-Modified", object.uploaded.toUTCString());
+  if (context.req.method === "HEAD") {
+    context.header("Content-Length", String(object.size));
+    return context.body(null, 200);
+  }
+
+  const rangeHeader = context.req.header("Range");
+  const ifRange = context.req.header("If-Range");
+  // A stale validator requires the complete representation, not bytes from a different object.
+  const useRange =
+    rangeHeader !== undefined &&
+    (!ifRange ||
+      ifRange === object.httpEtag ||
+      Date.parse(ifRange) >=
+        Math.floor(object.uploaded.getTime() / 1000) * 1000);
+  const range = useRange ? byteRange(rangeHeader, object.size) : undefined;
+  if (range === null) {
+    context.header("Content-Range", `bytes */${object.size}`);
+    context.header("Content-Length", "0");
+    return context.body(null, 416);
+  }
+  const stored = await context.env.RECORDINGS.get(recording.objectKey, {
+    onlyIf: { etagMatches: object.etag },
+    ...(range ? { range } : {}),
+  });
+  if (!stored)
+    throw new HTTPException(404, { message: "Recording audio not found" });
+  if (!("body" in stored))
+    throw new HTTPException(409, { message: "Recording audio changed" });
+  context.header("Content-Length", String(range ? range.length : stored.size));
+  if (range)
+    context.header(
+      "Content-Range",
+      `bytes ${range.offset}-${range.offset + range.length - 1}/${stored.size}`,
+    );
+  return context.body(stored.body, range ? 206 : 200);
+}
+
+/** A signed, short-lived URL to the audio of one recording; `audioUrl` is the endpoint that serves it. */
+export async function playbackCapability(
+  secret: string | undefined,
+  objectKey: string,
+  audioUrl: URL,
+): Promise<{ url: string; expiresAt: string }> {
+  const expiresAt = new Date(Date.now() + playbackLifetimeMs).toISOString();
+  const signature = await signMediaCapability(secret ?? "", "GET", objectKey, expiresAt);
+  audioUrl.search = "";
+  audioUrl.searchParams.set("expiresAt", expiresAt);
+  audioUrl.searchParams.set("signature", signature);
+  return { url: audioUrl.toString(), expiresAt };
+}
+
+/** True when the request carries a valid, unexpired capability for this object. */
+export async function playbackAuthorized(
+  secret: string | undefined,
+  objectKey: string,
+  url: string,
+): Promise<{ download: boolean } | null> {
+  const parsed = audioInput.safeParse(queryValues(url));
+  if (
+    !parsed.success ||
+    !(await verifyMediaCapability(secret ?? "", "GET", objectKey, parsed.data.expiresAt, parsed.data.signature))
+  ) return null;
+  return { download: parsed.data.download === "1" };
+}
+
 /** Mount at /v1/admin. Authorization is required, including capability-backed media requests. */
 export function createAdminCallRoutes(
   authorize: MiddlewareHandler<AppBindings>,
@@ -171,21 +253,12 @@ export function createAdminCallRoutes(
     if (!(await context.env.RECORDINGS.head(call.objectKey))) {
       throw new HTTPException(404, { message: "Recording audio not found" });
     }
-    const expiresAt = new Date(Date.now() + playbackLifetimeMs).toISOString();
-    const signature = await signMediaCapability(
-      context.env.TOKEN_HASH_SECRET ?? "",
-      "GET",
-      call.objectKey,
-      expiresAt,
-    );
-    const url = new URL(context.req.url);
-    url.pathname = `${url.pathname.slice(0, -"playback".length)}audio`;
-    url.search = "";
-    url.searchParams.set("expiresAt", expiresAt);
-    url.searchParams.set("signature", signature);
+    const audioUrl = new URL(context.req.url);
+    audioUrl.pathname = `${audioUrl.pathname.slice(0, -"playback".length)}audio`;
+    const { url, expiresAt } = await playbackCapability(context.env.TOKEN_HASH_SECRET, call.objectKey, audioUrl);
     return context.json({
       requestId: context.get("requestId"),
-      url: url.toString(),
+      url,
       expiresAt,
       contentType: call.contentType,
     });
@@ -197,70 +270,13 @@ export function createAdminCallRoutes(
         callIdInput.parse(context.req.param("callId")),
       ),
     );
-    const parsed = audioInput.safeParse(queryValues(context.req.url));
-    if (
-      !parsed.success ||
-      !(await verifyMediaCapability(
-        context.env.TOKEN_HASH_SECRET ?? "",
-        "GET",
-        call.objectKey,
-        parsed.data.expiresAt,
-        parsed.data.signature,
-      ))
-    ) {
+    const authorized = await playbackAuthorized(context.env.TOKEN_HASH_SECRET, call.objectKey, context.req.url);
+    if (!authorized) {
       throw new HTTPException(401, {
         message: "Invalid or expired playback capability",
       });
     }
-    const object = await context.env.RECORDINGS.head(call.objectKey);
-    if (!object)
-      throw new HTTPException(404, { message: "Recording audio not found" });
-    context.header("Content-Type", call.contentType);
-    context.header("ETag", object.httpEtag);
-    context.header("Accept-Ranges", "bytes");
-    context.header(
-      "Content-Disposition",
-      disposition(call.displayName, parsed.data.download === "1"),
-    );
-    context.header("Last-Modified", object.uploaded.toUTCString());
-    if (context.req.method === "HEAD") {
-      context.header("Content-Length", String(object.size));
-      return context.body(null, 200);
-    }
-
-    const rangeHeader = context.req.header("Range");
-    const ifRange = context.req.header("If-Range");
-    // A stale validator requires the complete representation, not bytes from a different object.
-    const useRange =
-      rangeHeader !== undefined &&
-      (!ifRange ||
-        ifRange === object.httpEtag ||
-        Date.parse(ifRange) >=
-          Math.floor(object.uploaded.getTime() / 1000) * 1000);
-    const range = useRange ? byteRange(rangeHeader, object.size) : undefined;
-    if (range === null) {
-      context.header("Content-Range", `bytes */${object.size}`);
-      context.header("Content-Length", "0");
-      return context.body(null, 416);
-    }
-    const stored = await context.env.RECORDINGS.get(call.objectKey, {
-      onlyIf: { etagMatches: object.etag },
-      ...(range ? { range } : {}),
-    });
-    if (!stored)
-      throw new HTTPException(404, { message: "Recording audio not found" });
-    if (!("body" in stored))
-      throw new HTTPException(409, { message: "Recording audio changed" });
-    context.header(
-      "Content-Length",
-      String(range ? range.length : stored.size),
-    );
-    if (range)
-      context.header(
-        "Content-Range",
-        `bytes ${range.offset}-${range.offset + range.length - 1}/${stored.size}`,
-      );
-    return context.body(stored.body, range ? 206 : 200);
+    return serveRecordingAudio(context, call, authorized.download);
   });
 
   routes.delete("/calls/:callId", async (context) => {

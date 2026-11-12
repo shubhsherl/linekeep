@@ -27,6 +27,7 @@ Linekeep's source code is open source. This policy covers only the Service opera
 - Name and, optionally, a work contact number, which we may include in messages we send to customers.
 - The phone's model, Android version and app version, the SIM numbers the phone reports, and when the phone last connected.
 - The calls and recordings the employee's phone shares with the Service, and the chats the employee reads (so we can show unread counts).
+- If the web app is switched on, the employee's sign-in email address, and for each browser they sign in on a session record (a hash of its cookie and its timestamps). Sign-in codes are sent to the employee by email or WhatsApp and are kept only as a short-lived hash.
 
 ### About administrators
 

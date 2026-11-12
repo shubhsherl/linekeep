@@ -2,6 +2,8 @@ import type { Env } from "../env";
 import { pushClientConfig, type FirebaseClientConfig } from "../push/client-config";
 import { pushAccount } from "../push/fcm";
 import { fieldByKey, featureKeys, fields, jobKeys, parseRecipients, type Features } from "./fields";
+import { emailOtpReady, readEmployeeWeb, usableMethods, whatsappOtpReady } from "./employee-web";
+import { mailTransportProblems } from "../reporting/mail";
 import { createSettingsStore, type SettingChange } from "./store";
 
 export interface SettingsSnapshot {
@@ -128,6 +130,23 @@ export function describeSettings(deployment: Env, snapshot: SettingsSnapshot) {
     push: {
       clientConfig,
       serviceAccount: { ...secretState(deployment, snapshot, "push.serviceAccount", false), projectId },
+    },
+    employeeWeb: describeEmployeeWeb(applySettings(deployment, snapshot), snapshot),
+  };
+}
+
+/**
+ * The employee web app's settings plus what is still missing for each sign-in method, so the dashboard can say
+ * what to set up first. `env` is the deployment with the dashboard values laid over it.
+ */
+export function describeEmployeeWeb(env: Env, snapshot: SettingsSnapshot) {
+  const settings = readEmployeeWeb(snapshot.values);
+  return {
+    ...settings,
+    methods: usableMethods(env, settings),
+    prerequisites: {
+      email: { configured: emailOtpReady(env), missing: mailTransportProblems(env) },
+      whatsapp: { configured: whatsappOtpReady(env) },
     },
   };
 }

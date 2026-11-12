@@ -10,3 +10,6 @@ MAILGUN_API_KEY=
 MAILGUN_DOMAIN=
 # Optional: MAILGUN_FROM_EMAIL defaults to postmaster@MAILGUN_DOMAIN.
 # MAILGUN_REGION defaults to us; set eu for a European Mailgun domain.
+
+# Local development only: print employee web sign-in codes to the console (ignored on any deployed Worker).
+# WEB_OTP_DEV_LOG=true

@@ -42,6 +42,24 @@ export function mailProblems(env: Pick<Env, "EMAIL_IDS" | "MAILGUN_DOMAIN" | "MA
   return problems;
 }
 
+type MailEnv = Pick<Env, "EMAIL_IDS" | "MAILGUN_DOMAIN" | "MAILGUN_API_KEY" | "MAILGUN_FROM_EMAIL" | "MAILGUN_REGION">;
+
+/**
+ * The Mailgun account alone (domain, API key, sender, region), for mail that is not the daily summary and so has
+ * no fixed recipient list. Null when any is missing or invalid.
+ */
+export function mailTransport(env: MailEnv): Omit<MailConfiguration, "recipients"> | null {
+  const configuration = mailConfiguration({ ...env, EMAIL_IDS: '["transport@example.com"]' });
+  if (!configuration) return null;
+  const { recipients: _unused, ...transport } = configuration;
+  return transport;
+}
+
+/** Names (never values) of the Mailgun settings that stop `mailTransport` from being usable. */
+export function mailTransportProblems(env: MailEnv): string[] {
+  return mailProblems({ ...env, EMAIL_IDS: '["transport@example.com"]' });
+}
+
 /** Posts one message to Mailgun. Rejects with HTTP status only; the response body is discarded. */
 export async function sendMail(config: MailConfiguration, message: { fromName: string; subject: string; text: string; html: string }): Promise<void> {
   const body = new FormData();

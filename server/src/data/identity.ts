@@ -15,6 +15,10 @@ export interface Employee {
   id: string;
   name: string;
   phoneNumber?: string;
+  /** Sign-in address of the employee web app, lower-cased. */
+  email: string | null;
+  /** Browsers currently signed in to the employee web app. */
+  webSessions: number;
   active: boolean;
   createdAt: string;
 }
@@ -95,14 +99,28 @@ const employeePhone = z.string().trim().min(1).max(64).transform((value, context
   }
   return normalized.phone;
 });
+/** The sign-in address of the employee web app: trimmed, validated and lower-cased. */
+const employeeEmail = z.string().trim().max(254).pipe(z.email()).transform((value) => value.toLowerCase());
+export function normalizeEmail(value: string): string | null {
+  const parsed = employeeEmail.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Another employee already signs in with this address. */
+export class EmployeeEmailExistsError extends Error {
+  constructor() { super("An employee with this email already exists"); }
+}
+
 const employeeInput = z.object({
   name: z.string().trim().min(1).max(200),
   phoneNumber: employeePhone.optional(),
+  email: employeeEmail.nullable().optional(),
 });
 const employeeUpdateInput = z.strictObject({
   name: z.string().trim().min(1).max(200).optional(),
   phoneNumber: employeePhone.nullable().optional(),
-}).refine((value) => value.name !== undefined || value.phoneNumber !== undefined, { message: "Nothing to update" });
+  email: employeeEmail.nullable().optional(),
+}).refine((value) => value.name !== undefined || value.phoneNumber !== undefined || value.email !== undefined, { message: "Nothing to update" });
 const deviceInput = z.object({
   model: z.string().optional(),
   manufacturer: z.string().optional(),
@@ -125,7 +143,7 @@ export interface IdentityRepository {
   listEmployees(input?: DirectoryInput): Promise<DirectoryPage<Employee>>;
   updateEmployee(
     employeeId: string,
-    input: { name?: string; phoneNumber?: string | null },
+    input: { name?: string; phoneNumber?: string | null; email?: string | null },
   ): Promise<Employee | null>;
   getManagedDevice(deviceId: string): Promise<ManagedDevice | null>;
   listDevices(
@@ -148,6 +166,8 @@ export interface IdentityRepository {
     employeeId: string,
     active: boolean,
   ): Promise<Employee | null>;
+  /** Signs the employee out of every browser; returns how many sessions ended. */
+  revokeWebSessions(employeeId: string): Promise<number>;
   createInvitation(
     employeeId: string,
     expiresAt: string,
@@ -177,6 +197,8 @@ type EmployeeRow = {
   id: string;
   name: string;
   phone_number: string | null;
+  email: string | null;
+  web_sessions: number;
   active: number;
   created_at: string;
 };
@@ -211,7 +233,10 @@ type DeviceRow = {
   created_at: string;
 };
 
-const employeeColumns = "id, name, phone_number, active, created_at";
+/** Live sessions are counted in SQL against the same clock the sessions are issued with (UTC, millisecond ISO). */
+const employeeColumns = `id, name, phone_number, email, active, created_at,
+  (SELECT count(*) FROM web_sessions s WHERE s.employee_id = employees.id
+    AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND s.idle_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) AS web_sessions`;
 const invitationColumns =
   "id, employee_id, expires_at, redeemed_at, revoked_at, created_at, purpose, device_id, recovery_device_id";
 const deviceColumns = `id, employee_id, model, manufacturer, android_version, one_ui_version,
@@ -225,9 +250,15 @@ function employee(row: EmployeeRow): Employee {
     id: row.id,
     name: row.name,
     phoneNumber: row.phone_number ?? undefined,
+    email: row.email,
+    webSessions: row.web_sessions,
     active: row.active === 1,
     createdAt: row.created_at,
   };
+}
+function emailConflict(error: unknown): unknown {
+  return error instanceof Error && /UNIQUE constraint failed.*email|employees_email_idx/i.test(error.message)
+    ? new EmployeeEmailExistsError() : error;
 }
 function invitation(row: InvitationRow): Invitation {
   return {
@@ -341,22 +372,43 @@ export function createIdentityRepository(
       return directoryPage(rows.results, value.limit, employee);
     },
 
+    /** Changing or clearing the sign-in email also signs the employee out of every browser. */
     async updateEmployee(employeeId, input) {
       const value = employeeUpdateInput.parse(input);
-      const row = await db
-        .prepare(
-          `UPDATE employees SET name = COALESCE(?, name),
-            phone_number = CASE WHEN ? THEN ? ELSE phone_number END
-          WHERE id = ? RETURNING ${employeeColumns}`,
-        )
-        .bind(
-          value.name ?? null,
-          value.phoneNumber === undefined ? 0 : 1,
-          value.phoneNumber ?? null,
-          id.parse(employeeId),
-        )
-        .first<EmployeeRow>();
-      return row ? employee(row) : null;
+      const key = id.parse(employeeId);
+      try {
+        const [, updated] = await db.batch<EmployeeRow>([
+          db.prepare(
+            `DELETE FROM web_sessions WHERE employee_id = ?1 AND ?2 = 1
+              AND NOT EXISTS (SELECT 1 FROM employees WHERE id = ?1 AND email IS ?3)`,
+          ).bind(key, value.email === undefined ? 0 : 1, value.email ?? null),
+          db.prepare(
+            `UPDATE employees SET name = COALESCE(?, name),
+              phone_number = CASE WHEN ? THEN ? ELSE phone_number END,
+              email = CASE WHEN ? THEN ? ELSE email END
+            WHERE id = ? RETURNING ${employeeColumns}`,
+          ).bind(
+            value.name ?? null,
+            value.phoneNumber === undefined ? 0 : 1,
+            value.phoneNumber ?? null,
+            value.email === undefined ? 0 : 1,
+            value.email ?? null,
+            key,
+          ),
+        ]);
+        const row = updated.results[0];
+        return row ? employee(row) : null;
+      } catch (error) {
+        throw emailConflict(error);
+      }
+    },
+
+    async revokeWebSessions(employeeId) {
+      const result = await db
+        .prepare("DELETE FROM web_sessions WHERE employee_id = ?")
+        .bind(id.parse(employeeId))
+        .run();
+      return result.meta.changes;
     },
 
     async listDevices(input = {}) {
@@ -449,32 +501,41 @@ export function createIdentityRepository(
       input: z.input<typeof employeeInput>,
     ): Promise<Employee> {
       const value = employeeInput.parse(input);
-      const row = await db
-        .prepare(
-          `INSERT INTO employees (id, name, phone_number, created_at)
-        VALUES (?, ?, ?, ?) RETURNING ${employeeColumns}`,
-        )
-        .bind(
-          opaqueId("emp"),
-          value.name,
-          value.phoneNumber ?? null,
-          timestamp(clock),
-        )
-        .first<EmployeeRow>();
-      if (!row) throw new Error("Employee insert returned no record");
-      return employee(row);
+      try {
+        const row = await db
+          .prepare(
+            `INSERT INTO employees (id, name, phone_number, email, created_at)
+          VALUES (?, ?, ?, ?, ?) RETURNING ${employeeColumns}`,
+          )
+          .bind(
+            opaqueId("emp"),
+            value.name,
+            value.phoneNumber ?? null,
+            value.email ?? null,
+            timestamp(clock),
+          )
+          .first<EmployeeRow>();
+        if (!row) throw new Error("Employee insert returned no record");
+        return employee(row);
+      } catch (error) {
+        throw emailConflict(error);
+      }
     },
 
+    /** Deactivating also signs the employee out of every browser. */
     async setEmployeeActive(
       employeeId: string,
       active: boolean,
     ): Promise<Employee | null> {
-      const row = await db
-        .prepare(
-          `UPDATE employees SET active = ? WHERE id = ? RETURNING ${employeeColumns}`,
-        )
-        .bind(z.boolean().parse(active) ? 1 : 0, id.parse(employeeId))
-        .first<EmployeeRow>();
+      const enabled = z.boolean().parse(active);
+      const key = id.parse(employeeId);
+      const [, updated] = await db.batch<EmployeeRow>([
+        db.prepare("DELETE FROM web_sessions WHERE employee_id = ? AND ? = 0").bind(key, enabled ? 1 : 0),
+        db
+          .prepare(`UPDATE employees SET active = ? WHERE id = ? RETURNING ${employeeColumns}`)
+          .bind(enabled ? 1 : 0, key),
+      ]);
+      const row = updated.results[0];
       return row ? employee(row) : null;
     },
 

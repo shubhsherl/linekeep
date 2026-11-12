@@ -35,6 +35,8 @@ export type OutboundContent =
     type: "template"; name: string; language: string; params: { key: string; named: boolean; value: string }[];
     /** Image, video or document shown above the body of a template that has a media header. */
     header?: CloudMedia;
+    /** Authentication templates: the code also goes to the first (URL / copy-code) button as its text parameter. */
+    buttonCode?: string;
   };
 
 const mediaObject = (media: CloudMedia, caption?: string) => ({
@@ -56,6 +58,9 @@ function messageBody(content: OutboundContent) {
         components.push({ type: "body", parameters: content.params.map((param) => ({
           type: "text", text: param.value, ...(param.named ? { parameter_name: param.key } : {}),
         })) });
+      }
+      if (content.buttonCode !== undefined) {
+        components.push({ type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: content.buttonCode }] });
       }
       return { type: "template", template: {
         name: content.name, language: { code: content.language }, ...(components.length > 0 ? { components } : {}),

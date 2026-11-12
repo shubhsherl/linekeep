@@ -11,6 +11,11 @@ export interface WhatsAppTemplate {
   /** Body placeholders in order of appearance; `named` templates send the key as the parameter name. */
   variables: TemplateVariable[]; named: boolean;
   sendable: boolean; reason?: string;
+  /**
+   * Usable for the employee web app's sign-in code: a sendable template with a text-only (or no) header and at
+   * least one body variable, or an AUTHENTICATION template whose buttons are all one-time-password buttons.
+   */
+  otpCapable: boolean;
 }
 
 type Component = {
@@ -47,8 +52,14 @@ export function normalizeTemplate(raw: RawTemplate): WhatsAppTemplate | null {
   const find = (type: string) => components.find((component) => component.type === type);
   const header = find("HEADER"), body = find("BODY"), footer = find("FOOTER"), buttons = find("BUTTONS");
   const bodyText = typeof body?.text === "string" ? body.text : "";
+  // Meta's authentication templates: a fixed body with the code as its only variable and one-time-password buttons.
+  const otpAuthentication = raw.category === "AUTHENTICATION" && !header
+    && components.every((component) => ["BODY", "FOOTER", "BUTTONS"].includes(component.type ?? ""))
+    && (buttons?.buttons?.length ?? 0) > 0 && buttons!.buttons!.every((button) => button.type === "OTP");
   let reason: string | undefined;
-  if (components.some((component) => !["HEADER", "BODY", "FOOTER", "BUTTONS"].includes(component.type ?? ""))) {
+  if (otpAuthentication) {
+    reason = "Authentication templates only send sign-in codes";
+  } else if (components.some((component) => !["HEADER", "BODY", "FOOTER", "BUTTONS"].includes(component.type ?? ""))) {
     reason = "Carousel and other rich templates are not supported yet";
   } else if (header && !["TEXT", "IMAGE", "VIDEO", "DOCUMENT"].includes(header.format ?? "")) {
     reason = "Templates with a location or other special header are not supported yet";
@@ -61,12 +72,15 @@ export function normalizeTemplate(raw: RawTemplate): WhatsAppTemplate | null {
   }
   const shown = (component: Component | undefined) => typeof component?.text === "string" && component.text ? component.text : undefined;
   const headerFormat = (header ? header.format : "NONE") as HeaderFormat;
+  const parsedVariables = variablesOf(bodyText, body);
+  const variables = otpAuthentication && parsedVariables.length === 0 ? [{ key: "1" }] : parsedVariables;
   return {
     name: raw.name, language: raw.language, category: raw.category ?? "", headerFormat,
     header: headerFormat === "TEXT" ? shown(header) : undefined, body: bodyText, footer: shown(footer),
     buttons: buttons?.buttons?.flatMap((button) => button.text ? [{ type: button.type ?? "", text: button.text }] : []),
-    variables: variablesOf(bodyText, body), named: raw.parameter_format === "NAMED",
+    variables, named: raw.parameter_format === "NAMED",
     sendable: reason === undefined, ...(reason ? { reason } : {}),
+    otpCapable: otpAuthentication || (reason === undefined && (headerFormat === "NONE" || headerFormat === "TEXT") && variables.length > 0),
   };
 }
 
