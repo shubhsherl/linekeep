@@ -90,9 +90,9 @@ function formatRoute(route) {
 }
 
 // ---- Sign-in state machine ------------------------------------------------------------------------------------------
-// screens: loading | disabled | unavailable | email | code | app
+// screens: loading | disabled | unavailable | signin | code | app
 const RESEND_COOLDOWN_MS = 30000;
-function authInitial() { return { screen: 'loading', methods: [], method: 'email', email: '', sentAt: 0, notice: '' }; }
+function authInitial() { return { screen: 'loading', methods: [], method: 'email', identifier: '', sentAt: 0, notice: '' }; }
 function authReduce(state, event) {
   switch (event.type) {
     case 'session':
@@ -102,21 +102,21 @@ function authReduce(state, event) {
       const methods = (event.methods || []).filter((method) => method === 'email' || method === 'whatsapp');
       if (!methods.length) return Object.assign({}, state, { screen: 'disabled', methods: [] });
       const method = methods.includes(state.method) ? state.method : methods[0];
-      return Object.assign({}, state, { screen: state.screen === 'code' ? 'code' : 'email', methods, method });
+      return Object.assign({}, state, { screen: state.screen === 'code' ? 'code' : 'signin', methods, method });
     }
     case 'configFailed':
       return Object.assign({}, state, { screen: 'unavailable' });
     case 'method':
       return state.methods.includes(event.method) ? Object.assign({}, state, { method: event.method }) : state;
     case 'codeSent':
-      return Object.assign({}, state, { screen: 'code', email: event.email, method: event.method || state.method, sentAt: event.at, notice: '' });
+      return Object.assign({}, state, { screen: 'code', identifier: event.identifier, method: event.method || state.method, sentAt: event.at, notice: '' });
     case 'back':
-      return Object.assign({}, state, { screen: state.methods.length ? 'email' : 'loading', notice: '' });
+      return Object.assign({}, state, { screen: state.methods.length ? 'signin' : 'loading', notice: '' });
     case 'sessionLost':
       // A lost session returns to the email screen once the config is known; until then the boot code reloads it.
       return Object.assign({}, state, { screen: 'loading', notice: event.notice || '', sentAt: 0 });
     case 'signedOut':
-      return Object.assign({}, state, { screen: 'loading', notice: event.notice || '', sentAt: 0, email: state.email });
+      return Object.assign({}, state, { screen: 'loading', notice: event.notice || '', sentAt: 0 });
     default:
       return state;
   }
@@ -128,6 +128,38 @@ function resendRemaining(sentAt, now, cooldownMs) {
 }
 function normalizeEmail(value) { return String(value == null ? '' : value).trim().toLowerCase(); }
 function validEmail(value) { return /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/.test(value) && value.length <= 254; }
+// What the employee typed for a sign-in method -> { value, error }. value is the normalised identifier sent to the server:
+// a lower-cased email or an E.164 phone (ten digits mean India, +E.164 is kept).
+function parseIdentifier(method, raw) {
+  if (method === 'whatsapp') {
+    const phone = normalizePhone(raw);
+    return phone ? { value: phone.phone, error: '' } : { value: '', error: 'Enter a valid phone number, with the country code if it is not an Indian number.' };
+  }
+  const email = normalizeEmail(raw);
+  return validEmail(email) ? { value: email, error: '' } : { value: '', error: 'Enter a valid email address.' };
+}
+// Request and verify bodies of the sign-in endpoints.
+function authRequestBody(method, identifier) {
+  return method === 'whatsapp' ? { method, phone: identifier } : { method: 'email', email: identifier };
+}
+function authVerifyBody(method, identifier, code) {
+  return method === 'whatsapp' ? { method, phone: identifier, code } : { method: 'email', email: identifier, code };
+}
+// 'a***@example.test' and '+91 ••••• ••123': enough to recognise the destination, not enough to learn it.
+function maskEmail(email) {
+  const at = String(email).lastIndexOf('@');
+  if (at < 1) return '***';
+  return Array.from(email.slice(0, at))[0] + '***' + email.slice(at);
+}
+function maskPhone(phone) {
+  const digits = String(phone).replace(/\D/g, '');
+  const tail = digits.slice(-3);
+  if (digits.length < 8) return '••••' + tail;
+  if (digits.startsWith('91') && digits.length === 12) return '+91 ••••• ••' + tail;
+  const country = digits.slice(0, 2);
+  return '+' + country + ' ' + '•'.repeat(Math.max(3, digits.length - 5)) + tail;
+}
+function maskIdentifier(method, identifier) { return method === 'whatsapp' ? maskPhone(identifier) : maskEmail(identifier); }
 // The six digits of a pasted or typed code, or '' when it does not contain exactly six.
 function cleanCode(value) {
   const digits = String(value == null ? '' : value).replace(/\D/g, '');

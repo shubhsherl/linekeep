@@ -1,3 +1,4 @@
+import { cacheKeyPrefix } from "./fields";
 import { canEncrypt, createSettingsCipher, SettingsCryptoError, type SettingsCipher } from "./crypto";
 
 export interface SettingChange {
@@ -35,7 +36,7 @@ interface Row { key: string; value: string; encrypted: number }
 export function createSettingsStore(db: D1Database, tokenHashSecret: string | undefined, clock: () => Date = () => new Date()) {
   return {
     async readAll(): Promise<{ values: Map<string, string>; unreadable: Set<string> }> {
-      const { results } = await db.prepare("SELECT key, value, encrypted FROM app_settings").all<Row>().catch((error: unknown) => {
+      const { results } = await db.prepare("SELECT key, value, encrypted FROM app_settings WHERE substr(key, 1, ?) <> ?").bind(cacheKeyPrefix.length, cacheKeyPrefix).all<Row>().catch((error: unknown) => {
         // Code deployed before migration 0017 has run: behave as if nothing is configured in the dashboard yet.
         if (error instanceof Error && /no such table/i.test(error.message)) return { results: [] as Row[] };
         throw error;

@@ -10,7 +10,7 @@ const { createWebAppRoutes, webAppContentSecurityPolicy } = await loadModule("..
 const names = [
   "normalizePhone", "validateNewCustomer", "createCustomerBody", "patchCustomerBody", "decideAfterLookup", "buildVCard",
   "vcardFileName", "initialsOf", "parseRoute", "formatRoute", "authInitial", "authReduce", "resendRemaining", "normalizeEmail",
-  "validEmail", "cleanCode", "createApiClient", "nextPollDelay", "createPoller", "POLL_BROWSING", "POLL_CONVERSATION",
+  "validEmail", "cleanCode", "parseIdentifier", "authRequestBody", "authVerifyBody", "maskEmail", "maskPhone", "maskIdentifier", "createApiClient", "nextPollDelay", "createPoller", "POLL_BROWSING", "POLL_CONVERSATION",
   "fillQuickPlaceholders", "defaultVariableSource", "initialTemplateValues", "renderTemplateText", "templateProblem",
   "templateSendBody", "mediaSendBody", "textSendBody", "attachProblem", "conversationRows", "mergeMessages", "newClientMessageId",
   "OTHER_HANDLER_MESSAGE", "CSRF_HEADER",
@@ -88,20 +88,50 @@ test("sign-in state machine", () => {
   state = logic.authReduce(state, { type: "config", enabled: false, methods: [] });
   assert.equal(state.screen, "disabled");
   state = logic.authReduce(logic.authInitial(), { type: "config", enabled: true, methods: ["email", "whatsapp", "sms"] });
-  assert.equal(state.screen, "email");
+  assert.equal(state.screen, "signin");
   assert.deepEqual([...state.methods], ["email", "whatsapp"]);
   state = logic.authReduce(state, { type: "method", method: "whatsapp" });
   assert.equal(state.method, "whatsapp");
-  state = logic.authReduce(state, { type: "codeSent", email: "a@example.test", method: "whatsapp", at: 1000 });
+  state = logic.authReduce(state, { type: "codeSent", identifier: "+919800000123", method: "whatsapp", at: 1000 });
   assert.equal(state.screen, "code");
+  assert.equal(state.identifier, "+919800000123");
   // A config refresh while entering the code keeps the code screen.
   assert.equal(logic.authReduce(state, { type: "config", enabled: true, methods: ["email"] }).screen, "code");
-  assert.equal(logic.authReduce(state, { type: "back" }).screen, "email");
+  assert.equal(logic.authReduce(state, { type: "back" }).screen, "signin");
   assert.equal(logic.authReduce(state, { type: "session" }).screen, "app");
   const lost = logic.authReduce(logic.authReduce(state, { type: "session" }), { type: "sessionLost", notice: "bye" });
   assert.equal(lost.screen, "loading");
   assert.equal(lost.notice, "bye");
   assert.equal(logic.authReduce(state, { type: "config", enabled: true, methods: [] }).screen, "disabled");
+});
+
+test("only-whatsapp config starts on the WhatsApp method", () => {
+  const state = logic.authReduce(logic.authInitial(), { type: "config", enabled: true, methods: ["whatsapp"] });
+  assert.equal(state.screen, "signin");
+  assert.equal(state.method, "whatsapp");
+  assert.equal(logic.authReduce(state, { type: "method", method: "email" }).method, "whatsapp");
+});
+
+test("identifiers are parsed per method and sent in the matching body", () => {
+  assert.deepEqual({ ...logic.parseIdentifier("email", " Asha@Example.TEST ") }, { value: "asha@example.test", error: "" });
+  assert.match(logic.parseIdentifier("email", "asha@").error, /email/);
+  assert.deepEqual({ ...logic.parseIdentifier("whatsapp", "98000 00123") }, { value: "+919800000123", error: "" });
+  assert.deepEqual({ ...logic.parseIdentifier("whatsapp", "+1 (415) 555-0100") }, { value: "+14155550100", error: "" });
+  assert.match(logic.parseIdentifier("whatsapp", "12").error, /phone/);
+  assert.deepEqual({ ...logic.authRequestBody("email", "a@example.test") }, { method: "email", email: "a@example.test" });
+  assert.deepEqual({ ...logic.authRequestBody("whatsapp", "+919800000123") }, { method: "whatsapp", phone: "+919800000123" });
+  assert.deepEqual({ ...logic.authVerifyBody("whatsapp", "+919800000123", "123456") }, { method: "whatsapp", phone: "+919800000123", code: "123456" });
+  assert.deepEqual({ ...logic.authVerifyBody("email", "a@example.test", "123456") }, { method: "email", email: "a@example.test", code: "123456" });
+});
+
+test("destinations are masked", () => {
+  assert.equal(logic.maskEmail("asha@example.test"), "a***@example.test");
+  assert.equal(logic.maskEmail("x@example.test"), "x***@example.test");
+  assert.equal(logic.maskEmail("nonsense"), "***");
+  assert.equal(logic.maskPhone("+919800000123"), "+91 ••••• ••123");
+  assert.equal(logic.maskIdentifier("whatsapp", "+919800000123"), "+91 ••••• ••123");
+  assert.equal(logic.maskIdentifier("email", "asha@example.test"), "a***@example.test");
+  assert.ok(!logic.maskPhone("+14155550100").includes("5550"));
 });
 
 test("resend cooldown, email and code cleaning", () => {

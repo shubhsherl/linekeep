@@ -31,6 +31,7 @@ const templates = [
 /** Fake Mailgun and Graph APIs plus a console spy; every call is recorded. */
 function stubNetwork(t) {
   const mails = [], sends = [], logs = [];
+  const state = { failSends: false };
   const original = globalThis.fetch;
   const log = console.log;
   globalThis.fetch = async (url, init) => {
@@ -45,12 +46,13 @@ function stubNetwork(t) {
       return new Response(JSON.stringify({ data: templates.filter((item) => !wanted || item.name === wanted) }), { status: 200 });
     }
     if (target.pathname.endsWith("/media")) return new Response(JSON.stringify({ id: "7000001" }), { status: 200 });
+    if (state.failSends) return new Response(JSON.stringify({ error: { code: 131026, message: "Message undeliverable: secret provider text" } }), { status: 400 });
     sends.push({ url: String(url), body: JSON.parse(init.body) });
     return new Response(JSON.stringify({ messages: [{ id: `wamid.OUT${sends.length}` }] }), { status: 200 });
   };
   console.log = (...args) => { logs.push(args.map(String).join(" ")); };
   t.after(() => { globalThis.fetch = original; console.log = log; });
-  return { mails, sends, logs };
+  return { mails, sends, logs, state };
 }
 
 async function fixture(t, { env: extraEnv = { ...mailEnv, ...whatsappEnv }, enable = true } = {}) {
@@ -97,7 +99,7 @@ async function fixture(t, { env: extraEnv = { ...mailEnv, ...whatsappEnv }, enab
     const asked = await web("/v1/web/auth/request", { method: "POST", body: { email, method: "email" }, ip: `203.0.113.${ipCounter++}` });
     assert.equal(asked.status, 202);
     const code = lastCode();
-    const verified = await web("/v1/web/auth/verify", { method: "POST", body: { email, code } });
+    const verified = await web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email, code } });
     assert.equal(verified.status, 200);
     const cookie = verified.headers.get("set-cookie").split(";")[0];
     const body = await verified.json();
@@ -181,13 +183,17 @@ test("employee web access is off by default and every route except config says s
 test("settings report what is missing and refuse to turn access on without a way to sign in", async (t) => {
   const bare = await fixture(t, { env: {}, enable: false });
   const view = (await (await bare.admin("GET", "/v1/admin/settings")).json()).settings.employeeWeb;
-  assert.deepEqual([view.enabled, view.emailOtp, view.whatsappOtp, view.whatsappTemplate, view.methods], [false, true, false, null, []]);
+  assert.deepEqual([view.enabled, view.emailOtp, view.whatsappOtp, view.whatsappTemplate, view.methods, view.active], [false, true, false, null, [], false]);
+  assert.deepEqual(view.usable, { email: false, whatsapp: false });
   assert.equal(view.prerequisites.email.configured, false);
   assert.ok(view.prerequisites.email.missing.includes("domain") && view.prerequisites.email.missing.includes("API key"));
+  assert.deepEqual(view.prerequisites.whatsapp.missing, ["access token", "phone number ID", "business account ID", "template"]);
   assert.equal(view.prerequisites.whatsapp.configured, false);
   const refused = await bare.saveWeb({ enabled: true });
   assert.equal(refused.status, 400);
-  assert.match((await refused.json()).error.message, /Set up email or WhatsApp sign-in first/);
+  const refusal = (await refused.json()).error;
+  assert.equal(refusal.code, "no_sign_in_method");
+  assert.match(refusal.message, /Turn on at least one sign-in method first\. Email code: missing domain/);
   assert.match((await (await bare.saveWeb({ emailOtp: true })).json()).error.message, /Email sign-in needs the email settings/);
   assert.equal((await bare.saveWeb({ whatsappOtp: true })).status, 400);
   assert.equal((await bare.saveWeb({ unknown: true })).status, 400);
@@ -195,9 +201,18 @@ test("settings report what is missing and refuse to turn access on without a way
   const ready = await fixture(t, { enable: false });
   const saved = await ready.saveWeb({ enabled: true });
   assert.equal(saved.status, 200);
-  assert.deepEqual((await saved.json()).settings.employeeWeb.methods, ["email"]);
-  assert.equal((await (await ready.admin("GET", "/v1/admin/features")).json()).employeeWeb, true);
+  const savedView = (await saved.json()).settings.employeeWeb;
+  assert.deepEqual([savedView.methods, savedView.usable, savedView.active, savedView.prerequisites.email.configured], [["email"], { email: true, whatsapp: false }, true, true]);
+  const features = await (await ready.admin("GET", "/v1/admin/features")).json();
+  assert.deepEqual([features.employeeWeb, features.employeeWebMethods], [true, ["email"]]);
   assert.deepEqual(await (await ready.web("/v1/web/config")).json().then(stripId), { enabled: true, methods: ["email"] });
+  // Switching off the last usable method while access is on is refused; switching both off together is fine.
+  const last = await ready.saveWeb({ emailOtp: false });
+  assert.equal(last.status, 400);
+  assert.equal((await last.json()).error.code, "no_sign_in_method");
+  assert.equal((await ready.saveWeb({ emailOtp: false, enabled: false })).status, 200);
+  assert.deepEqual(await (await ready.web("/v1/web/config")).json().then(stripId), { enabled: false, methods: [] });
+  assert.equal((await ready.saveWeb({ emailOtp: true, enabled: true })).status, 200);
   assert.equal((await ready.saveWeb({ enabled: null })).status, 200);
   assert.equal((await (await ready.web("/v1/web/config")).json()).enabled, false);
 });
@@ -247,7 +262,7 @@ test("an emailed code signs an employee in with a hardened cookie and a CSRF tok
   assert.equal(asked.status, 202);
   const askedBody = await asked.json();
   assert.equal(askedBody.sent, true);
-  assert.ok(!JSON.stringify(askedBody).match(/\d{6}/));
+  assert.ok(!JSON.stringify({ ...askedBody, requestId: undefined }).match(/\d{6}/));
   assert.equal(f.mails.length, 1);
   const [mail] = f.mails;
   assert.deepEqual(mail.to, ["alice@example.test"]);
@@ -257,7 +272,7 @@ test("an emailed code signs an employee in with a hardened cookie and a CSRF tok
   assert.ok(mail.url.includes("/v3/mg.example.test/messages"));
   const code = f.lastCode();
 
-  const verified = await f.web("/v1/web/auth/verify", { method: "POST", body: { email: "alice@example.test", code } });
+  const verified = await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email: "alice@example.test", code } });
   assert.equal(verified.status, 200);
   const cookie = verified.headers.get("set-cookie");
   assert.match(cookie, /^__Host-lk_session=wst_[0-9a-f]{64};/);
@@ -282,7 +297,7 @@ test("a code works once, dies after five wrong attempts, expires, and a new requ
   await f.createEmployee("Alice Synthetic", { email: "alice@example.test" });
   const email = "alice@example.test";
   const ask = async () => { await f.resetCooldown(); return f.web("/v1/web/auth/request", { method: "POST", body: { email, method: "email" }, ip: `198.51.100.${Math.floor(Math.random() * 200)}` }); };
-  const verify = (code) => f.web("/v1/web/auth/verify", { method: "POST", body: { email, code } });
+  const verify = (code) => f.web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email, code } });
   const wrongFor = (code) => (code === "000000" ? "111111" : "000000");
 
   await ask();
@@ -308,7 +323,7 @@ test("a code works once, dies after five wrong attempts, expires, and a new requ
   assert.equal((await verify(code)).status, 401, "expired");
   assert.equal((await verify("12345")).status, 401);
   assert.equal((await verify("abcdef")).status, 401);
-  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { email: "nobody", code: "123456" } })).status, 401);
+  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email: "nobody", code: "123456" } })).status, 401);
 });
 
 test("requests are capped per address and per client and have a resend cooldown", async (t) => {
@@ -358,8 +373,8 @@ test("an unknown, inactive or phoneless address looks exactly like a known one",
   for (const answer of answers) assert.deepEqual(answer, answers[0]);
   assert.equal(f.mails.length, 2, "only the active employee gets mail");
   // A decoy can never be redeemed, and failures look alike.
-  const unknown = await f.web("/v1/web/auth/verify", { method: "POST", body: { email: "nobody@example.test", code: "123456" } });
-  const known = await f.web("/v1/web/auth/verify", { method: "POST", body: { email: "alice@example.test", code: f.lastCode() === "123456" ? "654321" : "123456" } });
+  const unknown = await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email: "nobody@example.test", code: "123456" } });
+  const known = await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email: "alice@example.test", code: f.lastCode() === "123456" ? "654321" : "123456" } });
   assert.equal(unknown.status, 401);
   assert.deepEqual(stripId(await unknown.json()), stripId(await known.json()));
   // A badly formed address is refused without saying anything about employees.
@@ -373,11 +388,11 @@ test("a deactivated employee or a changed address cannot use a code that was alr
   const ask = async () => { await f.resetCooldown(); await f.web("/v1/web/auth/request", { method: "POST", body: { email: "alice@example.test", method: "email" }, ip: `198.51.100.${Math.floor(Math.random() * 200)}` }); return f.lastCode(); };
   let code = await ask();
   await f.identity.setEmployeeActive(alice.id, false);
-  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { email: "alice@example.test", code } })).status, 401);
+  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email: "alice@example.test", code } })).status, 401);
   await f.identity.setEmployeeActive(alice.id, true);
   code = await ask();
   assert.equal((await f.admin("PATCH", `/v1/admin/employees/${alice.id}`, { email: "new@example.test" })).status, 200);
-  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { email: "alice@example.test", code } })).status, 401);
+  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "email", email: "alice@example.test", code } })).status, 401);
 });
 
 test("the code never reaches logs, the database or a stored message", async (t) => {
@@ -413,15 +428,14 @@ test("the code never reaches logs, the database or a stored message", async (t) 
   assert.ok(local.logs.join("\n").includes(local.lastCode()), "the local development echo works when asked for");
 });
 
-test("a WhatsApp code goes through the chosen template and is never stored as a message", async (t) => {
+test("a WhatsApp code goes through the chosen template to the stored phone number, found by phone", async (t) => {
   const f = await fixture(t);
   await f.createEmployee("Alice Synthetic", { email: "alice@example.test", phoneNumber: "+919800000001" });
-  await f.createEmployee("No Phone", { email: "nophone@example.test" });
   const saved = await f.saveWeb({ whatsappOtp: true, whatsappTemplate: { name: "login_code", language: "en_US", otpParam: 1, otherParams: [{ index: 2, source: "employee_name" }] } });
   assert.equal(saved.status, 200);
   assert.deepEqual((await (await f.web("/v1/web/config")).json()).methods, ["email", "whatsapp"]);
 
-  const asked = await f.web("/v1/web/auth/request", { method: "POST", body: { email: "alice@example.test", method: "whatsapp" } });
+  const asked = await f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone: "98000 00001" } });
   assert.equal(asked.status, 202);
   assert.equal(f.mails.length, 0);
   assert.equal(f.sends.length, 1);
@@ -433,23 +447,28 @@ test("a WhatsApp code goes through the chosen template and is never stored as a 
   assert.equal(parameters[1].text, "Alice Synthetic");
   assert.equal(sent.body.template.components.some((item) => item.type === "button"), false);
   const code = parameters[0].text;
-  const verified = await f.web("/v1/web/auth/verify", { method: "POST", body: { email: "alice@example.test", code } });
+  const verified = await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "whatsapp", phone: "+91 98000 00001", code } });
   assert.equal(verified.status, 200);
+  assert.equal((await verified.json()).employee.name, "Alice Synthetic");
   assert.equal((await f.DB.prepare("SELECT count(*) AS n FROM whatsapp_messages").first()).n, 0);
   assert.ok(!f.logs.join("\n").includes(code));
 
-  // No phone number, or an unknown address: the same answer and nothing sent.
+  // The code goes to the number the admin stored, not to what was typed: another country code with the same
+  // last ten digits finds the employee, and the message still goes to the stored +91 number.
   await f.resetCooldown();
-  const phoneless = await f.web("/v1/web/auth/request", { method: "POST", body: { email: "nophone@example.test", method: "whatsapp" }, ip: "198.51.100.5" });
-  assert.equal(phoneless.status, 202);
-  await f.resetCooldown();
-  assert.equal((await f.web("/v1/web/auth/request", { method: "POST", body: { email: "nobody@example.test", method: "whatsapp" }, ip: "198.51.100.6" })).status, 202);
-  assert.equal(f.sends.length, 1);
+  assert.equal((await f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone: "+1 9800000001" }, ip: "198.51.100.8" })).status, 202);
+  assert.equal(f.sends.length, 2);
+  assert.equal(f.sends.at(-1).body.to, "919800000001");
+
+  // Malformed input and the wrong key for the method are refused before anything is looked up.
+  for (const body of [{ method: "whatsapp", phone: "abc" }, { method: "whatsapp", email: "alice@example.test" }, { method: "email", phone: "9800000001" }, { method: "sms", phone: "9800000001" }]) {
+    assert.equal((await f.web("/v1/web/auth/request", { method: "POST", body, ip: "198.51.100.9" })).status, 400, JSON.stringify(body));
+  }
 
   // An authentication template also gets the code as its button parameter.
   assert.equal((await f.saveWeb({ whatsappTemplate: { name: "auth_code", language: "en_US", otpParam: 1, otherParams: [], buttonParam: true } })).status, 200);
   await f.resetCooldown();
-  await f.web("/v1/web/auth/request", { method: "POST", body: { email: "alice@example.test", method: "whatsapp" }, ip: "198.51.100.7" });
+  await f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone: "9800000001" }, ip: "198.51.100.7" });
   const auth = f.sends.at(-1).body.template;
   assert.equal(auth.name, "auth_code");
   const authCode = auth.components.find((item) => item.type === "body").parameters[0].text;
@@ -457,6 +476,158 @@ test("a WhatsApp code goes through the chosen template and is never stored as a 
   assert.deepEqual(auth.components.find((item) => item.type === "button"), {
     type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: authCode }],
   });
+});
+
+/** Employees: A (phone), B (phone), C1 and C2 sharing a phone, D (no phone), E (inactive, has a phone). */
+async function phoneWorld(f) {
+  const make = (name, extra) => f.createEmployee(name, { email: `${name.toLowerCase()}@example.test`, ...extra });
+  const a = await make("A", { phoneNumber: "+919800000001" });
+  const b = await make("B", { phoneNumber: "+919800000002" });
+  const c1 = await make("C1", { phoneNumber: "+919800000003" });
+  const c2 = await make("C2");
+  await f.DB.prepare("UPDATE employees SET phone_number = '+919800000003' WHERE id = ?").bind(c2.id).run();
+  const d = await make("D");
+  const e = await make("E", { phoneNumber: "+919800000005" });
+  await f.identity.setEmployeeActive(e.id, false);
+  assert.equal((await f.saveWeb({ whatsappOtp: true, whatsappTemplate: { name: "login_code", language: "en_US", otpParam: 1, otherParams: [{ index: 2, source: "employee_name" }] } })).status, 200);
+  return { a, b, c1, c2, d, e };
+}
+
+test("unknown, shared, phoneless, inactive and undeliverable phone numbers all look like a real one", async (t) => {
+  const f = await fixture(t);
+  await phoneWorld(f);
+  const answers = [];
+  for (const phone of ["9800000001", "9800000099", "9800000003", "9800000005", "+44 7700 900123"]) {
+    await f.resetCooldown();
+    const before = (await f.DB.prepare("SELECT count(*) AS n FROM web_login_codes").first()).n;
+    const response = await f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone }, ip: `198.51.100.${answers.length + 1}` });
+    const after = (await f.DB.prepare("SELECT count(*) AS n FROM web_login_codes").first()).n;
+    answers.push({ status: response.status, body: stripId(await response.json()) });
+    assert.equal(after - before, 1, `${phone} writes one row`);
+  }
+  for (const answer of answers) assert.deepEqual(answer, answers[0]);
+  assert.equal(f.sends.length, 1, "only the one active employee with that number is messaged");
+  assert.equal(f.sends[0].body.to, "919800000001");
+  // None of the decoys can be redeemed, whatever code is tried.
+  for (const phone of ["9800000099", "9800000003", "9800000005"]) {
+    const failure = await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "whatsapp", phone, code: "123456" } });
+    assert.equal(failure.status, 401);
+    assert.equal((await failure.json()).error.code, "invalid_code");
+  }
+  // A number WhatsApp cannot deliver to still answers the same, and nothing from Meta is exposed or logged.
+  f.state.failSends = true;
+  await f.resetCooldown();
+  const undeliverable = await f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone: "9800000002" }, ip: "198.51.100.77" });
+  assert.deepEqual({ status: undeliverable.status, body: stripId(await undeliverable.json()) }, answers[0]);
+  assert.ok(!f.logs.join("\n").includes("secret provider text"));
+  assert.match(f.logs.join("\n"), /"event":"web_sign_in_code","method":"whatsapp","delivered":false,"reason":"rejected"/);
+});
+
+test("a shared phone number cannot sign in even with a code that was issued before it became shared", async (t) => {
+  const f = await fixture(t);
+  const w = await phoneWorld(f);
+  await f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone: "9800000002" } });
+  const code = f.sends.at(-1).body.template.components.find((item) => item.type === "body").parameters[0].text;
+  await f.DB.prepare("UPDATE employees SET phone_number = '+919800000002' WHERE id = ?").bind(w.d.id).run();
+  assert.equal((await f.web("/v1/web/auth/verify", { method: "POST", body: { method: "whatsapp", phone: "9800000002", code } })).status, 401);
+});
+
+test("a code only works for the method and identifier it was issued for", async (t) => {
+  const f = await fixture(t);
+  const w = await phoneWorld(f);
+  const waCode = () => f.sends.at(-1).body.template.components.find((item) => item.type === "body").parameters[0].text;
+  const verify = (body) => f.web("/v1/web/auth/verify", { method: "POST", body });
+  const askEmail = async (email) => { await f.resetCooldown(); await f.web("/v1/web/auth/request", { method: "POST", body: { method: "email", email }, ip: `198.51.100.${Math.floor(Math.random() * 200)}` }); return f.lastCode(); };
+  const askPhone = async (phone) => { await f.resetCooldown(); await f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone }, ip: `198.51.100.${Math.floor(Math.random() * 200)}` }); return waCode(); };
+
+  // An emailed code is no good for WhatsApp sign-in as the same person, or as anyone else.
+  const emailCode = await askEmail("a@example.test");
+  assert.equal((await verify({ method: "whatsapp", phone: w.a.phoneNumber, code: emailCode })).status, 401);
+  assert.equal((await verify({ method: "email", email: "b@example.test", code: emailCode })).status, 401);
+  assert.equal((await verify({ method: "email", email: "a@example.test", code: emailCode })).status, 200);
+
+  // And the other way round.
+  const phoneCode = await askPhone("9800000001");
+  assert.equal((await verify({ method: "email", email: "a@example.test", code: phoneCode })).status, 401);
+  assert.equal((await verify({ method: "whatsapp", phone: w.b.phoneNumber, code: phoneCode })).status, 401);
+  assert.equal((await verify({ method: "whatsapp", phone: "9800000001", code: phoneCode })).status, 200);
+
+  // The method is stored with the code: an email-method code cannot be spent through the phone key either.
+  const rows = (await f.DB.prepare("SELECT method FROM web_login_codes ORDER BY created_at").all()).results.map((row) => row.method);
+  assert.deepEqual(rows, ["email", "whatsapp"]);
+  assert.equal((await verify({ method: "whatsapp", email: "a@example.test", code: phoneCode })).status, 400);
+});
+
+test("phone numbers are unique among active employees, and older clashes are flagged, not broken", async (t) => {
+  const f = await fixture(t, { enable: false });
+  const create = (name, phoneNumber) => f.admin("POST", "/v1/admin/employees", { name, phoneNumber });
+  const alice = (await (await create("Alice", "+919800000001")).json()).employee;
+  assert.equal(alice.phoneShared, false);
+  for (const phone of ["9800000001", "+91 98000 00001", "+919800000001"]) {
+    const clash = await create("Other", phone);
+    assert.equal(clash.status, 409, phone);
+    assert.equal((await clash.json()).error.code, "employee_phone_exists");
+  }
+  const bob = (await (await create("Bob", "+919800000002")).json()).employee;
+  const patch = (id, body) => f.admin("PATCH", `/v1/admin/employees/${id}`, body);
+  const refused = await patch(bob.id, { phoneNumber: "9800000001" });
+  assert.equal(refused.status, 409);
+  assert.equal((await refused.json()).error.code, "employee_phone_exists");
+  assert.equal((await patch(bob.id, { phoneNumber: "9800000002", name: "Bob again" })).status, 200, "his own number again");
+
+  // Data that is already shared keeps working: it is shown as a clash, and unrelated edits still succeed.
+  await f.DB.prepare("UPDATE employees SET phone_number = '+919800000001' WHERE id = ?").bind(bob.id).run();
+  const listed = (await (await f.admin("GET", "/v1/admin/employees")).json()).items;
+  assert.deepEqual(listed.map((item) => [item.name, item.phoneShared]).sort(), [["Alice", true], ["Bob again", true]]);
+  assert.equal((await patch(bob.id, { name: "Bob renamed", phoneNumber: "9800000001" })).status, 200);
+  assert.equal((await patch(bob.id, { phoneNumber: "9800000003" })).status, 200);
+  assert.equal((await (await f.admin("GET", "/v1/admin/employees")).json()).items.every((item) => item.phoneShared === false), true);
+
+  // An inactive employee's number is free to reuse.
+  await f.identity.setEmployeeActive(alice.id, false);
+  assert.equal((await create("Carol", "+919800000001")).status, 201);
+});
+
+test("with no usable method the web app is off even when the stored switch is on", async (t) => {
+  const f = await fixture(t, { env: {}, enable: false });
+  await f.DB.prepare("INSERT INTO app_settings (key, value, encrypted, updated_at) VALUES ('employeeWeb.enabled', 'true', 0, '2026-01-01T00:00:00.000Z')").run();
+  await f.identity.createEmployee({ name: "Alice", email: "alice@example.test", phoneNumber: "+919800000001" });
+  assert.deepEqual(await (await f.web("/v1/web/config")).json().then(stripId), { enabled: false, methods: [] });
+  for (const [method, path, body] of [
+    ["POST", "/v1/web/auth/request", { method: "email", email: "alice@example.test" }],
+    ["POST", "/v1/web/auth/verify", { method: "whatsapp", phone: "9800000001", code: "123456" }],
+    ["GET", "/v1/web/session"], ["GET", "/v1/web/customers"],
+  ]) {
+    const response = await f.web(path, { method, body });
+    assert.equal(response.status, 404, path);
+    assert.equal((await response.json()).error.code, "web_disabled", path);
+  }
+  const view = (await (await f.admin("GET", "/v1/admin/settings")).json()).settings.employeeWeb;
+  assert.deepEqual([view.enabled, view.active, view.usable, view.methods], [true, false, { email: false, whatsapp: false }, []]);
+  const features = await (await f.admin("GET", "/v1/admin/features")).json();
+  assert.deepEqual([features.employeeWeb, features.employeeWebMethods], [false, []]);
+  assert.equal((await f.saveWeb({ enabled: true })).status, 400);
+});
+
+test("phone requests have the same cooldown and hourly cap as email", async (t) => {
+  const f = await fixture(t);
+  await phoneWorld(f);
+  const ask = (phone, ip) => f.web("/v1/web/auth/request", { method: "POST", body: { method: "whatsapp", phone }, ip });
+  assert.equal((await ask("9800000001", "198.51.100.1")).status, 202);
+  const cooling = await ask("+91 9800000001", "198.51.100.2");
+  assert.equal(cooling.status, 429);
+  assert.ok(Number(cooling.headers.get("retry-after")) > 0);
+  for (let index = 2; index <= 5; index += 1) {
+    await f.resetCooldown();
+    assert.equal((await ask("9800000001", `198.51.100.${index + 10}`)).status, 202);
+  }
+  await f.resetCooldown();
+  assert.equal((await ask("9800000001", "198.51.100.99")).status, 429);
+  // The cap is per number, and an unknown number is limited the same way.
+  assert.equal((await ask("9800000002", "198.51.100.98")).status, 202);
+  for (let index = 0; index < 5; index += 1) { await f.resetCooldown(); assert.equal((await ask("9800000077", `198.51.100.${index + 120}`)).status, 202); }
+  await f.resetCooldown();
+  assert.equal((await ask("9800000077", "198.51.100.140")).status, 429);
 });
 
 test("sessions need the cookie, the CSRF header and a same-origin browser for every change", async (t) => {

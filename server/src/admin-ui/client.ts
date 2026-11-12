@@ -688,7 +688,7 @@ export const clientJavaScript = String.raw`(() => {
       save.type = 'submit';
       const cancel = button('Cancel', () => { form.remove(); actions.hidden = false; edit.focus(); });
       controls.append(save, cancel);
-      fields.append(label, element('p', 'Correcting a name updates this same employee on historical recordings. If a phone is changing hands, cancel and reassign the device to another employee instead.', 'hint'), phoneLabel, element('p', 'Used only to fill WhatsApp template messages (for example, who the customer should call).', 'hint'), emailLabel, element('p', 'The address this employee signs in with on the web app. Changing or clearing it signs the employee out of the web app everywhere.', 'hint'), controls);
+      fields.append(label, element('p', 'Correcting a name updates this same employee on historical recordings. If a phone is changing hands, cancel and reassign the device to another employee instead.', 'hint'), phoneLabel, element('p', 'Used for WhatsApp sign-in on the web app, and to fill WhatsApp template messages (for example, who the customer should call). Another active employee cannot have the same number.', 'hint'), emailLabel, element('p', 'The address this employee signs in with on the web app. Changing or clearing it signs the employee out of the web app everywhere.', 'hint'), controls);
       form.append(fields, status, error);
       card.append(form);
       input.focus();
@@ -745,8 +745,21 @@ export const clientJavaScript = String.raw`(() => {
     signOut.disabled = sessions === 0;
     signOut.setAttribute('aria-label', 'Sign out ' + employee.name + ' of the web app everywhere (' + sessions + ' ' + (sessions === 1 ? 'session' : 'sessions') + ')');
     actions.append(edit, invitations, devices, signOut);
+    const warnings = [];
+    if (employee.active !== false) {
+      if (features.webMethods.includes('whatsapp') && !employee.phoneNumber) warnings.push('No phone number: cannot sign in on the web with WhatsApp');
+      if (features.webMethods.includes('email') && !employee.email) warnings.push('No email: cannot sign in on the web with email');
+      if (employee.phoneShared) warnings.push('Phone number is shared with another active employee');
+    }
+    const identity = element('div');
+    identity.append(heading);
+    if (warnings.length) {
+      const chips = element('p', undefined, 'actions');
+      for (const text of warnings) chips.append(element('span', text, 'badge pending'));
+      identity.append(chips);
+    }
     const top = element('div', undefined, 'management-top');
-    top.append(heading, actions);
+    top.append(identity, actions);
     card.append(top, details);
     return card;
   }
@@ -2970,6 +2983,7 @@ export const clientJavaScript = String.raw`(() => {
       if (!data || !Array.isArray(data.items)) throw new Error('The server returned unreadable templates. Please try again.');
       templateState.templates = data.items.map(readTemplate).filter(Boolean);
       templateState.loadedAt = Date.now();
+      note(byId('template-cache-note'), data.cache && data.cache.fetchedAt ? 'Template list saved ' + dateText(data.cache.fetchedAt) + '. Refresh it in Config > WhatsApp Business.' : '');
     } catch (error) {
       message('template-list-error', error.status === 503 && error.code === 'WHATSAPP_NOT_CONFIGURED' ? 'WhatsApp templates are unavailable because WhatsApp is not configured.' : errorMessage(error));
       byId('template-reload').hidden = false;
@@ -5957,6 +5971,47 @@ export const clientJavaScript = String.raw`(() => {
     };
   }
   // Reads templates and defaults together. The list is drawn from the templates; defaults whose template is gone are still shown so they can be removed.
+  function renderTemplateCache(data) {
+    const count = data && Number.isFinite(data.count) ? data.count : 0;
+    if (!data || !data.fetchedAt) {
+      message('tplcache-info', 'No templates cached yet. They are loaded from WhatsApp the first time they are needed, or when you refresh.');
+      return;
+    }
+    message('tplcache-info', count + ' ' + plural(count, 'template', 'templates') + ' cached, last refreshed ' + dateText(data.fetchedAt) + ' (cached for up to 7 days)' + (data.stale ? '. This copy is out of date.' : '.'));
+  }
+  async function loadTemplateCache() {
+    if (!whatsappAvailable()) return;
+    try {
+      renderTemplateCache(await api('/whatsapp/templates/cache'));
+    } catch (error) {
+      message('tplcache-info', 'Could not read the template cache. ' + errorMessage(error));
+    }
+  }
+  let tplCacheBusy = false;
+  byId('tplcache-refresh').addEventListener('click', async () => {
+    if (tplCacheBusy) return;
+    tplCacheBusy = true;
+    const button = byId('tplcache-refresh');
+    button.disabled = true;
+    message('tplcache-error', '');
+    message('tplcache-status', 'Refreshing templates…');
+    try {
+      const data = await api('/whatsapp/templates/refresh', { method: 'POST' });
+      const count = data && Number.isFinite(data.count) ? data.count : 0;
+      renderTemplateCache({ count, fetchedAt: data && data.fetchedAt, stale: false });
+      message('tplcache-status', 'Refreshed: ' + count + ' ' + plural(count, 'template', 'templates') + ' found.');
+      templateState.loadedAt = 0;
+      loadTemplateImages();
+    } catch (error) {
+      message('tplcache-status', '');
+      message('tplcache-error', error.status === 429 ? 'Templates were refreshed a moment ago. Try again in a few seconds.'
+        : error.status === 503 ? 'WhatsApp is not configured, so templates cannot be refreshed.'
+        : 'Templates could not be refreshed from WhatsApp. Try again in a moment.');
+    } finally {
+      tplCacheBusy = false;
+      button.disabled = false;
+    }
+  });
   async function loadTemplateImages() {
     if (tplImg.loading || !whatsappAvailable()) return;
     const token = ++tplImg.token;
@@ -6163,7 +6218,7 @@ export const clientJavaScript = String.raw`(() => {
   });
 
   // ---- Config: features, integrations and import (values come from /v1/admin/settings; secrets are write-only) ----
-  const features = { customers: true, whatsapp: true };
+  const features = { customers: true, whatsapp: true, webMethods: [] };
   let featuresLoaded = false;
   const settingsState = { data: null, generatedToken: '', importedNote: '' };
   const SAVED_TEXT = { database: 'Saved (database)', deployment: 'Saved (deployment)' };
@@ -6187,6 +6242,7 @@ export const clientJavaScript = String.raw`(() => {
     document.body.dataset.customers = features.customers ? 'on' : 'off';
     byId('config-nav-whatsapp').hidden = !whatsappAvailable();
     byId('tplimg-panel').hidden = !whatsappAvailable();
+    byId('tplcache-panel').hidden = !whatsappAvailable();
     if (!whatsappAvailable() && !byId('config-section-whatsapp').hidden) selectConfigSection('features', false);
     if (activeTab && !tabAvailable(activeTab)) { location.hash = 'call-history'; showTab(); }
   }
@@ -6195,6 +6251,10 @@ export const clientJavaScript = String.raw`(() => {
       const data = await api('/features');
       features.customers = data.customers === true;
       features.whatsapp = data.whatsapp === true;
+      const webMethods = Array.isArray(data.employeeWebMethods) ? data.employeeWebMethods : [];
+      const webChanged = webMethods.join() !== features.webMethods.join();
+      features.webMethods = webMethods;
+      if (webChanged && employeesLoaded) employeeList.load(true);
     } catch { return; }
     featuresLoaded = true;
     applyFeatures();
@@ -6706,37 +6766,81 @@ export const clientJavaScript = String.raw`(() => {
     return [template.header, template.body, template.footer].filter(Boolean).join('\n')
       .replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (all, key) => values.has(key) ? values.get(key) : all);
   }
+  function checklist(items) {
+    const list = element('ul', undefined, 'cfg-checklist');
+    for (const item of items) list.append(element('li', (item.ok ? '✓ ' : '✗ ') + item.text + (item.ok ? ' — ready' : ' — needs setup'), item.ok ? 'cfg-check ok' : 'cfg-check bad'));
+    return list;
+  }
+  function signInPageText(emailOn, whatsappOn) {
+    if (emailOn && whatsappOn) return 'Employees choose Email or WhatsApp with two tabs. Email: an email address field and “We will send a code to your email.” WhatsApp: “Phone number registered with your manager” and “We will send a code on WhatsApp.”';
+    if (emailOn) return 'Employees see an email address field and “We will send a code to your email.”';
+    if (whatsappOn) return 'Employees see “Phone number registered with your manager” and “We will send a code on WhatsApp.”';
+    return 'Employees cannot sign in on the web until a method is on.';
+  }
   function renderWebPage() {
     const ui = settingsPage('web', 'settings-web-body');
     const current = settingsSection('employeeWeb');
     const needs = current.prerequisites || {};
     const emailMissing = needs.email && Array.isArray(needs.email.missing) ? needs.email.missing : [];
     const emailReady = needs.email && needs.email.configured === true;
-    const whatsappReady = needs.whatsapp && needs.whatsapp.configured === true;
+    const whatsappMissing = needs.whatsapp && Array.isArray(needs.whatsapp.missing) ? needs.whatsapp.missing : [];
+    const whatsappSending = needs.whatsapp && needs.whatsapp.sending === true;
     ui.body.append(stepsBlock('Let employees use Linekeep on a computer', [
-      'Add each employee’s work email under Employees (when you create them, or with Edit details). Only employees with an email can sign in, and each email can belong to one employee.',
-      'Choose how employees receive their sign-in code. Email needs the Mailgun domain, sending key and From address under Daily email report (no recipients needed). WhatsApp needs an approved template, below.',
-      'For WhatsApp: choose the template, then choose which variable receives the code. Authentication templates also send the code to their copy-code button. Preview shows a sample.',
-      'Turn on Employee web access and click Save. Share the link below. Employees open it, enter their email, then the 6-digit code they receive.',
+      'Turn on the way employees will receive their sign-in code: Email code, WhatsApp code, or both. Each shows what it still needs.',
+      'Email code: add each employee’s work email under Employees. Email needs the Mailgun domain, sending key and From address under Daily email report (no recipients needed).',
+      'WhatsApp code: each employee signs in with the phone number you stored for them under Employees (the same contact number used in WhatsApp templates), and the code is sent only to that number. Choose an approved template below and the variable that receives the code. Two active employees cannot share a number.',
+      'Allow employees to sign in on the web, click Save and share the link below. The master switch stays off until at least one method is ready.',
       'In Cloudflare Access, keep the protected destinations as /admin* and /v1/admin* only. The employee app at /app has its own sign-in and must not be behind Access.'
     ]));
-    const enabled = switchField(ui, 'enabled', 'Employee web access', current.enabled);
-    const emailOtp = switchField(ui, 'emailOtp', 'Send sign-in codes by email', current.emailOtp !== false);
-    const whatsappOtp = switchField(ui, 'whatsappOtp', 'Send sign-in codes on WhatsApp', current.whatsappOtp);
+    const enabled = switchField(ui, 'enabled', 'Allow employees to sign in on the web', current.enabled);
+    const emailOtp = switchField(ui, 'emailOtp', 'Email code', current.emailOtp !== false);
+    const whatsappOtp = switchField(ui, 'whatsappOtp', 'WhatsApp code', current.whatsappOtp);
+    const masterHint = element('p', 'Turn on at least one sign-in method first', 'hint');
+    const masterNote = element('p', undefined, 'notice');
+    masterNote.setAttribute('role', 'status');
+    masterNote.hidden = true;
+    const pageText = element('p', undefined, 'hint');
+    pageText.id = 'set-web-page-text';
 
-    const emailPanel = formPanel('Email codes', 'The code is emailed to the employee through the Mailgun account under Daily email report.');
-    emailPanel.append(emailOtp.node, element('p', emailReady ? 'Email is ready.' : 'Email is not ready yet. Missing or invalid in Daily email report: ' + (emailMissing.filter((item) => item !== 'recipients').join(', ') || 'Mailgun settings') + '.', emailReady ? 'hint' : 'notice'));
+    const emailPanel = formPanel('Email code', 'The code is emailed to the address you set on the employee, through the Mailgun account under Daily email report.');
+    emailPanel.append(emailOtp.node, checklist([
+      { ok: !emailMissing.includes('domain'), text: 'Mailgun domain' },
+      { ok: !emailMissing.includes('API key'), text: 'Mailgun sending API key' },
+      { ok: !emailMissing.includes('from address'), text: 'From address' },
+      ...(emailMissing.includes('region') ? [{ ok: false, text: 'Mailgun region (us or eu)' }] : [])
+    ]));
 
     const saved = current.whatsappTemplate;
     const choice = { name: saved ? saved.name : '', language: saved ? saved.language : '', otpParam: saved ? saved.otpParam : 1, buttonParam: saved ? saved.buttonParam === true : false, others: {} };
     if (saved) for (const item of saved.otherParams || []) choice.others[item.index] = { source: item.source, value: item.value || '' };
     const templateBox = element('div');
-    const whatsappPanel = formPanel('WhatsApp codes', 'The code is sent from your WhatsApp Business number with an approved template. Templates are allowed outside the 24-hour window.');
-    whatsappPanel.append(whatsappOtp.node, templateBox);
+    const whatsappChecks = element('div');
+    const whatsappPanel = formPanel('WhatsApp code', 'The code is sent on WhatsApp to the phone number stored on the employee, from your WhatsApp Business number with an approved template. Templates are allowed outside the 24-hour window.');
+    whatsappPanel.append(whatsappOtp.node, whatsappChecks, templateBox);
+    function drawChecks() {
+      whatsappChecks.replaceChildren(checklist([
+        { ok: !whatsappMissing.includes('access token'), text: 'WhatsApp access token' },
+        { ok: !whatsappMissing.includes('phone number ID'), text: 'Phone number ID' },
+        { ok: !whatsappMissing.includes('business account ID'), text: 'WhatsApp Business Account ID' },
+        { ok: choice.name !== '', text: 'Approved template chosen (checked with WhatsApp when you save)' }
+      ]));
+    }
+    function updateMaster() {
+      const usable = (emailOtp.input.checked && emailReady) || (whatsappOtp.input.checked && whatsappSending && choice.name !== '');
+      if (!usable && enabled.input.checked) {
+        enabled.input.checked = false;
+        note(masterNote, 'No sign-in method is on any more, so web sign-in will be switched off together with it when you save.');
+      } else if (usable) note(masterNote, '');
+      enabled.input.disabled = !usable;
+      masterHint.hidden = usable;
+      pageText.textContent = 'Sign-in page: ' + signInPageText(emailOtp.input.checked && emailReady, whatsappOtp.input.checked && whatsappSending && choice.name !== '');
+      drawChecks();
+    }
     function drawTemplate() {
       templateBox.replaceChildren();
+      updateMaster();
       if (!whatsappOtp.input.checked) return;
-      if (!whatsappReady) { templateBox.append(element('p', 'WhatsApp is not set up yet. Add the access token, Phone number ID and WhatsApp Business Account ID under WhatsApp Business first.', 'notice')); return; }
+      if (!whatsappSending) { templateBox.append(element('p', 'WhatsApp is not set up yet. Add the access token, Phone number ID and WhatsApp Business Account ID under WhatsApp Business first.', 'notice')); return; }
       if (!webTemplates.loaded) { templateBox.append(element('p', 'Loading templates…', 'hint')); loadWebTemplates().then(drawTemplate); return; }
       if (webTemplates.error) { templateBox.append(element('p', 'Templates could not be loaded. ' + webTemplates.error + ' Turn on WhatsApp Business under Features to choose a template.', 'error-text')); return; }
       const options = webTemplates.items;
@@ -6777,25 +6881,30 @@ export const clientJavaScript = String.raw`(() => {
       refreshPreview();
       templateBox.append(element('p', 'Preview (sample code 123456)', 'cfg-fixed-label'), preview);
     }
+    emailOtp.input.addEventListener('change', updateMaster);
     whatsappOtp.input.addEventListener('change', drawTemplate);
     drawTemplate();
 
-    const link = formPanel('Link for employees', 'Share this address. Employees sign in with their own email; nothing else is public.');
+    const link = formPanel('Link for employees', 'Share this address. Employees sign in with their own email or registered phone number; nothing else is public.');
     link.append(fixedValue(ui, 'url', 'Employee web app link', location.origin + '/app'));
     const form = settingsForm(ui, async () => {
-      const body = { enabled: enabled.value(), emailOtp: emailOtp.value(), whatsappOtp: whatsappOtp.value() };
+      const wasEnabled = enabled.value();
+      const body = { enabled: wasEnabled, emailOtp: emailOtp.value(), whatsappOtp: whatsappOtp.value() };
       if (whatsappOtp.value()) {
-        if (!choice.name) throw new Error('Choose a WhatsApp template first.');
+        if (!choice.name) throw new Error('Choose a WhatsApp template first, or switch WhatsApp code off.');
         const others = Object.entries(choice.others).map(([index, item]) => ({ index: Number(index), source: item.source, ...(item.source === 'custom' ? { value: item.value } : {}) }))
           .filter((item) => item.index !== choice.otpParam);
         body.whatsappTemplate = { name: choice.name, language: choice.language, otpParam: choice.otpParam, otherParams: others, buttonParam: choice.buttonParam === true };
       }
       await putSettings('employeeWeb', body);
-      note(byId(ui.status.id), 'Saved.');
+      loadFeatures();
+      note(byId(ui.status.id), wasEnabled ? 'Saved.' : 'Saved. Web sign-in is off.');
     });
-    const panel = formPanel('Employee web access');
-    panel.append(enabled.node, element('p', current.methods && current.methods.length ? 'Employees can sign in with: ' + current.methods.join(' and ') + '.' : 'No sign-in method is ready yet, so access cannot be turned on.', 'hint'));
-    form.append(panel, emailPanel, whatsappPanel, link, actionRow(ui, saveButton(ui)), ui.status, ui.error);
+    const panel = formPanel('Web sign-in');
+    panel.append(enabled.node, masterHint, masterNote);
+    const signIn = formPanel('What employees see on the sign-in page');
+    signIn.append(pageText);
+    form.append(panel, emailPanel, whatsappPanel, signIn, link, actionRow(ui, saveButton(ui)), ui.status, ui.error);
     ui.body.append(form);
   }
 
@@ -6929,7 +7038,7 @@ export const clientJavaScript = String.raw`(() => {
       loadAutoReplies();
       loadActivity();
       loadQuickMessages(false);
-      loadTemplateImages();
+      Promise.resolve(loadTemplateImages()).then(loadTemplateCache);
     }
   }
   let employeesLoaded = false;

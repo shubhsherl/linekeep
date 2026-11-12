@@ -151,9 +151,10 @@ function setHash(path) {
 // ---- Sign-in screens ---------------------------------------------------------------------------------------------------------------
 let auth = authInitial();
 let resendTimer = 0;
-const EMAIL_KEY = 'linekeep.web.email';
-function rememberedEmail() { try { return localStorage.getItem(EMAIL_KEY) || ''; } catch { return ''; } }
-function rememberEmail(email) { try { localStorage.setItem(EMAIL_KEY, email); } catch { /* Remembering the address is optional. */ } }
+const REMEMBER_KEYS = { email: 'linekeep.web.email', whatsapp: 'linekeep.web.phone' };
+// Only the last identifier used for each method is remembered; never a code or a token.
+function remembered(method) { try { return localStorage.getItem(REMEMBER_KEYS[method]) || ''; } catch { return ''; } }
+function remember(method, value) { try { localStorage.setItem(REMEMBER_KEYS[method], value); } catch { /* Remembering is optional. */ } }
 function dispatchAuth(event) {
   auth = authReduce(auth, event);
   renderAuth();
@@ -164,7 +165,7 @@ function showScreen(name) {
 function authMethodLabel(method) { return method === 'whatsapp' ? 'WhatsApp' : 'Email'; }
 function authSentText(method) {
   return method === 'whatsapp'
-    ? 'If this email is registered, a six-digit code is on its way on WhatsApp. It is valid for 10 minutes.'
+    ? 'If this number is registered, a six-digit code is on its way on WhatsApp. It is valid for 10 minutes.'
     : 'If this email is registered you will receive a six-digit code by email. It is valid for 10 minutes.';
 }
 function authFailure(error) {
@@ -206,7 +207,7 @@ function renderAuth() {
     case 'disabled':
     case 'unavailable': renderAuthMessage(); return;
     case 'code': renderCodeScreen(); return;
-    default: renderEmailScreen();
+    default: renderSignInScreen();
   }
 }
 function renderAuthMessage() {
@@ -218,38 +219,68 @@ function renderAuthMessage() {
   if (unavailable) box.append(textButton('Try again', '', () => { dispatchAuth({ type: 'signedOut' }); boot(); }));
   showScreen('message');
 }
-function renderEmailScreen() {
-  const body = authCard('Sign in', 'Use the email address your manager added for you. We will send you a six-digit code.');
+function identifierInput(method) {
+  const input = element('input');
+  input.id = 'auth-' + (method === 'whatsapp' ? 'phone' : 'email');
+  input.name = method === 'whatsapp' ? 'phone' : 'email';
+  input.required = true;
+  input.spellcheck = false;
+  input.value = remembered(method);
+  if (method === 'whatsapp') {
+    input.type = 'tel';
+    input.autocomplete = 'tel';
+    input.inputMode = 'tel';
+    input.maxLength = 32;
+  } else {
+    input.type = 'email';
+    input.autocomplete = 'email';
+    input.inputMode = 'email';
+    input.maxLength = 254;
+  }
+  return input;
+}
+function renderSignInScreen() {
+  const only = auth.methods.length === 1 ? auth.methods[0] : '';
+  const intro = only === 'whatsapp'
+    ? 'Enter the phone number your manager registered for you. We will send you a six-digit code.'
+    : only === 'email' ? 'Use the email address your manager added for you. We will send you a six-digit code.'
+      : 'Choose how to get your six-digit code.';
+  const body = authCard('Sign in', intro);
   const form = element('form', undefined, 'auth-form');
   form.noValidate = true;
-  const email = element('input');
-  email.type = 'email';
-  email.id = 'auth-email';
-  email.name = 'email';
-  email.required = true;
-  email.autocomplete = 'email';
-  email.inputMode = 'email';
-  email.maxLength = 254;
-  email.spellcheck = false;
-  email.value = auth.email || rememberedEmail();
-  form.append(fieldLabel('Email address', email));
-  let methodInputs = [];
-  if (auth.methods.length > 1) {
-    const set = element('fieldset', undefined, 'method-choice');
-    set.append(element('legend', 'Send the code by'));
-    methodInputs = auth.methods.map((method) => {
-      const radio = element('input');
-      radio.type = 'radio';
-      radio.name = 'method';
-      radio.value = method;
-      radio.checked = method === auth.method;
-      const label = element('label', undefined, 'radio-row');
-      label.append(radio, element('span', authMethodLabel(method) + ' code'));
-      set.append(label);
-      return radio;
-    });
-    form.append(set);
+  let method = auth.method;
+  const inputs = {};
+  const fields = {};
+  for (const name of auth.methods) {
+    inputs[name] = identifierInput(name);
+    fields[name] = element('div', undefined, 'auth-field');
+    fields[name].append(fieldLabel(name === 'whatsapp' ? 'Phone number registered with your manager' : 'Email address', inputs[name]));
+    if (name === 'whatsapp') fields[name].append(element('p', 'We will send a code on WhatsApp.', 'hint'));
   }
+  const segments = {};
+  function select(name, focus) {
+    method = name;
+    for (const key of auth.methods) {
+      fields[key].hidden = key !== name;
+      if (segments[key]) segments[key].setAttribute('aria-pressed', String(key === name));
+    }
+    authError('');
+    if (focus) inputs[name].focus();
+  }
+  if (auth.methods.length > 1) {
+    const group = element('div', undefined, 'segmented');
+    group.setAttribute('role', 'group');
+    group.setAttribute('aria-label', 'How to get your code');
+    for (const name of auth.methods) {
+      const segment = element('button', authMethodLabel(name), 'segment secondary');
+      segment.type = 'button';
+      segments[name] = segment;
+      segment.addEventListener('click', () => select(name, true));
+      group.append(segment);
+    }
+    form.append(group);
+  }
+  for (const name of auth.methods) form.append(fields[name]);
   const error = element('p', undefined, 'error-text');
   error.id = 'auth-error';
   error.setAttribute('role', 'alert');
@@ -259,15 +290,13 @@ function renderEmailScreen() {
   form.append(error, submit);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const address = normalizeEmail(email.value);
-    if (!validEmail(address)) { authError('Enter a valid email address.'); email.focus(); return; }
-    const chosen = methodInputs.find((radio) => radio.checked);
-    const method = chosen ? chosen.value : auth.method;
+    const parsed = parseIdentifier(method, inputs[method].value);
+    if (parsed.error) { authError(parsed.error); inputs[method].focus(); return; }
     submit.disabled = true;
     submit.textContent = 'Sending…';
     authError('');
     try {
-      await requestCode(address, method);
+      await requestCode(method, parsed.value);
     } catch (failure) {
       submit.disabled = false;
       submit.textContent = 'Send code';
@@ -275,22 +304,25 @@ function renderEmailScreen() {
     }
   });
   body.append(form);
+  select(method, false);
   showScreen('signin');
-  email.focus();
+  inputs[method].focus();
 }
-async function requestCode(address, method) {
+async function requestCode(method, identifier) {
   try {
-    await api('/auth/request', { method: 'POST', body: { email: address, method }, public: true });
+    await api('/auth/request', { method: 'POST', body: authRequestBody(method, identifier), public: true });
   } catch (failure) {
     if (failure.code === 'web_disabled') { dispatchAuth({ type: 'config', enabled: false, methods: [] }); }
     throw failure;
   }
-  rememberEmail(address);
-  dispatchAuth({ type: 'codeSent', email: address, method, at: Date.now() });
+  remember(method, identifier);
+  dispatchAuth({ type: 'codeSent', identifier, method, at: Date.now() });
 }
 function renderCodeScreen() {
   const body = authCard('Enter your code', authSentText(auth.method));
-  body.append(element('p', auth.email, 'auth-email-shown'));
+  const sentTo = element('p', undefined, 'auth-email-shown');
+  sentTo.append(document.createTextNode('Sent to '), element('span', maskIdentifier(auth.method, auth.identifier), 'auth-masked'));
+  body.append(sentTo);
   const form = element('form', undefined, 'auth-form');
   form.noValidate = true;
   const code = element('input', undefined, 'code-input');
@@ -321,7 +353,7 @@ function renderCodeScreen() {
     verify.textContent = 'Checking…';
     authError('');
     try {
-      const data = await api('/auth/verify', { method: 'POST', body: { email: auth.email, code: digits }, public: true });
+      const data = await api('/auth/verify', { method: 'POST', body: authVerifyBody(auth.method, auth.identifier, digits), public: true });
       applySession(data);
     } catch (failure) {
       verifying = false;
@@ -350,25 +382,18 @@ function renderCodeScreen() {
   }
   tickResend();
   resendTimer = setInterval(tickResend, 1000);
-  async function resendWith(method) {
+  resend.addEventListener('click', async () => {
     resend.disabled = true;
     authError('');
     try {
-      await requestCode(auth.email, method);
-      toast('If this email is registered, a new code was sent.');
+      await requestCode(auth.method, auth.identifier);
+      toast('If this ' + (auth.method === 'whatsapp' ? 'number' : 'email') + ' is registered, a new code was sent.');
     } catch (failure) {
       authError(authFailure(failure));
       tickResend();
     }
-  }
-  resend.addEventListener('click', () => resendWith(auth.method));
-  actions.append(resend);
-  const other = auth.methods.find((method) => method !== auth.method);
-  if (other) {
-    const alternative = textButton('Send by ' + authMethodLabel(other) + ' instead', 'secondary', () => resendWith(other));
-    actions.append(alternative);
-  }
-  actions.append(textButton('Use a different email', 'secondary', () => dispatchAuth({ type: 'back' })));
+  });
+  actions.append(resend, textButton(auth.method === 'whatsapp' ? 'Use a different number' : 'Use a different email', 'secondary', () => dispatchAuth({ type: 'back' })));
   body.append(actions);
   showScreen('signin');
   code.focus();

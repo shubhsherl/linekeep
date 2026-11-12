@@ -12,7 +12,8 @@ import {
   REENGAGEMENT_ERROR_CODE, sendCloudMessage, uploadCloudMedia, whatsappConfig, WhatsAppSendError,
   type CloudMedia, type OutboundContent, type WhatsAppConfig,
 } from "../../whatsapp/cloud";
-import { fetchTemplates, renderTemplate, type WhatsAppTemplate } from "../../whatsapp/templates";
+import { findTemplate, getTemplates, noteTemplateSendFailure, type TemplateSnapshot } from "../../whatsapp/template-cache";
+import { renderTemplate, type WhatsAppTemplate } from "../../whatsapp/templates";
 import { whatsappWindow } from "../../whatsapp/window";
 
 /** A template as listed to clients: Meta's definition plus the state of its default header file. */
@@ -23,23 +24,24 @@ export interface TemplateListItem extends WhatsAppTemplate {
   headerImageUrl?: string;
 }
 
-/** Approved templates for the picker; `apiBase` is `/v1/admin` or `/v1/device`. */
-export async function listTemplates(env: Env, apiBase: string): Promise<TemplateListItem[]> {
+/** Approved templates for the picker (from the cache); `apiBase` is `/v1/admin`, `/v1/device` or `/v1/web`. */
+export async function listTemplates(env: Env, apiBase: string): Promise<{ items: TemplateListItem[]; cache: { fetchedAt: string; expiresAt: string } }> {
   const config = whatsappConfig(env);
   if (!config?.wabaId) throw new WhatsAppUnavailableError();
-  let templates: WhatsAppTemplate[];
+  let loaded: TemplateSnapshot;
   try {
-    templates = await fetchTemplates(config);
+    loaded = await getTemplates(env, config);
   } catch (error) {
     throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
   }
   const defaults = await createWhatsAppAttachmentRepository(env.DB).templateImages();
-  return templates.map((template) => {
+  const items = loaded.templates.map((template) => {
     const file = defaults.get(template.name);
     const configured = file !== undefined && file.kind === template.headerFormat.toLowerCase();
     return { ...template, headerImageConfigured: configured,
       ...(configured ? { headerImageUrl: `${apiBase}/whatsapp/templates/${template.name}/header-image` } : {}) };
   });
+  return { items, cache: { fetchedAt: loaded.fetchedAt, expiresAt: loaded.expiresAt } };
 }
 
 export function whatsappCanSend(env: Env): boolean {
@@ -153,7 +155,7 @@ export async function sendToCustomer(
     if (!config.wabaId) throw new WhatsAppUnavailableError();
     const wanted = input.template;
     try {
-      template = (await fetchTemplates(config, { name: wanted.name })).find((item) => item.language === wanted.language);
+      template = await findTemplate(env, config, wanted.name, wanted.language);
     } catch (error) {
       throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
     }
@@ -191,6 +193,7 @@ export async function sendToCustomer(
     await repository.markSent(id, externalId);
   } catch (error) {
     await repository.markFailed(id);
+    if (template) await noteTemplateSendFailure(env, error);
     // Meta's own 24-hour check disagrees with ours only for free-form content; templates are always allowed.
     if (!template && error instanceof WhatsAppSendError && error.code === REENGAGEMENT_ERROR_CODE) throw new WhatsAppWindowClosedError();
     throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
@@ -219,7 +222,7 @@ export async function sendOtpTemplate(env: Env, to: string, send: OtpTemplateSen
   if (!config?.wabaId) throw new WhatsAppUnavailableError();
   let template: WhatsAppTemplate | undefined;
   try {
-    template = (await fetchTemplates(config, { name: send.name })).find((item) => item.language === send.language);
+    template = await findTemplate(env, config, send.name, send.language);
   } catch (error) {
     throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
   }
@@ -237,6 +240,7 @@ export async function sendOtpTemplate(env: Env, to: string, send: OtpTemplateSen
       ...(send.buttonParam ? { buttonCode: code } : {}),
     });
   } catch (error) {
+    await noteTemplateSendFailure(env, error);
     throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
   }
 }

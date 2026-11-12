@@ -6,13 +6,16 @@ export const WEB_SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
 export const LOGIN_CODE_TTL_MS = 10 * 60 * 1000;
 export const LOGIN_CODE_MAX_ATTEMPTS = 5;
 export const LOGIN_RESEND_COOLDOWN_MS = 30 * 1000;
-export const LOGIN_REQUESTS_PER_EMAIL_PER_HOUR = 5;
+export const LOGIN_REQUESTS_PER_IDENTIFIER_PER_HOUR = 5;
 export const LOGIN_REQUESTS_PER_IP_PER_HOUR = 30;
 const HOUR_MS = 60 * 60 * 1000;
 /** A session's last-seen time is rewritten at most this often, so a busy page does not write on every request. */
 const TOUCH_INTERVAL_MS = 60 * 1000;
 
 export interface SignInEmployee { id: string; name: string; phoneNumber: string | null }
+
+/** What an employee types to sign in: the email the admin set, or the last ten digits of the phone the admin stored. */
+export type SignInIdentifier = { method: "email"; email: string } | { method: "whatsapp"; phoneKey: string };
 
 export interface WebSession {
   id: string;
@@ -31,16 +34,19 @@ export interface LoginCodeAttempt {
 
 /** Everything the employee web sign-in stores. Secrets (codes, tokens, addresses) go in only as keyed hashes. */
 export interface WebAuthRepository {
-  /** The active employee who signs in with this (already lower-cased) address. */
-  findEmployeeByEmail(email: string): Promise<SignInEmployee | null>;
+  /**
+   * The single active employee behind an identifier. Null when there is none, and also when a phone number is
+   * shared by several active employees (the login is ambiguous, so no code may be issued).
+   */
+  findEmployee(identifier: SignInIdentifier): Promise<SignInEmployee | null>;
   /** Counts one request against `key`; refuses once more than `limit` fall inside the hour. */
   hit(key: string, limit: number): Promise<RateVerdict>;
   /** Seconds left of the resend cooldown for `key`, or 0. */
   cooldownSeconds(key: string): Promise<number>;
-  /** Replaces the active code for the address. A null `employeeId` stores a decoy that can never be redeemed. */
-  storeCode(code: { id: string; emailKey: string; employeeId: string | null; method: "email" | "whatsapp"; codeHash: string }): Promise<void>;
-  /** Spends one of the active code's attempts and returns it; null when there is none left, or it expired or was used. */
-  takeAttempt(emailKey: string): Promise<LoginCodeAttempt | null>;
+  /** Replaces the active code for the identifier. A null `employeeId` stores a decoy that can never be redeemed. */
+  storeCode(code: { id: string; identifierKey: string; employeeId: string | null; method: "email" | "whatsapp"; codeHash: string }): Promise<void>;
+  /** Spends one of the active code's attempts and returns it; null when there is none left, or it expired, was used or was issued for another method. */
+  takeAttempt(identifierKey: string, method: "email" | "whatsapp"): Promise<LoginCodeAttempt | null>;
   /** Marks the code used. False when somebody else already did. */
   redeemCode(id: string): Promise<boolean>;
   createSession(employeeId: string): Promise<{ token: string; expiresAt: string }>;
@@ -62,12 +68,21 @@ export function createWebAuthRepository(db: D1Database, tokenHashSecret: string 
   const now = () => clock().getTime();
 
   return {
-    async findEmployeeByEmail(email) {
-      const row = await db
-        .prepare("SELECT id, name, phone_number FROM employees WHERE lower(email) = ? AND active = 1")
-        .bind(email)
-        .first<{ id: string; name: string; phone_number: string | null }>();
-      return row ? { id: row.id, name: row.name, phoneNumber: row.phone_number } : null;
+    async findEmployee(identifier) {
+      const rows = identifier.method === "email"
+        ? await db
+          .prepare("SELECT id, name, phone_number FROM employees WHERE lower(email) = ? AND active = 1 LIMIT 2")
+          .bind(identifier.email)
+          .all<{ id: string; name: string; phone_number: string | null }>()
+        : await db
+          .prepare(
+            `SELECT id, name, phone_number FROM employees
+            WHERE active = 1 AND phone_number IS NOT NULL AND substr(replace(phone_number, '+', ''), -10) = ? LIMIT 2`,
+          )
+          .bind(identifier.phoneKey)
+          .all<{ id: string; name: string; phone_number: string | null }>();
+      const [row] = rows.results;
+      return row && rows.results.length === 1 ? { id: row.id, name: row.name, phoneNumber: row.phone_number } : null;
     },
 
     async hit(key, limit) {
@@ -96,24 +111,24 @@ export function createWebAuthRepository(db: D1Database, tokenHashSecret: string 
     async storeCode(code) {
       const at = now();
       await db.batch([
-        db.prepare("UPDATE web_login_codes SET used_at = ? WHERE email_key = ? AND used_at IS NULL").bind(iso(at), code.emailKey),
+        db.prepare("UPDATE web_login_codes SET used_at = ? WHERE identifier_key = ? AND used_at IS NULL").bind(iso(at), code.identifierKey),
         db.prepare(
-          `INSERT INTO web_login_codes (id, email_key, employee_id, method, code_hash, created_at, expires_at)
+          `INSERT INTO web_login_codes (id, identifier_key, employee_id, method, code_hash, created_at, expires_at)
           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(code.id, code.emailKey, code.employeeId, code.method, code.codeHash, iso(at), iso(at + LOGIN_CODE_TTL_MS)),
+        ).bind(code.id, code.identifierKey, code.employeeId, code.method, code.codeHash, iso(at), iso(at + LOGIN_CODE_TTL_MS)),
       ]);
     },
 
-    async takeAttempt(emailKey) {
+    async takeAttempt(identifierKey, method) {
       // One statement picks the newest live code and spends an attempt on it, so parallel guesses cannot
       // exceed the limit.
       const row = await db.prepare(
         `UPDATE web_login_codes SET attempts = attempts + 1
-        WHERE id = (SELECT id FROM web_login_codes WHERE email_key = ?1 AND used_at IS NULL AND expires_at > ?2
+        WHERE id = (SELECT id FROM web_login_codes WHERE identifier_key = ?1 AND method = ?4 AND used_at IS NULL AND expires_at > ?2
             AND attempts < ?3 ORDER BY created_at DESC, id DESC LIMIT 1)
           AND used_at IS NULL AND attempts < ?3
         RETURNING id, employee_id, code_hash`,
-      ).bind(emailKey, iso(now()), LOGIN_CODE_MAX_ATTEMPTS).first<{ id: string; employee_id: string | null; code_hash: string }>();
+      ).bind(identifierKey, iso(now()), LOGIN_CODE_MAX_ATTEMPTS, method).first<{ id: string; employee_id: string | null; code_hash: string }>();
       return row ? { id: row.id, employeeId: row.employee_id, codeHash: row.code_hash } : null;
     },
 

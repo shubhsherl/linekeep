@@ -19,6 +19,8 @@ export interface Employee {
   email: string | null;
   /** Browsers currently signed in to the employee web app. */
   webSessions: number;
+  /** Another active employee has the same phone number (WhatsApp sign-in by phone would be ambiguous). */
+  phoneShared: boolean;
   active: boolean;
   createdAt: string;
 }
@@ -111,6 +113,11 @@ export class EmployeeEmailExistsError extends Error {
   constructor() { super("An employee with this email already exists"); }
 }
 
+/** Another active employee already has this phone number. */
+export class EmployeePhoneExistsError extends Error {
+  constructor() { super("Another active employee already has this phone number"); }
+}
+
 const employeeInput = z.object({
   name: z.string().trim().min(1).max(200),
   phoneNumber: employeePhone.optional(),
@@ -199,6 +206,7 @@ type EmployeeRow = {
   phone_number: string | null;
   email: string | null;
   web_sessions: number;
+  phone_shared: number;
   active: number;
   created_at: string;
 };
@@ -236,7 +244,10 @@ type DeviceRow = {
 /** Live sessions are counted in SQL against the same clock the sessions are issued with (UTC, millisecond ISO). */
 const employeeColumns = `id, name, phone_number, email, active, created_at,
   (SELECT count(*) FROM web_sessions s WHERE s.employee_id = employees.id
-    AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND s.idle_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) AS web_sessions`;
+    AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND s.idle_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) AS web_sessions,
+  (employees.active = 1 AND employees.phone_number IS NOT NULL AND EXISTS (SELECT 1 FROM employees o
+    WHERE o.active = 1 AND o.id <> employees.id AND o.phone_number IS NOT NULL
+      AND substr(replace(o.phone_number, '+', ''), -10) = substr(replace(employees.phone_number, '+', ''), -10))) AS phone_shared`;
 const invitationColumns =
   "id, employee_id, expires_at, redeemed_at, revoked_at, created_at, purpose, device_id, recovery_device_id";
 const deviceColumns = `id, employee_id, model, manufacturer, android_version, one_ui_version,
@@ -252,6 +263,7 @@ function employee(row: EmployeeRow): Employee {
     phoneNumber: row.phone_number ?? undefined,
     email: row.email,
     webSessions: row.web_sessions,
+    phoneShared: row.phone_shared === 1,
     active: row.active === 1,
     createdAt: row.created_at,
   };
@@ -259,6 +271,17 @@ function employee(row: EmployeeRow): Employee {
 function emailConflict(error: unknown): unknown {
   return error instanceof Error && /UNIQUE constraint failed.*email|employees_email_idx/i.test(error.message)
     ? new EmployeeEmailExistsError() : error;
+}
+
+/** Phone numbers are stored as "+<digits>"; the last ten digits are the key everything else matches on. */
+const phoneKeyOf = (phone: string) => phone.replace(/\D/g, "").slice(-10);
+
+async function assertPhoneFree(db: D1Database, phone: string, exceptEmployeeId: string): Promise<void> {
+  const clash = await db.prepare(
+    `SELECT 1 AS clash FROM employees WHERE active = 1 AND id <> ? AND phone_number IS NOT NULL
+      AND substr(replace(phone_number, '+', ''), -10) = ?`,
+  ).bind(exceptEmployeeId, phoneKeyOf(phone)).first();
+  if (clash) throw new EmployeePhoneExistsError();
 }
 function invitation(row: InvitationRow): Invitation {
   return {
@@ -376,6 +399,13 @@ export function createIdentityRepository(
     async updateEmployee(employeeId, input) {
       const value = employeeUpdateInput.parse(input);
       const key = id.parse(employeeId);
+      if (value.phoneNumber) {
+        // Only a changed number is checked, so editing a name never fails because of older shared numbers.
+        const current = await db.prepare("SELECT phone_number FROM employees WHERE id = ?").bind(key).first<{ phone_number: string | null }>();
+        if (!current?.phone_number || phoneKeyOf(current.phone_number) !== phoneKeyOf(value.phoneNumber)) {
+          await assertPhoneFree(db, value.phoneNumber, key);
+        }
+      }
       try {
         const [, updated] = await db.batch<EmployeeRow>([
           db.prepare(
@@ -501,6 +531,7 @@ export function createIdentityRepository(
       input: z.input<typeof employeeInput>,
     ): Promise<Employee> {
       const value = employeeInput.parse(input);
+      if (value.phoneNumber) await assertPhoneFree(db, value.phoneNumber, "");
       try {
         const row = await db
           .prepare(

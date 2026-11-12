@@ -1,16 +1,16 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 
+import { normalizePhone } from "../../data/customers";
 import { normalizeEmail } from "../../data/identity";
 import { isLocalDevelopment } from "../../http/admin-auth";
 import {
-  LOGIN_REQUESTS_PER_EMAIL_PER_HOUR, LOGIN_REQUESTS_PER_IP_PER_HOUR,
+  LOGIN_REQUESTS_PER_IDENTIFIER_PER_HOUR, LOGIN_REQUESTS_PER_IP_PER_HOUR, type SignInIdentifier,
 } from "../../data/web-auth";
 import { ApiError } from "../../http/errors";
 import { defer } from "../../http/defer";
-import { constantTimeEqual } from "../../security/web-crypto";
-import { readEmployeeWeb, usableMethods, type EmployeeWebSettings } from "../../settings/employee-web";
-import { loadSettings } from "../../settings/service";
+import { constantTimeEqual, type WebCrypto } from "../../security/web-crypto";
+import { employeeWebActive, usableMethods } from "../../settings/employee-web";
 import { createDeviceEmployeeRoutes } from "../device-employee";
 import { createDeviceWhatsAppConfigRoutes } from "../whatsapp/config-routes";
 import { createDeviceCustomerRoutes } from "../customers";
@@ -20,12 +20,36 @@ import { createWebCallRoutes } from "./calls";
 import { deliverEmailCode, deliverWhatsAppCode } from "./delivery";
 import {
   clearedSessionCookie, refuseCrossSite, requireWebEmployee, requireWebEnabled, sessionCookie, SESSION_COOKIE,
-  webAccess, webAuthRepository, webKeys, type WebBindings,
+  webAccess, webAuthRepository, webKeys, webSettings, type WebBindings,
 } from "./session";
 import { getCookie } from "hono/cookie";
 
-const requestInput = z.strictObject({ email: z.string().max(320), method: z.enum(["email", "whatsapp"]) });
-const verifyInput = z.strictObject({ email: z.string().max(320), code: z.string().max(64) });
+const requestInput = z.discriminatedUnion("method", [
+  z.strictObject({ method: z.literal("email"), email: z.string().max(320) }),
+  z.strictObject({ method: z.literal("whatsapp"), phone: z.string().max(64) }),
+]);
+const verifyInput = z.discriminatedUnion("method", [
+  z.strictObject({ method: z.literal("email"), email: z.string().max(320), code: z.string().max(64) }),
+  z.strictObject({ method: z.literal("whatsapp"), phone: z.string().max(64), code: z.string().max(64) }),
+]);
+
+interface ResolvedIdentifier {
+  identifier: SignInIdentifier;
+  /** Keyed hash of the identifier under its method's key: ties a code to the method and identifier it was issued for. */
+  key: string;
+  /** The normalised address, for the mail itself. */
+  email?: string;
+}
+
+/** Normalises what was typed (email, or any common way of writing a phone number); null when it is not well formed. */
+async function resolveIdentifier(keys: WebCrypto, input: { method: "email"; email: string } | { method: "whatsapp"; phone: string }): Promise<ResolvedIdentifier | null> {
+  if (input.method === "email") {
+    const email = normalizeEmail(input.email);
+    return email ? { identifier: { method: "email", email }, key: await keys.mac("email", email), email } : null;
+  }
+  const phone = normalizePhone(input.phone);
+  return phone ? { identifier: { method: "whatsapp", phoneKey: phone.phoneKey }, key: await keys.mac("phone", phone.phoneKey) } : null;
+}
 
 const invalidCode = () => new ApiError(401, "invalid_code", "That code is not valid. Request a new one and try again.");
 
@@ -35,9 +59,6 @@ function rateLimited(verdict: { retryAfterSeconds: number }): ApiError {
   });
 }
 
-async function webSettings(context: Context<WebBindings>): Promise<EmployeeWebSettings> {
-  return readEmployeeWeb((await loadSettings(context.env)).values);
-}
 
 /** The body of a successful sign-in and of `GET /session`. */
 async function sessionBody(context: Context<WebBindings>) {
@@ -68,42 +89,45 @@ export function createWebRoutes() {
   web.use("*", refuseCrossSite);
 
   web.get("/config", async (context) => {
-    const settings = await webSettings(context);
+    const settings = await webSettings(context.env);
+    const active = employeeWebActive(context.env, settings);
     return context.json({
       requestId: context.get("requestId"),
-      enabled: settings.enabled,
-      methods: settings.enabled ? usableMethods(context.env, settings) : [],
+      enabled: active,
+      methods: active ? usableMethods(context.env, settings) : [],
     });
   });
 
   web.post("/auth/request", requireWebEnabled, async (context) => {
     const input = requestInput.parse(await context.req.json());
-    const email = normalizeEmail(input.email);
-    if (!email) throw new ApiError(400, "INVALID_REQUEST", "Enter a valid email address");
-    const settings = await webSettings(context);
+    const keys = webKeys(context.env);
+    const resolved = await resolveIdentifier(keys, input);
+    if (!resolved) throw new ApiError(400, "INVALID_REQUEST", input.method === "email" ? "Enter a valid email address" : "Enter a valid phone number");
+    const settings = await webSettings(context.env);
     if (!usableMethods(context.env, settings).includes(input.method)) {
       throw new ApiError(400, "method_unavailable", "That sign-in method is not available");
     }
-    const keys = webKeys(context.env);
     const repository = webAuthRepository(context.env);
 
-    // Equal work whether or not the address belongs to an employee: the counters move, a code row is written
-    // (a decoy that can never be redeemed for an unknown address), and only the delivery differs, after the response.
-    const emailKey = await keys.mac("email", email);
+    // Equal work whatever the identifier turns out to be (unknown, no phone, shared by two employees, not on
+    // WhatsApp, a real employee): the counters move, a code row is written (a decoy that can never be redeemed
+    // unless exactly one active employee matches), and only the delivery differs, after the response.
+    const counter = `${input.method}:${resolved.key}`;
     const ipVerdict = await repository.hit(
       `ip:${await keys.mac("ip", context.req.header("CF-Connecting-IP") ?? "unknown")}`, LOGIN_REQUESTS_PER_IP_PER_HOUR,
     );
     if (!ipVerdict.allowed) throw rateLimited(ipVerdict);
-    const wait = await repository.cooldownSeconds(`email:${emailKey}`);
+    const wait = await repository.cooldownSeconds(counter);
     if (wait > 0) throw rateLimited({ retryAfterSeconds: wait });
-    const emailVerdict = await repository.hit(`email:${emailKey}`, LOGIN_REQUESTS_PER_EMAIL_PER_HOUR);
-    if (!emailVerdict.allowed) throw rateLimited(emailVerdict);
+    const verdict = await repository.hit(counter, LOGIN_REQUESTS_PER_IDENTIFIER_PER_HOUR);
+    if (!verdict.allowed) throw rateLimited(verdict);
 
-    const employee = await repository.findEmployeeByEmail(email);
+    const employee = await repository.findEmployee(resolved.identifier);
     const code = keys.code();
     const id = `wlc_${crypto.randomUUID()}`;
     await repository.storeCode({
-      id, emailKey, employeeId: employee?.id ?? null, method: input.method, codeHash: await keys.mac("otp", `${id}:${code}`),
+      id, identifierKey: resolved.key, employeeId: employee?.id ?? null, method: input.method,
+      codeHash: await keys.mac("otp", `${id}:${code}`),
     });
     if (employee) {
       // Local development only (localhost and ENVIRONMENT=development and WEB_OTP_DEV_LOG=true): lets a developer
@@ -111,8 +135,9 @@ export function createWebRoutes() {
       if (context.env.WEB_OTP_DEV_LOG === "true" && isLocalDevelopment(context.env, new URL(context.req.url))) {
         console.log(JSON.stringify({ event: "web_sign_in_code_dev", method: input.method, code }));
       }
+      // The code goes only to what the admin stored on the employee, never to what the caller typed.
       await defer(context, input.method === "email"
-        ? deliverEmailCode(context.env, email, code)
+        ? deliverEmailCode(context.env, resolved.email ?? "", code)
         : deliverWhatsAppCode(context.env, employee, settings, code));
     }
     if (Math.random() < 0.05) await defer(context, repository.purge());
@@ -121,18 +146,19 @@ export function createWebRoutes() {
 
   web.post("/auth/verify", requireWebEnabled, async (context) => {
     const input = verifyInput.parse(await context.req.json());
-    const email = normalizeEmail(input.email);
     const keys = webKeys(context.env);
     const repository = webAuthRepository(context.env);
-    if (!email || !/^\d{6}$/.test(input.code)) throw invalidCode();
+    const resolved = await resolveIdentifier(keys, input);
+    if (!resolved || !/^\d{6}$/.test(input.code)) throw invalidCode();
 
-    // An attempt is spent before the comparison, so concurrent guesses cannot beat the limit of five.
-    const attempt = await repository.takeAttempt(await keys.mac("email", email));
+    // An attempt is spent before the comparison, so concurrent guesses cannot beat the limit of five. The code
+    // is found by method and identifier, so one issued for another method or identifier never matches.
+    const attempt = await repository.takeAttempt(resolved.key, input.method);
     const given = await keys.mac("otp", `${attempt?.id ?? "wlc_none"}:${input.code}`);
     const matches = constantTimeEqual(given, attempt?.codeHash ?? await keys.mac("otp", "wlc_none:decoy"));
     if (!attempt || !attempt.employeeId || !matches) throw invalidCode();
     if (!(await repository.redeemCode(attempt.id))) throw invalidCode();
-    const employee = await repository.findEmployeeByEmail(email);
+    const employee = await repository.findEmployee(resolved.identifier);
     if (!employee || employee.id !== attempt.employeeId) throw invalidCode();
 
     const session = await repository.createSession(employee.id);

@@ -3,7 +3,7 @@ const encoder = new TextEncoder();
 const hex = (bytes: Uint8Array): string => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /** Separate keys for separate jobs: a value hashed for one purpose can never be replayed as another. */
-export type WebPurpose = "session" | "csrf" | "otp" | "email" | "ip";
+export type WebPurpose = "session" | "csrf" | "otp" | "email" | "phone" | "ip";
 
 export interface WebCrypto {
   /** HMAC-SHA256 of `value` under the purpose's key, as lower-case hex. */

@@ -7,7 +7,7 @@ import type { AppBindings } from "../../app";
 import type { Env } from "../../env";
 import { ApiError } from "../../http/errors";
 import { constantTimeEqual, webCrypto, type WebCrypto } from "../../security/web-crypto";
-import { readEmployeeWeb } from "../../settings/employee-web";
+import { employeeWebActive, readEmployeeWeb, type EmployeeWebSettings } from "../../settings/employee-web";
 import { loadSettings } from "../../settings/service";
 import type { DeviceBindings, EmployeeAccess } from "../identity";
 
@@ -37,9 +37,17 @@ export function webDisabled(): ApiError {
   return new ApiError(404, "web_disabled", "Employee web access is turned off");
 }
 
-/** 404 `web_disabled` unless an administrator has switched the employee web app on. */
+/** The stored web settings from the per-isolate settings cache. */
+export async function webSettings(env: Env): Promise<EmployeeWebSettings> {
+  return readEmployeeWeb((await loadSettings(env)).values);
+}
+
+/**
+ * 404 `web_disabled` unless an administrator has switched the employee web app on AND at least one sign-in method
+ * can deliver a code (the switch alone is not enough).
+ */
 export const requireWebEnabled: MiddlewareHandler<AppBindings> = async (context, next) => {
-  if (!readEmployeeWeb((await loadSettings(context.env)).values).enabled) throw webDisabled();
+  if (!employeeWebActive(context.env, await webSettings(context.env))) throw webDisabled();
   await next();
 };
 
@@ -66,7 +74,7 @@ export const refuseCrossSite: MiddlewareHandler<AppBindings> = async (context, n
  * derived from the cookie value and handed to the page when it signs in.
  */
 export const requireWebEmployee: MiddlewareHandler<WebBindings> = async (context, next) => {
-  if (!readEmployeeWeb((await loadSettings(context.env)).values).enabled) throw webDisabled();
+  if (!employeeWebActive(context.env, await webSettings(context.env))) throw webDisabled();
   const token = getCookie(context, SESSION_COOKIE);
   const session = token ? await webAuthRepository(context.env).authenticate(token) : null;
   if (!token || !session) throw new ApiError(401, "unauthorized", "Sign in again to continue");

@@ -11,10 +11,10 @@ import { pushAccount } from "../../push/fcm";
 import { pushClientConfig } from "../../push/client-config";
 import { canEncrypt } from "../../settings/crypto";
 import { fieldByKey, featureKeys, sections, type Section } from "../../settings/fields";
-import { readEmployeeWeb, whatsappTemplateSetting } from "../../settings/employee-web";
+import { whatsappTemplateSetting } from "../../settings/employee-web";
 import { employeeWebChanges, type EmployeeWebInput } from "./employee-web";
 import {
-  applySettings, describeSettings, importableFields, invalidateSettings, loadSettings, resolveFeatures, saveSettings,
+  applySettings, describeEmployeeWeb, describeSettings, importableFields, invalidateSettings, loadSettings, resolveFeatures, saveSettings,
   type SettingsSnapshot,
 } from "../../settings/service";
 import type { SettingChange } from "../../settings/store";
@@ -120,8 +120,10 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
     const deployment = deploymentOf(context);
     const snapshot = await loadSettings(deployment);
     const { customers, whatsapp } = resolveFeatures(deployment, snapshot);
+    const web = describeEmployeeWeb(applySettings(deployment, snapshot), snapshot);
     return context.json({
-      requestId: context.get("requestId"), customers, whatsapp, employeeWeb: readEmployeeWeb(snapshot.values).enabled,
+      requestId: context.get("requestId"), customers, whatsapp,
+      employeeWeb: web.active, employeeWebMethods: web.active ? web.methods : [],
     });
   });
 

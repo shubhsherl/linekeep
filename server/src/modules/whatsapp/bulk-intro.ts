@@ -9,7 +9,8 @@ import type { Env } from "../../env";
 import {
   sendCloudMessage, WhatsAppSendError, type CloudMedia, type WhatsAppConfig,
 } from "../../whatsapp/cloud";
-import { fetchTemplates, renderTemplate, type WhatsAppTemplate } from "../../whatsapp/templates";
+import { findTemplate, noteTemplateSendFailure } from "../../whatsapp/template-cache";
+import { renderTemplate, type WhatsAppTemplate } from "../../whatsapp/templates";
 import {
   headerFile, metaMedia, staleMediaErrors, TemplateHeaderRequiredError, WhatsAppSendFailedError, WhatsAppUnavailableError,
 } from "./send";
@@ -49,7 +50,7 @@ export interface PreparedIntro {
 }
 
 /**
- * Looks the template up once (one Meta call) and checks the header file; nothing is created yet, so a bad template, a bad
+ * Looks the template up once (through the template cache) and checks the header file; nothing is created yet, so a bad template, a bad
  * override file or a Meta outage stops the whole request. Throws the same errors as a normal template send.
  */
 export async function prepareIntro(env: Env, config: WhatsAppConfig, intro: IntroInput, owner: AttachmentOwner): Promise<PreparedIntro> {
@@ -57,7 +58,7 @@ export async function prepareIntro(env: Env, config: WhatsAppConfig, intro: Intr
   const wanted = intro.template;
   let template: WhatsAppTemplate | undefined;
   try {
-    template = (await fetchTemplates(config, { name: wanted.name })).find((item) => item.language === wanted.language);
+    template = await findTemplate(env, config, wanted.name, wanted.language);
   } catch (error) {
     throw new WhatsAppSendFailedError(error instanceof WhatsAppSendError ? error.retryable : true);
   }
@@ -207,6 +208,7 @@ export async function sendIntros(
           results[item.position] = { status: "sent" };
         } catch (error) {
           await repository.markFailed(id);
+          await noteTemplateSendFailure(env, error);
           results[item.position] = { status: "failed", reason: failureReason(error) };
         }
       } catch {

@@ -69,7 +69,14 @@ dialog .actions { justify-content: flex-end; margin-top: 18px; }
 .code-input { font-size: 26px !important; letter-spacing: .35em; text-align: center; font-variant-numeric: tabular-nums; }
 .auth-email-shown { margin: 4px 0 0; font-weight: 600; overflow-wrap: anywhere; }
 .auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.method-choice { display: grid; gap: 6px; }
+.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.segment { border-radius: 0; min-height: 38px; }
+.segment:first-child { border-radius: 6px 0 0 6px; }
+.segment:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.segment[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--white); }
+.segment[aria-pressed=true]:hover:not(:disabled) { background: var(--accent-hover); }
+.auth-field { display: grid; gap: 4px; }
+.auth-masked { font-variant-numeric: tabular-nums; }
 
 .topbar { position: sticky; top: 0; z-index: 20; background: var(--white); border-bottom: 1px solid var(--line); }
 .topbar-row { display: flex; align-items: center; gap: 24px; width: min(1360px, calc(100% - 32px)); min-height: 52px; margin: 0 auto; }

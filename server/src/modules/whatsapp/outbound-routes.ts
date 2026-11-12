@@ -14,7 +14,7 @@ import {
   whatsappCanSendAs,
 } from "../../whatsapp/attachments";
 import { whatsappConfig } from "../../whatsapp/cloud";
-import { fetchTemplates } from "../../whatsapp/templates";
+import { getTemplates, peekTemplates, TemplateRefreshTooSoonError } from "../../whatsapp/template-cache";
 import { deviceAccess, type DeviceBindings, type EmployeeAccess } from "../identity";
 import { serveStoredFile } from "./media";
 import { listTemplates, WhatsAppSendFailedError, WhatsAppUnavailableError } from "./send";
@@ -70,7 +70,7 @@ const uploadLimit = bodyLimit({
 async function templatesResponse<B extends AppBindings>(context: Context<B>, apiBase: string) {
   const requestId = context.get("requestId");
   try {
-    return context.json({ requestId, items: await listTemplates(context.env as Env, apiBase) });
+    return context.json({ requestId, ...(await listTemplates(context.env as Env, apiBase)) });
   } catch (error) {
     if (error instanceof WhatsAppUnavailableError) {
       return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp templates are not configured"), 503);
@@ -112,6 +112,29 @@ export function createAdminWhatsAppOutboundRoutes(authorize: MiddlewareHandler<A
     return serveStoredFile(context.env, context.req.raw, { key: file.objectKey, mimeType: file.mimeType, fileName: file.fileName });
   });
   routes.get("/whatsapp/templates", (context) => templatesResponse(context, "/v1/admin"));
+  routes.get("/whatsapp/templates/cache", async (context) => {
+    const cached = await peekTemplates(context.env, whatsappConfig(context.env));
+    return context.json({
+      requestId: context.get("requestId"), count: cached?.templates.length ?? 0,
+      fetchedAt: cached?.fetchedAt ?? null, expiresAt: cached?.expiresAt ?? null, stale: cached?.stale ?? false,
+    });
+  });
+  // Forces a fetch from Meta whatever the cache holds; at most one per ten seconds.
+  routes.post("/whatsapp/templates/refresh", async (context) => {
+    const requestId = context.get("requestId");
+    const config = whatsappConfig(context.env);
+    if (!config?.wabaId) return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp templates are not configured"), 503);
+    try {
+      const loaded = await getTemplates(context.env, config, { refresh: true });
+      return context.json({ requestId, count: loaded.templates.length, fetchedAt: loaded.fetchedAt });
+    } catch (error) {
+      if (error instanceof TemplateRefreshTooSoonError) {
+        context.header("Retry-After", String(error.retryAfterSeconds));
+        return context.json(errorBody(requestId, "rate_limited", `Templates were just refreshed; try again in ${error.retryAfterSeconds} seconds`), 429);
+      }
+      return context.json(errorBody(requestId, "WHATSAPP_SEND_FAILED", "WhatsApp templates could not be loaded"), 502);
+    }
+  });
   routes.get("/whatsapp/templates/:templateName/header-image", (context) => headerImageResponse(context));
 
   routes.get("/whatsapp/template-images", async (context) => {
@@ -134,7 +157,8 @@ export function createAdminWhatsAppOutboundRoutes(authorize: MiddlewareHandler<A
     if (!config?.wabaId) return context.json(errorBody(requestId, "WHATSAPP_NOT_CONFIGURED", "WhatsApp templates are not configured"), 503);
     let formats: string[];
     try {
-      formats = (await fetchTemplates(config, { name })).map((template) => template.headerFormat.toLowerCase());
+      formats = (await getTemplates(context.env, config, { name })).templates
+        .filter((template) => template.name === name).map((template) => template.headerFormat.toLowerCase());
     } catch {
       return context.json(errorBody(requestId, "WHATSAPP_SEND_FAILED", "WhatsApp templates could not be loaded"), 502);
     }

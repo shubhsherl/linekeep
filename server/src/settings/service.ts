@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import { pushClientConfig, type FirebaseClientConfig } from "../push/client-config";
 import { pushAccount } from "../push/fcm";
 import { fieldByKey, featureKeys, fields, jobKeys, parseRecipients, type Features } from "./fields";
-import { emailOtpReady, readEmployeeWeb, usableMethods, whatsappOtpReady } from "./employee-web";
+import { emailOtpReady, readEmployeeWeb, usableMethods, whatsappOtpReady, whatsappProblems } from "./employee-web";
 import { mailTransportProblems } from "../reporting/mail";
 import { createSettingsStore, type SettingChange } from "./store";
 
@@ -141,12 +141,21 @@ export function describeSettings(deployment: Env, snapshot: SettingsSnapshot) {
  */
 export function describeEmployeeWeb(env: Env, snapshot: SettingsSnapshot) {
   const settings = readEmployeeWeb(snapshot.values);
+  const methods = usableMethods(env, settings);
+  const whatsappMissing = whatsappProblems(env, settings.whatsappTemplate);
   return {
     ...settings,
-    methods: usableMethods(env, settings),
+    /** Sign-in methods that can deliver a code right now (switched on and their prerequisites met). */
+    methods,
+    usable: { email: methods.includes("email"), whatsapp: methods.includes("whatsapp") },
+    /** Whether employees can sign in: the master switch is on and at least one method is usable. */
+    active: settings.enabled && methods.length > 0,
     prerequisites: {
       email: { configured: emailOtpReady(env), missing: mailTransportProblems(env) },
-      whatsapp: { configured: whatsappOtpReady(env) },
+      whatsapp: {
+        configured: whatsappMissing.length === 0, sending: whatsappOtpReady(env),
+        templateChosen: settings.whatsappTemplate !== null, missing: whatsappMissing,
+      },
     },
   };
 }

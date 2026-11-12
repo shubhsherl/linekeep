@@ -7,6 +7,7 @@ import {
   createIdentityRepository,
   directoryCursor,
   EmployeeEmailExistsError,
+  EmployeePhoneExistsError,
   phoneNumbersInput,
   type Device,
   type IdentityRepository,
@@ -66,9 +67,13 @@ export interface EmployeeAccess {
 export const deviceAccess: EmployeeAccess = { authorize: requireDevice, apiBase: "/v1/device" };
 
 function employeeEmailExists(error: unknown): unknown {
-  return error instanceof EmployeeEmailExistsError
-    ? new ApiError(409, "employee_email_exists", "Another employee already uses this email")
-    : error;
+  if (error instanceof EmployeeEmailExistsError) {
+    return new ApiError(409, "employee_email_exists", "Another employee already uses this email");
+  }
+  if (error instanceof EmployeePhoneExistsError) {
+    return new ApiError(409, "employee_phone_exists", "Another active employee already has this phone number");
+  }
+  return error;
 }
 
 const deviceInfo = z.object({

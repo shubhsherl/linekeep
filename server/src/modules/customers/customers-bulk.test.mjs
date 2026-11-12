@@ -275,7 +275,7 @@ test("intro messages are sent to created rows only, stored like a normal templat
   assert.deepEqual(again.results.map((r) => r.status), ["exists", "exists", "exists", "invalid", "exists"]);
   assert.equal(again.results.some((r) => "intro" in r), false);
   assert.equal(log.sends.length, 1);
-  assert.equal(log.total, before + 1, "only the template lookup is repeated");
+  assert.equal(log.total, before, "the template lookup is served from the cache");
 });
 
 test("template header: the configured default, an override, and a clear failure when neither exists", async (t) => {
@@ -299,7 +299,7 @@ test("template header: the configured default, an override, and a clear failure 
   const withDefault = await (await f.bulk({ rows: rows(10), intro: intro() })).json();
   assert.ok(withDefault.results.every((r) => r.intro.status === "sent"));
   assert.equal(log.uploads, 1, "the header file is uploaded to Meta once for the whole batch");
-  assert.equal(log.templates, 1);
+  assert.equal(log.templates, 0, "the template comes from the cache");
   assert.ok(log.sends.every((s) => s.template.components[0].type === "header" && s.template.components[0].parameters[0].image.id === "7000001"));
   const message = (await f.DB.prepare("SELECT media_key, media_mime FROM whatsapp_messages WHERE customer_id = ?").bind(withDefault.results[0].customerId).first());
   assert.equal(message.media_mime, "image/jpeg");

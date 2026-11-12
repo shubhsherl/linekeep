@@ -85,3 +85,10 @@ export interface Features { customers: boolean; whatsapp: boolean }
 export const jobKeys = {
   emailLastSent: "job.email.lastSent", retentionLastRun: "job.retention.lastRun", attachmentsLastRun: "job.whatsappAttachments.lastRun",
 } as const;
+
+/**
+ * Server-side caches kept in `app_settings`. They are not settings: the store never loads them into the settings snapshot
+ * (so they cost nothing on ordinary requests), no endpoint lists them and no settings route can write them.
+ */
+export const cacheKeyPrefix = "cache.";
+export const cacheKeys = { whatsappTemplates: "cache.whatsappTemplates" } as const;

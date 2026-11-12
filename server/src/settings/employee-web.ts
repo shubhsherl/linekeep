@@ -78,3 +78,18 @@ export function usableMethods(env: Env, settings: EmployeeWebSettings): OtpMetho
   if (settings.whatsappOtp && settings.whatsappTemplate && whatsappOtpReady(env)) methods.push("whatsapp");
   return methods;
 }
+
+/** Names (never values) of what stops WhatsApp codes from being sent; empty when they can be. */
+export function whatsappProblems(env: WhatsAppEnv, template: WhatsAppTemplateSetting | null): string[] {
+  const problems: string[] = [];
+  if (!env.WHATSAPP_TOKEN?.trim()) problems.push("access token");
+  if (!/^\d{5,32}$/.test(env.WHATSAPP_PHONE_NUMBER_ID?.trim() ?? "")) problems.push("phone number ID");
+  if (!/^\d{5,32}$/.test(env.WHATSAPP_WABA_ID?.trim() ?? "")) problems.push("business account ID");
+  if (!template) problems.push("template");
+  return problems;
+}
+
+/** Web sign-in is on only when an administrator allowed it and at least one method can actually deliver a code. */
+export function employeeWebActive(env: Env, settings: EmployeeWebSettings): boolean {
+  return settings.enabled && usableMethods(env, settings).length > 0;
+}

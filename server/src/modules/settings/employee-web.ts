@@ -1,11 +1,12 @@
 import type { Env } from "../../env";
 import { ApiError } from "../../http/errors";
 import { mailTransportProblems } from "../../reporting/mail";
-import { employeeWebKeys, readEmployeeWeb, usableMethods, whatsappOtpReady, type EmployeeWebSettings, type WhatsAppTemplateSetting } from "../../settings/employee-web";
+import { employeeWebKeys, readEmployeeWeb, usableMethods, whatsappOtpReady, whatsappProblems, type EmployeeWebSettings, type WhatsAppTemplateSetting } from "../../settings/employee-web";
 import type { SettingsSnapshot } from "../../settings/service";
 import type { SettingChange } from "../../settings/store";
 import { whatsappConfig } from "../../whatsapp/cloud";
-import { fetchTemplates, type WhatsAppTemplate } from "../../whatsapp/templates";
+import { findTemplate } from "../../whatsapp/template-cache";
+import type { WhatsAppTemplate } from "../../whatsapp/templates";
 
 export interface EmployeeWebInput {
   enabled?: boolean | null;
@@ -75,17 +76,21 @@ export async function employeeWebChanges(env: Env, snapshot: SettingsSnapshot, i
     if (!config || !whatsappOtpReady(env)) {
       throw invalid("WhatsApp sign-in needs the WhatsApp access token, phone number id and business account id in Config > WhatsApp.");
     }
-    let templates: WhatsAppTemplate[];
+    let found: WhatsAppTemplate | undefined;
     try {
-      templates = await fetchTemplates(config, { name: next.whatsappTemplate.name });
+      found = await findTemplate(env, config, next.whatsappTemplate.name, next.whatsappTemplate.language);
     } catch {
       throw new ApiError(502, "WHATSAPP_SEND_FAILED", "WhatsApp templates could not be loaded; try again in a moment");
     }
-    const problem = templateProblem(templates.find((item) => item.language === next.whatsappTemplate!.language), next.whatsappTemplate);
+    const problem = templateProblem(found, next.whatsappTemplate);
     if (problem) throw invalid(problem);
   }
   if (next.enabled && usableMethods(env, next).length === 0) {
-    throw invalid("Set up email or WhatsApp sign-in first: employees need at least one way to receive a code.");
+    const mail = mailTransportProblems(env);
+    const whatsapp = whatsappProblems(env, next.whatsappTemplate);
+    const email = !next.emailOtp ? "switched off" : mail.length > 0 ? `missing ${mail.join(", ")}` : "ready";
+    const wa = !next.whatsappOtp ? "switched off" : whatsapp.length > 0 ? `missing ${whatsapp.join(", ")}` : "ready";
+    throw new ApiError(400, "no_sign_in_method", `Turn on at least one sign-in method first. Email code: ${email}. WhatsApp code: ${wa}.`);
   }
   return changes;
 }

@@ -238,7 +238,7 @@ export const adminHtml = `<!doctype html>
         <form id="employee-form"><fieldset class="create-employee"><legend>Create employee</legend>
           <label>Full name<input name="name" autocomplete="name" required maxlength="200"></label>
           <label>Phone number (optional)<input name="phoneNumber" type="tel" autocomplete="off" maxlength="32" placeholder="+919876543210" aria-describedby="employee-phone-help"></label>
-          <p id="employee-phone-help" class="hint">Used only to fill WhatsApp template messages (for example, who the customer should call).</p>
+          <p id="employee-phone-help" class="hint">Used for WhatsApp sign-in on the web app, and to fill WhatsApp template messages (for example, who the customer should call). Another active employee cannot have the same number.</p>
           <label>Email (optional)<input name="email" type="email" autocomplete="off" maxlength="254" placeholder="name@example.com" aria-describedby="employee-email-help"></label>
           <p id="employee-email-help" class="hint">The address this employee signs in with on the web app (one-time codes are sent here). Each address can belong to one employee.</p>
           <button type="submit">Create employee</button>
@@ -307,6 +307,13 @@ export const adminHtml = `<!doctype html>
           <section id="config-section-whatsapp-business" class="cfg-section" aria-labelledby="config-whatsapp-business-heading" hidden>
             <h2 id="config-whatsapp-business-heading" class="cfg-section-title" tabindex="-1">WhatsApp Business</h2>
             <div id="settings-whatsapp-body" class="cfg-body"></div>
+            <section id="tplcache-panel" class="panel cfg-block" aria-labelledby="tplcache-heading">
+              <div class="section-heading"><h3 id="tplcache-heading" tabindex="-1">Message templates</h3><button id="tplcache-refresh" class="secondary" type="button">Refresh templates</button></div>
+              <p id="tplcache-info" class="muted" role="status" aria-live="polite">Loading…</p>
+              <p class="muted">Templates rarely change. New or edited templates appear after you refresh here or within 7 days.</p>
+              <p id="tplcache-status" class="cfg-status" role="status" aria-live="polite"></p>
+              <p id="tplcache-error" class="error-text" role="alert" hidden></p>
+            </section>
             <section id="tplimg-panel" class="panel cfg-block cfg-steps" aria-labelledby="tplimg-heading">
               <div class="section-heading"><h3 id="tplimg-heading" tabindex="-1">Template images</h3><button id="tplimg-refresh" class="secondary" type="button">Refresh</button></div>
               <p class="muted">Some approved templates have an image, video or document header. Pick the default file sent with each of them.</p>
@@ -572,6 +579,7 @@ export const adminHtml = `<!doctype html>
         <p id="template-list-error" class="wa-notice wa-error" role="alert" hidden></p>
         <button id="template-reload" class="wa-text-btn" type="button" hidden>Try again</button>
         <div id="template-list" class="wa-tpl-list"></div>
+        <p id="template-cache-note" class="wa-status" hidden></p>
       </section>
       <section class="wa-tpl-col wa-tpl-detail" aria-labelledby="template-detail-heading">
         <h3 id="template-detail-heading" class="sr-only">Selected template</h3>

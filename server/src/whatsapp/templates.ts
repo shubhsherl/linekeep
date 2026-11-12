@@ -84,27 +84,43 @@ export function normalizeTemplate(raw: RawTemplate): WhatsAppTemplate | null {
   };
 }
 
-/** Approved templates of the account, optionally narrowed by name. */
-export async function fetchTemplates(config: WhatsAppConfig, filter: { name?: string } = {}): Promise<WhatsAppTemplate[]> {
+/** Pages followed at most; 100 templates each, far above what an account holds (Meta caps templates per account at 6000). */
+const MAX_TEMPLATE_PAGES = 60;
+
+/**
+ * Every approved template of the account, fetched from Meta page by page. Only the template cache calls this; everything
+ * else reads through `getTemplates`.
+ */
+export async function fetchTemplates(config: WhatsAppConfig): Promise<WhatsAppTemplate[]> {
   if (!config.wabaId) throw new WhatsAppSendError(0, null, false);
-  const query = new URLSearchParams({
-    fields: "name,language,status,category,parameter_format,components", limit: "100", status: "APPROVED",
-    ...(filter.name ? { name: filter.name } : {}),
-  });
-  let response: Response;
-  try {
-    response = await fetch(`https://graph.facebook.com/${config.version}/${config.wabaId}/message_templates?${query}`, {
-      headers: { Authorization: `Bearer ${config.token}` }, signal: AbortSignal.timeout(10_000),
+  const raw: RawTemplate[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_TEMPLATE_PAGES; page++) {
+    const query = new URLSearchParams({
+      fields: "name,language,status,category,parameter_format,components", limit: "100", status: "APPROVED",
+      ...(after ? { after } : {}),
     });
-  } catch {
-    throw new WhatsAppSendError(0, null, true);
+    let response: Response;
+    try {
+      response = await fetch(`https://graph.facebook.com/${config.version}/${config.wabaId}/message_templates?${query}`, {
+        headers: { Authorization: `Bearer ${config.token}` }, signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      throw new WhatsAppSendError(0, null, true);
+    }
+    const parsed = await response.json().catch(() => null) as
+      { data?: RawTemplate[]; paging?: { next?: unknown; cursors?: { after?: unknown } } } | null;
+    if (!response.ok || !Array.isArray(parsed?.data)) {
+      throw new WhatsAppSendError(response.status, null, response.status >= 500 || response.status === 429);
+    }
+    raw.push(...parsed.data);
+    // The `next` link carries the access token, so only the cursor is taken from it and the request is built here.
+    const cursor = parsed.paging?.next ? parsed.paging.cursors?.after : undefined;
+    if (typeof cursor !== "string" || cursor === "" || cursor === after) break;
+    after = cursor;
   }
-  const parsed = await response.json().catch(() => null) as { data?: RawTemplate[] } | null;
-  if (!response.ok || !Array.isArray(parsed?.data)) {
-    throw new WhatsAppSendError(response.status, null, response.status >= 500 || response.status === 429);
-  }
-  return parsed.data.filter((raw) => raw.status === "APPROVED")
-    .flatMap((raw) => { const template = normalizeTemplate(raw); return template ? [template] : []; })
+  return raw.filter((item) => item.status === "APPROVED")
+    .flatMap((item) => { const template = normalizeTemplate(item); return template ? [template] : []; })
     .sort((a, b) => Number(b.sendable) - Number(a.sendable) || a.name.localeCompare(b.name) || a.language.localeCompare(b.language));
 }
 
