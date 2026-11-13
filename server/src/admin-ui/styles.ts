@@ -117,6 +117,12 @@ dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
 .create-employee { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 14px 0 8px; }
 .create-employee label { flex: 1 1 220px; margin: 0; }
 .create-employee button { margin: 0; }
+.demote-panel { margin: 4px 0 10px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--c-fff3d9); color: var(--c-815615); }
+.demote-panel p { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.demote-panel label { margin-bottom: 8px; }
+.demote-panel .actions button { margin-top: 0; }
+.management-card .team-details { margin: 4px 0 0; }
+.management-card .team-details summary { cursor: pointer; }
 .management-card [role=status], #employees-panel > .panel > [role=status] { font-size: 12px; color: var(--muted); }
 fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
 legend { font-size: 14px; font-weight: 700; margin-bottom: 8px; }

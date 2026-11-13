@@ -27,6 +27,9 @@ internal const val WINDOW_CLOSED_CODE = "window_closed"
 internal const val HEADER_IMAGE_REQUIRED_CODE = "template_header_image_required"
 internal const val CUSTOMER_EXISTS_CODE = "customer_exists"
 internal const val PHONE_NOT_EDITABLE_CODE = "phone_not_editable"
+internal const val HANDLER_REQUIRED_CODE = "handler_required"
+internal const val EMPLOYEE_OUT_OF_SCOPE_CODE = "employee_out_of_scope"
+internal const val NOT_A_MANAGER_CODE = "not_a_manager"
 
 /** Server error codes are compared case-insensitively. */
 internal fun hasCode(error: Exception, code: String): Boolean = error is ApiFailure && error.code.equals(code, ignoreCase = true)
@@ -47,7 +50,11 @@ internal fun normalizePhone(raw: String): String? {
     return if (normalized.length in 8..15) "+$normalized" else null
 }
 
-internal data class LookupResult(val phone: String, val exists: Boolean, val mine: Boolean, val customerId: String?, val customerName: String?)
+/** [handlers] is filled for managers when [mine]: who handles the customer in their scope. */
+internal data class LookupResult(
+    val phone: String, val exists: Boolean, val mine: Boolean, val customerId: String?, val customerName: String?,
+    val handlers: List<EmployeeRef> = emptyList(),
+)
 
 internal fun parseLookup(json: JSONObject): LookupResult? {
     val phone = json.optionalString("phone") ?: return null
@@ -55,7 +62,10 @@ internal fun parseLookup(json: JSONObject): LookupResult? {
     val exists = json.optBoolean("exists", false)
     val mine = exists && json.optBoolean("mine", false)
     val customer = if (mine) json.optJSONObject("customer") else null
-    return LookupResult(phone, exists, mine, customer?.optionalString("id"), customer?.optionalString("name"))
+    return LookupResult(
+        phone, exists, mine, customer?.optionalString("id"), customer?.optionalString("name"),
+        handlers = if (mine) json.employees("handlers") else emptyList(),
+    )
 }
 
 internal sealed interface DuplicateDecision {
@@ -84,9 +94,11 @@ internal fun validateNewCustomer(name: String, phone: String, notes: String): St
     else -> null
 }
 
-internal fun createCustomerBody(name: String, phone: String, notes: String): JSONObject {
+/** [employeeId] is a manager's choice of handler; it is omitted for oneself so non-managers never send it. */
+internal fun createCustomerBody(name: String, phone: String, notes: String, employeeId: String? = null): JSONObject {
     val body = JSONObject().put("name", name.trim()).put("phone", requireNotNull(normalizePhone(phone)) { "Invalid phone" })
     notes.trim().takeIf { it.isNotEmpty() }?.let { body.put("notes", it) }
+    employeeId?.takeIf { it.isNotBlank() }?.let { body.put("employeeId", it) }
     return body
 }
 
@@ -100,13 +112,29 @@ internal fun patchCustomerBody(original: Customer, name: String, notes: String):
 
 // ---- Handler (this employee) ---------------------------------------------------------------------------------------------
 
-/** `employee` of `GET /v1/device/profile`; [phoneNumber] is the number the manager configured, if any. */
-internal data class EmployeeProfile(val id: String, val name: String, val phoneNumber: String?)
+/**
+ * `employee` of `GET /v1/device/profile`; [phoneNumber] is the number the administrator configured, if any. [role] is
+ * `employee` unless the server says `manager` (older servers send no role); [team] lists a manager's active reports.
+ */
+internal data class EmployeeProfile(
+    val id: String,
+    val name: String,
+    val phoneNumber: String?,
+    val role: String = "employee",
+    val managerId: String? = null,
+    val team: List<TeamMember> = emptyList(),
+)
 
 internal fun parseProfile(json: JSONObject): EmployeeProfile? {
     val employee = json.optJSONObject("employee") ?: return null
     val id = employee.optionalString("id") ?: return null
-    return EmployeeProfile(id, employee.optionalString("name").orEmpty(), employee.optionalString("phoneNumber"))
+    val isManager = employee.optionalString("role").equals(ROLE_MANAGER, ignoreCase = true)
+    return EmployeeProfile(
+        id, employee.optionalString("name").orEmpty(), employee.optionalString("phoneNumber"),
+        role = if (isManager) ROLE_MANAGER else "employee",
+        managerId = employee.optionalString("managerId"),
+        team = if (isManager) parseTeam(employee.optJSONArray("team")) else emptyList(),
+    )
 }
 
 /** The manager-configured number wins; the SIM-reported one is only a fallback; empty when neither is known. */

@@ -12,6 +12,8 @@ import { ApiError } from "../../http/errors";
 import { defer } from "../../http/defer";
 import { constantTimeEqual, type WebCrypto } from "../../security/web-crypto";
 import { employeeWebActive, usableMethods } from "../../settings/employee-web";
+import { loadEmployeeScope } from "../../data/scope";
+import { profileExtras } from "../identity/scope";
 import { createDeviceEmployeeRoutes } from "../device-employee";
 import { createDeviceWhatsAppConfigRoutes } from "../whatsapp/config-routes";
 import { createDeviceCustomerRoutes } from "../customers";
@@ -64,9 +66,13 @@ function rateLimited(verdict: { retryAfterSeconds: number }): ApiError {
 /** The body of a successful sign-in and of `GET /session`. */
 async function sessionBody(context: Context<WebBindings>) {
   const { employee, expiresAt } = context.get("webSession");
+  const scope = await loadEmployeeScope(context.env.DB, employee.id);
   return {
     requestId: context.get("requestId"),
-    employee: { id: employee.id, name: employee.name, phoneNumber: employee.phoneNumber },
+    employee: {
+      id: employee.id, name: employee.name, phoneNumber: employee.phoneNumber,
+      ...(scope ? profileExtras(scope) : { role: "employee", managerId: null, team: [] }),
+    },
     csrfToken: await webKeys(context.env).mac("csrf", context.get("webToken")),
     expiresAt,
   };
@@ -227,6 +233,6 @@ export function createWebRoutes() {
   web.route("/", createDeviceWhatsAppConfigRoutes(webAccess));
   web.route("/", createDeviceWhatsAppMediaRoutes(webAccess));
   web.route("/", createDeviceWhatsAppOutboundRoutes(webAccess));
-  web.route("/", createWebCallRoutes());
+  web.route("/", createWebCallRoutes(webAccess));
   return web;
 }

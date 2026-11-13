@@ -14,6 +14,8 @@ const names = [
   "fillQuickPlaceholders", "defaultVariableSource", "initialTemplateValues", "renderTemplateText", "templateProblem",
   "templateSendBody", "mediaSendBody", "textSendBody", "attachProblem", "conversationRows", "mergeMessages", "newClientMessageId",
   "OTHER_HANDLER_MESSAGE", "CSRF_HEADER",
+  "isManager", "teamOf", "scopeMembers", "SCOPE_ALL", "normalizeScope", "scopeEmployeeParam", "applyScope", "scopeLabel", "scopeIds",
+  "analyticsEmployeeIds", "readEmployeeRows", "handlerNames", "customerScopeTag", "handoverPlan", "pickCustomerHandler",
 ];
 const logic = new Function(`${logicJavaScript}\nreturn { ${names.join(", ")} };`)();
 
@@ -329,4 +331,124 @@ test("app routes serve the shell with a strict CSP and no caching", async () => 
   const css = await app.request("/styles.css");
   assert.match(css.headers.get("Content-Type"), /text\/css/);
   assert.equal((await app.request("/", { method: "POST" })).status, 404);
+});
+
+const manager = {
+  id: "emp_boss", name: "Meera Boss", role: "manager", managerId: null,
+  team: [{ id: "emp_a", name: "Asha", phoneNumber: "+919800000001" }, { id: "emp_b", name: "Ravi", phoneNumber: null }, { id: "emp_boss", name: "Meera Boss", phoneNumber: null }, { id: "emp_a", name: "Asha again" }, { name: "no id" }],
+};
+const plain = { id: "emp_c", name: "Chitra", role: "employee", managerId: "emp_boss", team: [{ id: "emp_a", name: "Asha" }] };
+
+test("manager gating: only managers have a team, a scope, or scope parameters", () => {
+  assert.equal(logic.isManager(manager), true);
+  assert.equal(logic.isManager(plain), false);
+  assert.equal(logic.isManager(null), false);
+  assert.deepEqual(logic.teamOf(manager).map((person) => person.id), ["emp_a", "emp_b"]);
+  assert.deepEqual(logic.teamOf(plain), []);
+  assert.deepEqual(logic.scopeMembers(plain), []);
+  assert.deepEqual(logic.scopeMembers(manager).map((member) => [member.id, member.self]), [["emp_boss", true], ["emp_a", false], ["emp_b", false]]);
+  // An employee, even with a tampered scope or a stray team list, never sends a scope parameter.
+  for (const scope of [{ mode: "team", employeeId: "" }, { mode: "mine", employeeId: "" }, { mode: "one", employeeId: "emp_a" }]) {
+    assert.equal(logic.scopeEmployeeParam(scope, plain), "");
+    assert.equal(logic.applyScope(new URLSearchParams({ limit: "30" }), scope, plain).toString(), "limit=30");
+    assert.equal(logic.analyticsEmployeeIds(scope, plain, ["emp_a"]), null);
+  }
+  assert.deepEqual(logic.scopeIds(logic.SCOPE_ALL, plain), []);
+});
+
+test("scope parameters for customers, chats and call history", () => {
+  const param = (scope) => logic.scopeEmployeeParam(scope, manager);
+  assert.equal(param({ mode: "all", employeeId: "" }), "");
+  assert.equal(param({ mode: "mine", employeeId: "" }), "me");
+  assert.equal(param({ mode: "team", employeeId: "" }), "team");
+  assert.equal(param({ mode: "one", employeeId: "emp_b" }), "emp_b");
+  assert.equal(param({ mode: "one", employeeId: "emp_boss" }), "me");
+  // Somebody who left the team falls back to the whole scope instead of asking for an out-of-scope id.
+  assert.equal(param({ mode: "one", employeeId: "emp_gone" }), "");
+  assert.equal(param(undefined), "");
+  assert.equal(logic.applyScope(new URLSearchParams({ limit: "30" }), { mode: "team", employeeId: "" }, manager).toString(), "limit=30&employeeId=team");
+  const noTeam = { ...manager, team: [] };
+  assert.deepEqual({ ...logic.normalizeScope({ mode: "team", employeeId: "" }, noTeam) }, { mode: "all", employeeId: "" });
+  assert.match(logic.scopeLabel({ mode: "one", employeeId: "emp_a" }, manager), /Asha/);
+});
+
+test("analytics employee ids stay inside the scope and omit the default", () => {
+  const ids = (scope, picked) => logic.analyticsEmployeeIds(scope, manager, picked);
+  assert.equal(ids(logic.SCOPE_ALL, []), null);
+  assert.equal(ids(logic.SCOPE_ALL, ["emp_a", "emp_b", "emp_boss"]), null);
+  assert.deepEqual(ids(logic.SCOPE_ALL, ["emp_a"]), ["emp_a"]);
+  assert.deepEqual(ids({ mode: "mine", employeeId: "" }, []), ["emp_boss"]);
+  assert.deepEqual(ids({ mode: "team", employeeId: "" }, []), ["emp_a", "emp_b"]);
+  assert.deepEqual(ids({ mode: "team", employeeId: "" }, ["emp_boss", "emp_b"]), ["emp_b"]);
+  assert.deepEqual(ids({ mode: "one", employeeId: "emp_a" }, ["emp_b"]), ["emp_a"]);
+  assert.deepEqual(ids(logic.SCOPE_ALL, ["emp_outsider"]), null);
+});
+
+test("by-employee rows are validated, clamped and sorted", () => {
+  const rows = logic.readEmployeeRows([
+    { id: "emp_a", name: "Asha", total: 3, connected: 2.9, talkSeconds: -4, missed: "x" },
+    { id: "emp_b", name: "Ravi", total: 9 },
+    { name: "no id", total: 100 },
+    null,
+  ]);
+  assert.deepEqual(rows.map((row) => row.id), ["emp_b", "emp_a"]);
+  assert.equal(rows[1].connected, 2);
+  assert.equal(rows[1].talkSeconds, 0);
+  assert.equal(rows[1].missed, 0);
+  assert.deepEqual(logic.readEmployeeRows(undefined), []);
+});
+
+test("hand over keeps handlers outside the manager's scope and needs one handler", () => {
+  const customer = { id: "cus_1", employees: [{ id: "emp_a", name: "Asha" }, { id: "emp_other", name: "Outside Person" }] };
+  let plan = logic.handoverPlan(manager, customer, ["emp_a"]);
+  assert.equal(plan.changed, false);
+  assert.deepEqual(plan.outside.map((person) => person.id), ["emp_other"]);
+  plan = logic.handoverPlan(manager, customer, ["emp_b", "emp_boss"]);
+  assert.deepEqual(plan.employeeIds, ["emp_boss", "emp_b"]);
+  assert.deepEqual(plan.added, ["emp_boss", "emp_b"]);
+  assert.deepEqual(plan.removed, ["emp_a"]);
+  assert.equal(plan.changed, true);
+  assert.equal(plan.problem, "");
+  assert.ok(!plan.employeeIds.includes("emp_other"), "the request never names outside handlers");
+  // Nobody ticked, but the outside handler remains: allowed.
+  plan = logic.handoverPlan(manager, customer, []);
+  assert.equal(plan.problem, "");
+  assert.equal(plan.changed, true);
+  // Nobody ticked and nobody outside: refused, like the server (handler_required).
+  plan = logic.handoverPlan(manager, { id: "cus_2", employees: [{ id: "emp_a", name: "Asha" }] }, []);
+  assert.match(plan.problem, /at least one/);
+  // Ids that are not in the scope are never sent even if ticked.
+  plan = logic.handoverPlan(manager, customer, ["emp_a", "emp_outsider"]);
+  assert.deepEqual(plan.employeeIds, ["emp_a"]);
+});
+
+test("customers created by a manager for a report carry employeeId, own ones do not", () => {
+  assert.deepEqual({ ...logic.createCustomerBody("Asha", "9800000001", "", "emp_a") }, { name: "Asha", phone: "+919800000001", employeeId: "emp_a" });
+  assert.ok(!("employeeId" in logic.createCustomerBody("Asha", "9800000001", "", "")));
+});
+
+test("customer tags and handler names", () => {
+  assert.equal(logic.customerScopeTag({ scope: "team" }, manager), "team");
+  assert.equal(logic.customerScopeTag({ scope: "own" }, manager), "");
+  assert.equal(logic.customerScopeTag({ scope: "team" }, plain), "");
+  assert.equal(logic.handlerNames([{ name: " Asha " }, { name: "" }, null, { name: "Ravi" }]), "Asha, Ravi");
+  assert.equal(logic.handlerNames(undefined), "");
+});
+
+test("template placeholders name the customer's handler on the team, else the manager", () => {
+  const own = { name: "Meera Boss", phone: "+919800000099" };
+  assert.deepEqual({ ...logic.pickCustomerHandler(manager, own, { employees: [{ id: "emp_a" }] }) }, { name: "Asha", phone: "+919800000001" });
+  assert.equal(logic.pickCustomerHandler(manager, own, { employees: [{ id: "emp_a" }, { id: "emp_boss" }] }), own);
+  assert.equal(logic.pickCustomerHandler(manager, own, { employees: [{ id: "emp_b" }] }), own, "a report without a phone number falls back to the manager");
+  assert.equal(logic.pickCustomerHandler(manager, own, { employees: [] }), own);
+  assert.equal(logic.pickCustomerHandler(plain, own, { employees: [{ id: "emp_a" }] }), own);
+});
+
+test("manager screens are gated by role in the bundle and call only the contract's endpoints", () => {
+  assert.equal((webClientJavaScript.match(/\/handlers'/g) ?? []).length, 1, "one handover request");
+  assert.ok(webClientJavaScript.includes("isManager(session.employee)"));
+  for (const needle of ["Hand over customer", "By employee", "role-badge"]) assert.ok(webClientJavaScript.includes(needle), needle);
+  const sourceByName = webClientJavaScript.split("function renderManagerChrome")[1];
+  assert.ok(/if \(!isManager\(session\.employee\)\) return;/.test(sourceByName), "the scope switch is only built for managers");
+  assert.ok(!webClientJavaScript.includes("/v1/admin"));
 });

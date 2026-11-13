@@ -80,7 +80,14 @@ internal data class CallAnalytics(
     val byDay: List<DayBucket>,
     /** Calls per hour of the day (index 0..23), all days of the range together. */
     val byHour: List<Int>,
+    /** Who is included, when the server says (managers); empty otherwise. */
+    val employees: List<EmployeeRef> = emptyList(),
+    /** Per-employee totals (managers asking for `groupBy=employee`); empty otherwise. */
+    val byEmployee: List<EmployeeCalls> = emptyList(),
 )
+
+/** One row of the manager's "By employee" list. */
+internal data class EmployeeCalls(val id: String, val name: String, val total: Int, val connected: Int, val talkSeconds: Long)
 
 private fun JSONObject.count(name: String): Int = (opt(name) as? Number)?.toInt()?.coerceAtLeast(0) ?: 0
 private fun JSONObject.seconds(name: String): Long = (opt(name) as? Number)?.toLong()?.coerceAtLeast(0) ?: 0
@@ -120,7 +127,12 @@ internal fun parseAnalytics(json: JSONObject): CallAnalytics? {
         val hour = row.optInt("hour", -1)
         if (hour in 0..23) hours[hour] += row.count("count")
     }
-    return CallAnalytics(DateRange(from, to), totals, parseMetrics(json.optJSONObject("previous")), byType, byDay, hours.toList())
+    val employees = json.employees("employees")
+    val byEmployee = json.optJSONArray("byEmployee").objects().mapNotNull { row ->
+        val id = row.optionalString("id") ?: return@mapNotNull null
+        EmployeeCalls(id, row.optionalString("name").orEmpty(), row.count("total"), row.count("connected"), row.seconds("talkSeconds"))
+    }.sortedWith(compareByDescending<EmployeeCalls> { it.total }.thenBy { it.name.lowercase() })
+    return CallAnalytics(DateRange(from, to), totals, parseMetrics(json.optJSONObject("previous")), byType, byDay, hours.toList(), employees, byEmployee)
 }
 
 internal enum class Movement { UP, DOWN, FLAT }
@@ -224,6 +236,8 @@ internal data class CallLogItem(
     val customerId: String?,
     val customerName: String?,
     val hasRecording: Boolean,
+    /** Who made or took the call; sent to managers, absent for everyone else. */
+    val employee: EmployeeRef? = null,
 )
 
 /** Recordings that no call claims have no call type or number, so they are not call-log rows. */
@@ -239,6 +253,7 @@ internal fun parseCallLog(json: JSONObject): CallLogItem? {
         remoteNumber = json.optionalString("remoteNumber"), callerName = json.optionalString("callerName"),
         customerId = customer?.optionalString("id"), customerName = customer?.optionalString("name"),
         hasRecording = json.optBoolean("hasRecording", false) || (recordings != null && recordings.length() > 0),
+        employee = json.optJSONObject("employee")?.employee(),
     )
 }
 

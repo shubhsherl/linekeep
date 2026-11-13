@@ -71,7 +71,8 @@ internal fun TemplatePickerScreen(
     var state by remember { mutableStateOf<TemplatesState>(TemplatesState.Loading) }
     var selected by remember { mutableStateOf<MessageTemplate?>(null) }
     val profile by customers.profile.collectAsStateWithLifecycle()
-    val fill = remember(customerName, profile) { customers.handlerContext(customerName) }
+    val customer by customers.selectedCustomer.collectAsStateWithLifecycle()
+    val fill = remember(customerName, profile, customer) { customers.handlerContext(customerName, customer) }
     LaunchedEffect(attempt) {
         state = TemplatesState.Loading
         // Variable values are filled from the profile, so it is known before the list and forms appear.

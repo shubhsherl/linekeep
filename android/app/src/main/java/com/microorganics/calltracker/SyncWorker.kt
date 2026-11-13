@@ -55,7 +55,7 @@ class CalltrackerApplication : Application() {
         PushConfig.initialize(this)
         repository = EnrollmentRepository(this)
         customers = CustomersRepository(repository)
-        analytics = AnalyticsRepository(repository)
+        analytics = AnalyticsRepository(repository, profile = { customers.profile.value })
         push = PushRegistrar(this, repository)
         PushNotifications.ensureChannel(this)
         scope.launch { repository.restore() }

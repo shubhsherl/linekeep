@@ -42,6 +42,7 @@ export const activityCatalog = {
     assigned: ["employees"],
     unassigned: ["employees"],
     archived: [],
+    customers_handed_over: ["added", "removed", "to", "from"],
   },
   whatsapp: {
     message_sent: ["type", "templateName", "mediaKind"],
@@ -59,6 +60,9 @@ export const activityCatalog = {
   admin: {
     employee_created: [],
     employee_updated: ["fields"],
+    role_changed: ["from", "to"],
+    manager_changed: ["from", "to"],
+    team_detached: ["count", "employees", "reason"],
     settings_saved: ["section", "keys"],
     settings_imported: ["keys"],
     template_cache_refreshed: ["count"],

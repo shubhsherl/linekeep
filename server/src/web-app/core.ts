@@ -134,9 +134,9 @@ function downloadBlob(blob, fileName) {
 
 // ---- Session and API ------------------------------------------------------------------------------------------------------------
 // The CSRF token lives in memory only. The session cookie is HttpOnly and never visible to this script.
-const session = { employee: null, csrf: '', expiresAt: 0 };
+const session = { employee: null, csrf: '', expiresAt: 0, scope: SCOPE_ALL };
 const views = {};
-const lifecycle = { signedIn: [], signedOut: [], liveChange: [] };
+const lifecycle = { signedIn: [], signedOut: [], liveChange: [], scopeChanged: [] };
 const apiClient = createApiClient({
   fetch: (url, init) => fetch(url, init),
   getCsrf: () => session.csrf,
@@ -413,6 +413,8 @@ function applySession(data) {
   session.expiresAt = Date.parse(data.expiresAt) || 0;
   byId('user-name').textContent = session.employee.name;
   byId('user-initial').textContent = initialsOf(session.employee.name);
+  session.scope = SCOPE_ALL;
+  renderManagerChrome();
   dispatchAuth({ type: 'session' });
   for (const handler of lifecycle.signedIn) handler();
   if (!location.hash || location.hash === '#') history.replaceState(null, '', location.pathname + '#customers');
@@ -423,7 +425,9 @@ function applySession(data) {
 function endSession(notice) {
   if (auth.screen !== 'app') return;
   stopLive();
+  removeManagerChrome();
   session.employee = null;
+  session.scope = SCOPE_ALL;
   session.csrf = '';
   session.expiresAt = 0;
   for (const handler of lifecycle.signedOut) handler();
@@ -444,6 +448,70 @@ async function signOut() {
   closeUserMenu();
   try { await api('/auth/logout', { method: 'POST', body: {} }); } catch { /* The session is gone locally either way. */ }
   endSession('You have signed out.');
+}
+
+// ---- Manager chrome: a role badge and the scope switch. Shown only to managers; the server enforces the scope in SQL. ----------
+let scopeChrome = null;
+function removeManagerChrome() {
+  if (!scopeChrome) return;
+  scopeChrome.control.remove();
+  scopeChrome.badge.remove();
+  scopeChrome = null;
+}
+function syncScopeControl() {
+  if (!scopeChrome) return;
+  const scope = normalizeScope(session.scope, session.employee);
+  for (const mode of ['all', 'mine', 'team']) scopeChrome.segments[mode].setAttribute('aria-pressed', String(scope.mode === mode));
+  scopeChrome.select.value = scope.mode === 'one' ? scope.employeeId : '';
+}
+function setScope(next) {
+  const before = JSON.stringify(normalizeScope(session.scope, session.employee));
+  session.scope = normalizeScope(next, session.employee);
+  syncScopeControl();
+  if (JSON.stringify(session.scope) === before) return;
+  announce('Showing ' + scopeLabel(session.scope, session.employee) + '.');
+  for (const handler of lifecycle.scopeChanged) handler();
+}
+function renderManagerChrome() {
+  removeManagerChrome();
+  if (!isManager(session.employee)) return;
+  const team = teamOf(session.employee);
+  const control = element('div', undefined, 'scope-control');
+  control.setAttribute('role', 'group');
+  control.setAttribute('aria-label', 'Whose customers and calls to show');
+  const segments = {};
+  for (const entry of [['all', 'All'], ['mine', 'Mine'], ['team', 'Team']]) {
+    const segment = element('button', entry[1], 'secondary scope-segment');
+    segment.type = 'button';
+    if (entry[0] === 'team' && !team.length) { segment.disabled = true; segment.title = 'Nobody reports to you yet.'; }
+    segment.addEventListener('click', () => setScope({ mode: entry[0], employeeId: '' }));
+    segments[entry[0]] = segment;
+    control.append(segment);
+  }
+  const select = element('select', undefined, 'scope-select');
+  select.setAttribute('aria-label', 'Team member');
+  select.append(new Option('Any team member', ''));
+  for (const person of team) select.append(new Option(person.name, person.id));
+  select.disabled = !team.length;
+  select.addEventListener('change', () => setScope(select.value ? { mode: 'one', employeeId: select.value } : SCOPE_ALL));
+  control.append(select);
+  byId('user-button').closest('.user-menu').before(control);
+  const badge = element('span', 'Manager', 'role-badge');
+  byId('user-button').append(badge);
+  scopeChrome = { control, badge, segments, select };
+  syncScopeControl();
+}
+// The profile can change while a manager is signed in (the admin moves the team around): rebuild what depends on it.
+function updateEmployee(next) {
+  if (!next || !session.employee || next.id !== session.employee.id) return;
+  // Becoming (or ceasing to be) a manager changes what every view builds: start over with the new role.
+  if (isManager(next) !== isManager(session.employee)) { location.reload(); return; }
+  const before = JSON.stringify([session.employee.role, session.employee.team]);
+  session.employee = next;
+  if (JSON.stringify([next.role, next.team]) === before) return;
+  session.scope = normalizeScope(session.scope, session.employee);
+  renderManagerChrome();
+  for (const handler of lifecycle.scopeChanged) handler();
 }
 
 // ---- User menu --------------------------------------------------------------------------------------------------------------------------
@@ -542,7 +610,13 @@ function pokeLive() { if (poller) poller.poke(0); }
 document.addEventListener('visibilitychange', () => {
   if (auth.screen !== 'app') return;
   if (poller) poller.visibility();
-  if (!document.hidden) api('/session').then((data) => { if (data && typeof data.csrfToken === 'string') session.csrf = data.csrfToken; }, () => {});
+  if (!document.hidden) {
+    api('/session').then((data) => {
+      if (!data || typeof data.csrfToken !== 'string') return;
+      session.csrf = data.csrfToken;
+      updateEmployee(data.employee);
+    }, () => {});
+  }
 });
 
 // ---- Boot ----------------------------------------------------------------------------------------------------------------------------------------

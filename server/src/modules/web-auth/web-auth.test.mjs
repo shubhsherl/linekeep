@@ -283,7 +283,9 @@ test("an emailed code signs an employee in with a hardened cookie and a CSRF tok
   for (const attribute of ["HttpOnly", "Secure", "SameSite=Strict", "Path=/", "Max-Age=43200"]) assert.ok(cookie.includes(attribute), attribute);
   assert.ok(!/domain=/i.test(cookie));
   const body = await verified.json();
-  assert.deepEqual(body.employee, { id: alice.id, name: "Alice Synthetic", phoneNumber: "+919800000001" });
+  assert.deepEqual(body.employee, {
+    id: alice.id, name: "Alice Synthetic", phoneNumber: "+919800000001", role: "employee", managerId: null, team: [],
+  });
   assert.match(body.csrfToken, /^[0-9a-f]{64}$/);
   assert.ok(Date.parse(body.expiresAt) > Date.now());
   assert.equal(verified.headers.get("cache-control"), "no-store");

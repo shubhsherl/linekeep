@@ -29,7 +29,7 @@ export function createWhatsAppReadRepository(db: D1Database, clock: Clock = () =
     },
 
     /** Chats with unread customer messages, and how many messages, among the customers a viewer may see. */
-    async totals(viewer: Viewer, employeeScope?: string): Promise<{ chats: number; messages: number }> {
+    async totals(viewer: Viewer, employeeScope?: string[]): Promise<{ chats: number; messages: number }> {
       const since = await baseline();
       const row = await db.prepare(
         `SELECT count(DISTINCT m.customer_id) AS chats, count(*) AS messages
@@ -37,8 +37,9 @@ export function createWhatsAppReadRepository(db: D1Database, clock: Clock = () =
         WHERE m.direction = 'in' AND m.sent_at > ?
           AND m.sent_at > COALESCE((SELECT r.last_read_at FROM whatsapp_chat_reads r
             WHERE r.viewer_type = ? AND r.viewer_id = ? AND r.customer_id = m.customer_id), ?)
-          ${employeeScope ? "AND EXISTS (SELECT 1 FROM customer_employees ce WHERE ce.customer_id = c.id AND ce.employee_id = ?)" : ""}`,
-      ).bind(since, viewer.type, viewer.id, since, ...(employeeScope ? [employeeScope] : [])).first<{ chats: number; messages: number }>();
+          ${employeeScope ? `AND EXISTS (SELECT 1 FROM customer_employees ce WHERE ce.customer_id = c.id
+            AND ce.employee_id IN (${employeeScope.length ? employeeScope.map(() => "?").join(", ") : "NULL"}))` : ""}`,
+      ).bind(since, viewer.type, viewer.id, since, ...(employeeScope ?? [])).first<{ chats: number; messages: number }>();
       return { chats: row?.chats ?? 0, messages: row?.messages ?? 0 };
     },
   };

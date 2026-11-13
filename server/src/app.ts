@@ -12,6 +12,7 @@ import { handleError } from "./http/errors";
 import {
   createAdminIdentityRoutes,
   createDeviceIdentityRoutes,
+  deviceAccess,
 } from "./modules/identity";
 import { createRecordingRoutes } from "./modules/recordings";
 import { createAdminCallRoutes } from "./modules/admin-calls";
@@ -35,6 +36,7 @@ import { createAdminWhatsAppOutboundRoutes, createDeviceWhatsAppOutboundRoutes }
 import { createAdminSettingsRoutes } from "./modules/settings";
 import { createAdminAppRoutes, createPublicDownloadRoutes } from "./modules/app-download";
 import { createWebRoutes } from "./modules/web-auth";
+import { createCallPlaybackRoutes } from "./modules/web-auth/calls";
 import { createWebAppRoutes } from "./web-app";
 import type { Env } from "./env";
 import type { Features } from "./settings/fields";
@@ -130,6 +132,7 @@ export function createApp() {
   app.route("/v1/device/call-logs", createDeviceCallHistoryRoutes());
   app.route("/v1/device", createDeviceCustomerRoutes());
   app.route("/v1/device", createDeviceEmployeeRoutes());
+  app.route("/v1/device", createCallPlaybackRoutes(deviceAccess, true));
   app.route("/v1/device", createDeviceWhatsAppConfigRoutes());
   app.route("/v1/device", createDeviceWhatsAppMediaRoutes());
   app.route("/v1/device", createDeviceWhatsAppOutboundRoutes());

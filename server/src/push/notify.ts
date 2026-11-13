@@ -17,14 +17,21 @@ export async function pushToEmployees(env: Env, employeeIds: string[], data: Pus
   }
 }
 
-/** Customer messages: the customer's assigned employees. The text is only the customer's name, never the message. */
+/** Customer messages: the customer's assigned employees (and managers of those who opted in). The text is only the customer's name, never the message. */
 export async function notifyNewMessage(env: Env, customerId: string): Promise<void> {
   try {
     if (!pushAccount(env)) return;
     const customer = await env.DB.prepare("SELECT name FROM customers WHERE id = ? AND archived_at IS NULL").bind(customerId).first<{ name: string }>();
     if (!customer) return;
     const handlers = await env.DB.prepare("SELECT employee_id FROM customer_employees WHERE customer_id = ?").bind(customerId).all<{ employee_id: string }>();
-    await pushToEmployees(env, handlers.results.map((row) => row.employee_id), {
+    // A manager who asked for it (notify_team_messages) also hears about their reports' customers.
+    const managers = await env.DB.prepare(
+      `SELECT DISTINCT m.id FROM customer_employees ce
+        JOIN employees e ON e.id = ce.employee_id AND e.active = 1
+        JOIN employees m ON m.id = e.manager_id AND m.active = 1 AND m.role = 'manager' AND m.notify_team_messages = 1
+        WHERE ce.customer_id = ?`,
+    ).bind(customerId).all<{ id: string }>();
+    await pushToEmployees(env, [...handlers.results.map((row) => row.employee_id), ...managers.results.map((row) => row.id)], {
       type: "message", customerId, customerName: customer.name, title: "New WhatsApp message", body: customer.name,
     });
   } catch {

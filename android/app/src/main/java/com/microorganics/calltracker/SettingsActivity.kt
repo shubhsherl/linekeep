@@ -504,9 +504,12 @@ private fun DeviceScreen(
     var analyticsIndex by rememberSaveable { mutableStateOf(AnalyticsSection.ANALYTICS.ordinal) }
     val destination = MainDestination.fromIndex(destinationIndex)
     val unreadChats by customers.unreadChats.collectAsStateWithLifecycle()
+    val employeeProfile by customers.profile.collectAsStateWithLifecycle()
     // Totals refresh on app resume, whenever the WhatsApp destination is shown (including coming back from a conversation).
     LifecycleResumeEffect(Unit) {
         scope.launch { customers.refreshUnread() }
+        // Role and team changes made by the administrator arrive here (at most every ten minutes, not polled).
+        scope.launch { customers.refreshProfileIfStale() }
         onPauseOrDispose { }
     }
     // Only the id survives recreation; names and phone numbers are re-read from the in-memory repository.
@@ -615,8 +618,8 @@ private fun DeviceScreen(
                         MainDestination.CUSTOMERS -> CustomersTab(customers, scope, openConversation)
                         MainDestination.CHATS -> ChatsTab(customers, scope, openConversation)
                         MainDestination.ANALYTICS -> when (AnalyticsSection.fromIndex(analyticsIndex)) {
-                            AnalyticsSection.ANALYTICS -> AnalyticsTab(analytics, scope)
-                            AnalyticsSection.CALL_LOGS -> CallLogsTab(analytics, scope)
+                            AnalyticsSection.ANALYTICS -> AnalyticsTab(analytics, scope, employeeProfile)
+                            AnalyticsSection.CALL_LOGS -> CallLogsTab(analytics, scope, employeeProfile)
                         }
                         MainDestination.SETTINGS -> when (SettingsSection.fromIndex(settingsIndex)) {
                             SettingsSection.SETUP -> SetupScreen(status, content, access, granting, setupFailure, grant, server, scanMessage, scan, enroll, sync, reset)

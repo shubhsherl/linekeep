@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { createCredentials } from "../security/credentials";
 import { normalizePhone } from "./customers";
+import { MAX_TEAM_SIZE } from "./scope";
 import {
   type Clock,
   id,
@@ -24,6 +25,15 @@ export interface Employee {
   active: boolean;
   /** When the employee last used the app or the web app (updated at most every five minutes); null if never seen. */
   lastActiveAt: string | null;
+  /** A manager sees and can act for themselves and their team (the active employees that report to them). */
+  role: "employee" | "manager";
+  /** The manager this employee reports to; always null for a manager. */
+  managerId: string | null;
+  managerName: string | null;
+  /** Active employees reporting to this manager (0 for an employee). */
+  teamSize: number;
+  /** A manager is pushed new customer messages of their team's customers (off by default). */
+  notifyTeamMessages: boolean;
   createdAt: string;
 }
 
@@ -120,16 +130,32 @@ export class EmployeePhoneExistsError extends Error {
   constructor() { super("Another active employee already has this phone number"); }
 }
 
+/** A rule of the manager hierarchy was broken; `code` is the stable API error code. */
+export class EmployeeHierarchyError extends Error {
+  constructor(readonly status: 400 | 409, readonly code: "invalid_manager" | "manager_cannot_report" | "manager_has_team" | "team_full", message: string) {
+    super(message);
+  }
+}
+
+const employeeRole = z.enum(["employee", "manager"]);
 const employeeInput = z.object({
   name: z.string().trim().min(1).max(200),
   phoneNumber: employeePhone.optional(),
   email: employeeEmail.nullable().optional(),
+  role: employeeRole.optional(),
+  managerId: id.nullable().optional(),
+  notifyTeamMessages: z.boolean().optional(),
 });
 const employeeUpdateInput = z.strictObject({
   name: z.string().trim().min(1).max(200).optional(),
   phoneNumber: employeePhone.nullable().optional(),
   email: employeeEmail.nullable().optional(),
-}).refine((value) => value.name !== undefined || value.phoneNumber !== undefined || value.email !== undefined, { message: "Nothing to update" });
+  role: employeeRole.optional(),
+  managerId: id.nullable().optional(),
+  notifyTeamMessages: z.boolean().optional(),
+  /** When demoting a manager who has active reports: the manager they move to, or null to leave them without one. */
+  moveTeamTo: id.nullable().optional(),
+}).refine((value) => Object.values(value).some((field) => field !== undefined), { message: "Nothing to update" });
 const deviceInput = z.object({
   model: z.string().optional(),
   manufacturer: z.string().optional(),
@@ -152,8 +178,13 @@ export interface IdentityRepository {
   listEmployees(input?: DirectoryInput): Promise<DirectoryPage<Employee>>;
   updateEmployee(
     employeeId: string,
-    input: { name?: string; phoneNumber?: string | null; email?: string | null },
+    input: {
+      name?: string; phoneNumber?: string | null; email?: string | null;
+      role?: "employee" | "manager"; managerId?: string | null; notifyTeamMessages?: boolean; moveTeamTo?: string | null;
+    },
   ): Promise<Employee | null>;
+  /** The employees whose manager is this one, active or not (inactive ones are cleared when the manager is demoted or deactivated). */
+  listReports(managerId: string): Promise<{ id: string; name: string; active: boolean }[]>;
   getManagedDevice(deviceId: string): Promise<ManagedDevice | null>;
   listDevices(
     input?: DirectoryInput & { employeeId?: string; includeRevoked?: boolean },
@@ -212,6 +243,11 @@ type EmployeeRow = {
   last_active_at: string | null;
   active: number;
   created_at: string;
+  role: Employee["role"];
+  manager_id: string | null;
+  manager_name: string | null;
+  team_size: number;
+  notify_team_messages: number;
 };
 type InvitationRow = {
   id: string;
@@ -251,7 +287,10 @@ const employeeColumns = `id, name, phone_number, email, active, created_at,
   (employees.active = 1 AND employees.phone_number IS NOT NULL AND EXISTS (SELECT 1 FROM employees o
     WHERE o.active = 1 AND o.id <> employees.id AND o.phone_number IS NOT NULL
       AND substr(replace(o.phone_number, '+', ''), -10) = substr(replace(employees.phone_number, '+', ''), -10))) AS phone_shared,
-  (SELECT a.last_active_at FROM employee_activity_summary a WHERE a.employee_id = employees.id) AS last_active_at`;
+  (SELECT a.last_active_at FROM employee_activity_summary a WHERE a.employee_id = employees.id) AS last_active_at,
+  role, manager_id, notify_team_messages,
+  (SELECT m.name FROM employees m WHERE m.id = employees.manager_id) AS manager_name,
+  (SELECT count(*) FROM employees r WHERE r.manager_id = employees.id AND r.active = 1) AS team_size`;
 const invitationColumns =
   "id, employee_id, expires_at, redeemed_at, revoked_at, created_at, purpose, device_id, recovery_device_id";
 const deviceColumns = `id, employee_id, model, manufacturer, android_version, one_ui_version,
@@ -270,6 +309,11 @@ function employee(row: EmployeeRow): Employee {
     phoneShared: row.phone_shared === 1,
     active: row.active === 1,
     lastActiveAt: row.last_active_at ?? null,
+    role: row.role,
+    managerId: row.manager_id,
+    managerName: row.manager_name,
+    teamSize: row.team_size,
+    notifyTeamMessages: row.notify_team_messages === 1,
     createdAt: row.created_at,
   };
 }
@@ -333,6 +377,69 @@ function managedDevice(
 }
 
 /** SQL and credential hashes stay behind this boundary, including registration's transaction. */
+/** Fails unless `managerId` is an active manager other than `selfId` with room in their team. */
+async function assertCanManage(db: D1Database, managerId: string, selfId: string | null, extraReports = 0): Promise<void> {
+  const row = await db.prepare(
+    `SELECT role, active, (SELECT count(*) FROM employees r WHERE r.manager_id = employees.id AND r.active = 1) AS team
+      FROM employees WHERE id = ?`,
+  ).bind(managerId).first<{ role: Employee["role"]; active: number; team: number }>();
+  if (!row || row.role !== "manager" || row.active !== 1 || managerId === selfId) {
+    throw new EmployeeHierarchyError(400, "invalid_manager", "The manager must be another active manager");
+  }
+  if (row.team + extraReports + 1 > MAX_TEAM_SIZE) {
+    throw new EmployeeHierarchyError(409, "team_full", `A manager can have at most ${MAX_TEAM_SIZE} reports`);
+  }
+}
+
+/**
+ * Validates a role / reporting-line change against the current row and works out the final role, manager and the
+ * statements that must run first (moving or clearing the reports of a demoted manager). Null: unknown employee.
+ */
+async function planHierarchy(
+  db: D1Database, employeeId: string,
+  value: { role?: Employee["role"]; managerId?: string | null; moveTeamTo?: string | null },
+): Promise<{ role: Employee["role"]; managerId: string | null; moves: D1PreparedStatement[] } | null> {
+  const current = await db.prepare("SELECT role, manager_id FROM employees WHERE id = ?")
+    .bind(employeeId).first<{ role: Employee["role"]; manager_id: string | null }>();
+  if (!current) return null;
+  const role = value.role ?? current.role;
+  const demoting = current.role === "manager" && role === "employee";
+  if (value.moveTeamTo !== undefined && !demoting) {
+    throw new EmployeeHierarchyError(400, "invalid_manager", "moveTeamTo only applies when demoting a manager");
+  }
+  if (role === "manager" && value.managerId) {
+    throw new EmployeeHierarchyError(400, "manager_cannot_report", "A manager cannot report to another manager");
+  }
+  // Promoting an employee ends their own reporting line.
+  const managerId = role === "manager" ? null : value.managerId !== undefined ? value.managerId : current.manager_id;
+  if (role === "employee" && value.managerId && value.managerId !== current.manager_id) {
+    await assertCanManage(db, value.managerId, employeeId);
+  }
+  const moves: D1PreparedStatement[] = [];
+  if (demoting) {
+    const active = (await db.prepare("SELECT count(*) AS n FROM employees WHERE manager_id = ? AND active = 1")
+      .bind(employeeId).first<{ n: number }>())?.n ?? 0;
+    if (active > 0 && value.moveTeamTo === undefined) {
+      throw new EmployeeHierarchyError(409, "manager_has_team", "This manager still has active reports; move or clear the team first");
+    }
+    if (value.moveTeamTo) {
+      await assertCanManage(db, value.moveTeamTo, employeeId, active - 1);
+      moves.push(db.prepare("UPDATE employees SET manager_id = ? WHERE manager_id = ? AND active = 1").bind(value.moveTeamTo, employeeId));
+    }
+    // Whatever remains (everyone when the team is cleared, plus inactive reports) is detached.
+    moves.push(db.prepare("UPDATE employees SET manager_id = NULL WHERE manager_id = ?").bind(employeeId));
+  }
+  return { role, managerId, moves };
+}
+
+/** Statuses of the guards in migration 0023 (concurrent writers), as the same API errors the checks raise. */
+function hierarchyConflict(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  if (/invalid_manager/.test(error.message)) return new EmployeeHierarchyError(400, "invalid_manager", "The manager must be another active manager");
+  if (/manager_has_team/.test(error.message)) return new EmployeeHierarchyError(409, "manager_has_team", "This manager still has active reports");
+  return error;
+}
+
 export function createIdentityRepository(
   db: D1Database,
   tokenHashSecret: string,
@@ -400,10 +507,21 @@ export function createIdentityRepository(
       return directoryPage(rows.results, value.limit, employee);
     },
 
-    /** Changing or clearing the sign-in email also signs the employee out of every browser. */
+    async listReports(managerId) {
+      const rows = await db.prepare("SELECT id, name, active FROM employees WHERE manager_id = ? ORDER BY name, id")
+        .bind(id.parse(managerId)).all<{ id: string; name: string; active: number }>();
+      return rows.results.map((row) => ({ id: row.id, name: row.name, active: row.active === 1 }));
+    },
+
+    /**
+     * Changing or clearing the sign-in email also signs the employee out of every browser. Role and reporting line
+     * keep the hierarchy valid (see `planHierarchy`).
+     */
     async updateEmployee(employeeId, input) {
       const value = employeeUpdateInput.parse(input);
       const key = id.parse(employeeId);
+      const hierarchy = await planHierarchy(db, key, value);
+      if (hierarchy === null) return null;
       if (value.phoneNumber) {
         // Only a changed number is checked, so editing a name never fails because of older shared numbers.
         const current = await db.prepare("SELECT phone_number FROM employees WHERE id = ?").bind(key).first<{ phone_number: string | null }>();
@@ -412,15 +530,18 @@ export function createIdentityRepository(
         }
       }
       try {
-        const [, updated] = await db.batch<EmployeeRow>([
+        const results = await db.batch<EmployeeRow>([
           db.prepare(
             `DELETE FROM web_sessions WHERE employee_id = ?1 AND ?2 = 1
               AND NOT EXISTS (SELECT 1 FROM employees WHERE id = ?1 AND email IS ?3)`,
           ).bind(key, value.email === undefined ? 0 : 1, value.email ?? null),
+          ...hierarchy.moves,
           db.prepare(
             `UPDATE employees SET name = COALESCE(?, name),
               phone_number = CASE WHEN ? THEN ? ELSE phone_number END,
-              email = CASE WHEN ? THEN ? ELSE email END
+              email = CASE WHEN ? THEN ? ELSE email END,
+              role = ?, manager_id = ?,
+              notify_team_messages = CASE WHEN ? THEN ? ELSE notify_team_messages END
             WHERE id = ? RETURNING ${employeeColumns}`,
           ).bind(
             value.name ?? null,
@@ -428,13 +549,17 @@ export function createIdentityRepository(
             value.phoneNumber ?? null,
             value.email === undefined ? 0 : 1,
             value.email ?? null,
+            hierarchy.role,
+            hierarchy.managerId,
+            value.notifyTeamMessages === undefined ? 0 : 1,
+            value.notifyTeamMessages ? 1 : 0,
             key,
           ),
         ]);
-        const row = updated.results[0];
+        const row = results.at(-1)?.results[0];
         return row ? employee(row) : null;
       } catch (error) {
-        throw emailConflict(error);
+        throw hierarchyConflict(emailConflict(error));
       }
     },
 
@@ -537,11 +662,16 @@ export function createIdentityRepository(
     ): Promise<Employee> {
       const value = employeeInput.parse(input);
       if (value.phoneNumber) await assertPhoneFree(db, value.phoneNumber, "");
+      const role = value.role ?? "employee";
+      if (role === "manager" && value.managerId) {
+        throw new EmployeeHierarchyError(400, "manager_cannot_report", "A manager cannot report to another manager");
+      }
+      if (value.managerId) await assertCanManage(db, value.managerId, null);
       try {
         const row = await db
           .prepare(
-            `INSERT INTO employees (id, name, phone_number, email, created_at)
-          VALUES (?, ?, ?, ?, ?) RETURNING ${employeeColumns}`,
+            `INSERT INTO employees (id, name, phone_number, email, created_at, role, manager_id, notify_team_messages)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${employeeColumns}`,
           )
           .bind(
             opaqueId("emp"),
@@ -549,24 +679,29 @@ export function createIdentityRepository(
             value.phoneNumber ?? null,
             value.email ?? null,
             timestamp(clock),
+            role,
+            value.managerId ?? null,
+            value.notifyTeamMessages ? 1 : 0,
           )
           .first<EmployeeRow>();
         if (!row) throw new Error("Employee insert returned no record");
         return employee(row);
       } catch (error) {
-        throw emailConflict(error);
+        throw hierarchyConflict(emailConflict(error));
       }
     },
 
-    /** Deactivating also signs the employee out of every browser. */
+    /** Deactivating also signs the employee out of every browser and detaches the reports of a manager. */
     async setEmployeeActive(
       employeeId: string,
       active: boolean,
     ): Promise<Employee | null> {
       const enabled = z.boolean().parse(active);
       const key = id.parse(employeeId);
-      const [, updated] = await db.batch<EmployeeRow>([
+      const [, , updated] = await db.batch<EmployeeRow>([
         db.prepare("DELETE FROM web_sessions WHERE employee_id = ? AND ? = 0").bind(key, enabled ? 1 : 0),
+        // A deactivated manager no longer has a team; their reports are detached, not moved.
+        db.prepare("UPDATE employees SET manager_id = NULL WHERE manager_id = ? AND ? = 0").bind(key, enabled ? 1 : 0),
         db
           .prepare(`UPDATE employees SET active = ? WHERE id = ? RETURNING ${employeeColumns}`)
           .bind(enabled ? 1 : 0, key),

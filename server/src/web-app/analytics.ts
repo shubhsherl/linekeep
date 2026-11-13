@@ -123,7 +123,7 @@ views.analytics = (function () {
   // ---- Filter state (kept in the hash query) ----
   function defaultState() {
     const range = presetRange('7');
-    return { preset: '7', from: range.from, to: range.to, callTypes: [] };
+    return { preset: '7', from: range.from, to: range.to, callTypes: [], employeeIds: [] };
   }
   function parseState(query) {
     const result = defaultState();
@@ -151,6 +151,8 @@ views.analytics = (function () {
     }
     const wanted = String(query.callTypes || '').split(',');
     result.callTypes = TYPES.filter((type) => wanted.includes(type));
+    const people = String(query.employeeIds || '').split(',');
+    result.employeeIds = scopeIds(SCOPE_ALL, session.employee).filter((id) => people.includes(id));
     return result;
   }
   function sameState(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
@@ -159,11 +161,17 @@ views.analytics = (function () {
     if (current.preset) params.set('preset', current.preset);
     else { params.set('from', current.from); params.set('to', current.to); }
     if (current.callTypes.length) params.set('callTypes', current.callTypes.join(','));
+    if (current.employeeIds.length) params.set('employeeIds', current.employeeIds.join(','));
     return params.toString().replaceAll('%2C', ',');
   }
   function apiQuery(current) {
     const params = new URLSearchParams({ from: current.from, to: current.to });
     if (current.callTypes.length) params.set('callTypes', current.callTypes.join(','));
+    if (isManager(session.employee)) {
+      const ids = analyticsEmployeeIds(session.scope, session.employee, current.employeeIds);
+      if (ids) params.set('employeeIds', ids.join(','));
+      params.set('groupBy', 'employee');
+    }
     return params.toString();
   }
   function writeHash() { setHash('analytics?' + stateQuery(state)); }
@@ -188,7 +196,9 @@ views.analytics = (function () {
       byType: [],
       byDay: [],
       cells: new Array(168).fill(0),
-      buckets: []
+      buckets: [],
+      byEmployee: readEmployeeRows(raw.byEmployee),
+      included: isManager(session.employee) ? readEmployeeRows(raw.employees).map((row) => row.name) : []
     };
     const typeRows = new Map();
     for (const item of raw.byType) if (item && TYPES.includes(item.type)) typeRows.set(item.type, item);
@@ -679,6 +689,7 @@ views.analytics = (function () {
     setTitle(data.range.from, data.range.to);
     ui.subtitle.textContent = 'Compared with ' + rangeText(data.range.previousFrom, data.range.previousTo) + ', the ' + data.range.days + ' ' + plural(data.range.days, 'day', 'days') + ' before. Days run midnight to midnight IST.';
     renderKpis(data);
+    renderEmployeeTable();
     const empty = data.totals.total === 0;
     ui.empty.hidden = !empty;
     ui.charts.hidden = empty;
@@ -730,7 +741,7 @@ views.analytics = (function () {
       ui.content.hidden = false;
       ui.content.classList.remove('an-is-loading');
       renderAnalytics(true);
-      ui.status.textContent = fmtCount(data.totals.total) + ' ' + plural(data.totals.total, 'call', 'calls') + ' · ' + rangeText(data.range.from, data.range.to) + ' · IST';
+      ui.status.textContent = fmtCount(data.totals.total) + ' ' + plural(data.totals.total, 'call', 'calls') + ' · ' + rangeText(data.range.from, data.range.to) + ' · IST' + (data.included.length ? ' · ' + data.included.join(', ') : '');
     } catch (error) {
       if (mine !== version || (error && error.name === 'AbortError') || (error && error.status === 401)) return;
       data = null;
@@ -776,6 +787,7 @@ views.analytics = (function () {
     ui.from.value = state.from;
     ui.to.value = state.to;
     renderTypeChoices(state.callTypes);
+    renderEmployeeChoices(state.employeeIds);
     updatePresetState();
     setTitle(state.from, state.to);
   }
@@ -796,14 +808,16 @@ views.analytics = (function () {
     else if (from > to) problem = 'The start date must be on or before the end date.';
     else if (daysBetween(from, to) > 366) problem = 'Choose a range of 366 days or fewer.';
     if (problem) return filterProblem(problem, focus);
-    state = { preset: range && range.preset ? range.preset : null, from, to, callTypes: TYPES.filter((type) => checkedTypes().includes(type)) };
+    state = { preset: range && range.preset ? range.preset : null, from, to, callTypes: TYPES.filter((type) => checkedTypes().includes(type)), employeeIds: ui.employeeChoices ? checkedEmployees() : [] };
     ui.typesMenu.open = false;
+    if (ui.employeesMenu) ui.employeesMenu.open = false;
     writeHash();
     syncControls();
     load();
   }
   function onDocumentClick(event) {
     if (ui.typesMenu.open && !ui.typesMenu.contains(event.target)) ui.typesMenu.open = false;
+    if (ui.employeesMenu && ui.employeesMenu.open && !ui.employeesMenu.contains(event.target)) ui.employeesMenu.open = false;
   }
 
   // ---- Build the DOM ----
@@ -837,6 +851,104 @@ views.analytics = (function () {
     card.append(ui.chart[name], ui.summary[name]);
     return card;
   }
+  // ---- Manager-only: pick employees inside the header scope, and the 'By employee' table ----
+  function checkedEmployees() { return Array.from(ui.employeeChoices.querySelectorAll('input:checked'), (input) => input.value); }
+  function updateEmployeesLabel() {
+    const picked = checkedEmployees();
+    const names = scopeMembers(session.employee).filter((member) => picked.includes(member.id)).map((member) => member.name);
+    ui.employeesLabel.textContent = !names.length ? 'Everyone in this view' : names.length === 1 ? names[0] : names.length + ' employees';
+  }
+  function renderEmployeeChoices(selected) {
+    if (!ui.employeeChoices) return;
+    const inScope = scopeIds(session.scope, session.employee);
+    const fragment = document.createDocumentFragment();
+    for (const member of scopeMembers(session.employee)) {
+      if (!inScope.includes(member.id)) continue;
+      const label = element('label', undefined, 'an-choice');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.value = member.id;
+      box.checked = selected.includes(member.id);
+      label.append(box, element('span', member.self ? member.name + ' (you)' : member.name));
+      fragment.append(label);
+    }
+    ui.employeeChoices.replaceChildren(fragment);
+    updateEmployeesLabel();
+  }
+  function buildEmployeeField() {
+    const field = element('div', undefined, 'an-multi-field');
+    const caption = element('span', 'Employees', 'an-field-label');
+    caption.id = 'an-emp-caption';
+    ui.employeesMenu = element('details', undefined, 'an-multi');
+    const summary = element('summary');
+    ui.employeesLabel = element('span', 'Everyone in this view');
+    ui.employeesLabel.id = 'an-emp-label';
+    summary.setAttribute('aria-labelledby', 'an-emp-caption an-emp-label');
+    summary.append(ui.employeesLabel);
+    const menu = element('div', undefined, 'an-multi-menu');
+    ui.employeeChoices = element('div', undefined, 'an-choice-list');
+    ui.employeeChoices.addEventListener('change', updateEmployeesLabel);
+    const actions = element('div', undefined, 'actions');
+    const clear = element('button', 'Everyone in this view', 'secondary');
+    clear.type = 'button';
+    clear.addEventListener('click', () => {
+      for (const box of ui.employeeChoices.querySelectorAll('input')) box.checked = false;
+      updateEmployeesLabel();
+    });
+    actions.append(clear);
+    menu.append(ui.employeeChoices, actions);
+    ui.employeesMenu.append(summary, menu);
+    ui.employeesMenu.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !ui.employeesMenu.open) return;
+      event.preventDefault();
+      ui.employeesMenu.open = false;
+      summary.focus();
+    });
+    field.append(caption, ui.employeesMenu);
+    return field;
+  }
+  const EMPLOYEE_COLUMNS = [['Employee', null], ['Calls', 'total'], ['Connected', 'connected'], ['Missed', 'missed'], ['Unique contacts', 'uniqueContacts'], ['Talk time', 'talkSeconds'], ['Avg connected', 'avgConnectedSeconds'], ['With recording', 'withRecording']];
+  function buildEmployeeTable() {
+    ui.employeesPanel = element('section', undefined, 'panel an-employees');
+    ui.employeesPanel.setAttribute('aria-labelledby', 'an-employees-heading');
+    ui.employeesPanel.hidden = true;
+    const head = element('div', undefined, 'an-chart-head');
+    const heading = element('h3', 'By employee');
+    heading.id = 'an-employees-heading';
+    head.append(heading, element('p', 'Calls of each person in this view, busiest first.', 'hint'));
+    const wrap = element('div', undefined, 'cl-table-wrap');
+    const table = element('table', undefined, 'cl-table');
+    table.append(element('caption', 'Call totals by employee', 'sr-only'));
+    const headRow = element('tr');
+    for (const column of EMPLOYEE_COLUMNS) {
+      const th = element('th', column[0]);
+      th.scope = 'col';
+      headRow.append(th);
+    }
+    const thead = element('thead');
+    thead.append(headRow);
+    ui.employeeRows = element('tbody');
+    table.append(thead, ui.employeeRows);
+    wrap.append(table);
+    ui.employeesPanel.append(head, wrap);
+    return ui.employeesPanel;
+  }
+  function renderEmployeeTable() {
+    if (!ui.employeesPanel) return;
+    const rows = data.byEmployee;
+    ui.employeesPanel.hidden = rows.length < 2 || data.totals.total === 0;
+    ui.employeeRows.replaceChildren(...rows.map((row) => {
+      const tr = element('tr', undefined, 'cl-row');
+      EMPLOYEE_COLUMNS.forEach((column, index) => {
+        const cell = element('td', undefined, index === 0 ? 'cl-caller' : 'cl-num');
+        cell.dataset.label = column[0];
+        cell.textContent = index === 0 ? row.name : column[1] === 'talkSeconds' || column[1] === 'avgConnectedSeconds' ? talkText(row[column[1]]) : fmtCount(row[column[1]]);
+        tr.append(cell);
+      });
+      return tr;
+    }));
+  }
+
   function buildHead() {
     const head = element('section', undefined, 'panel an-head');
     head.setAttribute('aria-label', 'Date range and call types');
@@ -912,7 +1024,9 @@ views.analytics = (function () {
     const apply = element('div', undefined, 'an-apply');
     apply.append(element('button', 'Apply'));
     apply.firstChild.type = 'submit';
-    grid.append(fromLabel, toLabel, field, apply);
+    grid.append(fromLabel, toLabel, field);
+    if (isManager(session.employee)) grid.append(buildEmployeeField());
+    grid.append(apply);
     ui.filterError = element('p', undefined, 'error-text');
     ui.filterError.setAttribute('role', 'alert');
     ui.filterError.hidden = true;
@@ -960,6 +1074,7 @@ views.analytics = (function () {
       chartCard('heat', 'When calls happen', 'Weekday and hour of day, IST', { wide: true })
     );
     ui.content.append(ui.kpis, ui.empty, ui.charts);
+    if (isManager(session.employee)) ui.content.append(buildEmployeeTable());
     ui.results.append(ui.status, ui.errorBox, ui.skeleton, ui.content);
   }
 
@@ -1076,8 +1191,42 @@ views.analytics = (function () {
     clearTimeout(resizeTimer);
     cancelLoad();
     if (ui.typesMenu) ui.typesMenu.open = false;
+    if (ui.employeesMenu) ui.employeesMenu.open = false;
     if (calls) calls.hide();
   }
+  // Signing out clears the page; the next sign-in (possibly another person, another role) must build the view afresh.
+  lifecycle.signedOut.push(() => {
+    cancelLoad();
+    if (calls) calls.hide();
+    clearTimeout(resizeTimer);
+    clearTimeout(animTimer);
+    if (observer) observer.disconnect();
+    observer = null;
+    document.removeEventListener('click', onDocumentClick);
+    for (const key of Object.keys(ui)) delete ui[key];
+    Object.assign(ui, { tabs: {}, panels: {}, chart: {}, summary: {}, legend: {}, presets: {} });
+    state = null;
+    data = null;
+    calls = null;
+    active = 'analytics';
+    loadedAt = 0;
+    needsLoad = false;
+    widthKey = '';
+    shown = false;
+    mounted = false;
+  });
+  // The header scope (or the team itself) changed: drop picks that left the scope and reload what is on screen.
+  lifecycle.scopeChanged.push(() => {
+    if (state) {
+      const inScope = scopeIds(session.scope, session.employee);
+      state.employeeIds = state.employeeIds.filter((id) => inScope.includes(id));
+    }
+    needsLoad = true;
+    if (calls) calls.scopeChanged(shown && active === 'calls');
+    if (!mounted || !state) return;
+    syncControls();
+    if (shown && active === 'analytics') load();
+  });
   return { mount, show, hide };
 })();
 `;

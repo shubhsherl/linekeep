@@ -62,11 +62,13 @@ private fun iconFor(type: String): Int = when (type) {
 
 /** The signed-in employee's own call history: filter by type, search by number, newest first, loaded page by page. */
 @Composable
-internal fun CallLogsTab(repository: AnalyticsRepository, scope: CoroutineScope) {
+internal fun CallLogsTab(repository: AnalyticsRepository, scope: CoroutineScope, profile: EmployeeProfile? = null) {
     var query by rememberSaveable { mutableStateOf("") }
     val state by repository.callLogs.state.collectAsStateWithLifecycle()
     val filter by repository.filter.collectAsStateWithLifecycle()
-    LaunchedEffect(query) {
+    val employeeFilter by repository.callLogsScope.collectAsStateWithLifecycle()
+    val manager = profile.asManager()
+    LaunchedEffect(query, scopeSignature(profile)) {
         if (query.isNotEmpty()) delay(CALL_SEARCH_DELAY_MS)
         scope.launch { repository.openCallLogs(query) }
     }
@@ -96,6 +98,7 @@ internal fun CallLogsTab(repository: AnalyticsRepository, scope: CoroutineScope)
                 )
             }
         }
+        ScopeFilterBar(manager, employeeFilter, { next -> scope.launch { repository.setCallLogsScope(next) } })
         when {
             state.items.isEmpty() && state.error != null -> CallLogsMessage {
                 Text(state.error.orEmpty(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
@@ -104,7 +107,7 @@ internal fun CallLogsTab(repository: AnalyticsRepository, scope: CoroutineScope)
             state.items.isEmpty() && !state.loaded -> CallLogsMessage { CircularProgressIndicator() }
             state.items.isEmpty() -> CallLogsMessage {
                 Text(
-                    if (query.isNotBlank() || filter != CallTypeFilter.ALL) "No calls match." else "No calls yet.",
+                    if (query.isNotBlank() || filter != CallTypeFilter.ALL || employeeFilter != ScopeFilter.All) "No calls match." else "No calls yet.",
                     style = MaterialTheme.typography.titleMedium,
                 )
                 SupportingText("Calls synced from this phone appear here.")
@@ -115,7 +118,7 @@ internal fun CallLogsTab(repository: AnalyticsRepository, scope: CoroutineScope)
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (state.refreshing) item("progress") { LinearProgress() }
-                items(state.items, key = { it.id }) { CallLogRow(it) }
+                items(state.items, key = { it.id }) { CallLogRow(it, manager?.id) }
                 state.error?.let { message ->
                     item("error") {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -153,13 +156,14 @@ private fun CallLogsMessage(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun CallLogRow(item: CallLogItem) {
+private fun CallLogRow(item: CallLogItem, managerId: String?) {
     val problem = item.callType == "missed" || item.callType == "rejected" || item.callType == "blocked"
     val tint = if (problem) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     val title = item.title()
     val time = callTimeFormat().format(Instant.ofEpochMilli(item.startedAt))
     val duration = if (item.durationSeconds > 0) formatDuration(item.durationSeconds) else "Not connected"
     val detail = buildList {
+        if (managerId != null) item.employee?.let { add(if (it.id == managerId) "You" else it.name.ifEmpty { "Employee" }) }
         item.remoteNumber?.takeIf { it != title }?.let { add(it) }
         add(callTypeLabel(item.callType))
         if (item.hasRecording) add("Recording")

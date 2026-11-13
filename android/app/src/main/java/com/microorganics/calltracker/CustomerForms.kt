@@ -39,6 +39,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -54,11 +55,36 @@ internal fun CustomerDetailsScreen(
     reload: () -> Unit,
     openBusinessWhatsApp: () -> Unit,
 ) {
-    var name by remember(customer?.id) { mutableStateOf(customer?.name.orEmpty()) }
-    var notes by remember(customer?.id) { mutableStateOf(customer?.notes.orEmpty()) }
+    var name by rememberSaveable(customer?.id) { mutableStateOf(customer?.name.orEmpty()) }
+    var notes by rememberSaveable(customer?.id) { mutableStateOf(customer?.notes.orEmpty()) }
     var saving by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf(false) }
+    val viewer = customers.profile.collectAsStateWithLifecycle().value.asManager()
+    var handingOver by rememberSaveable(customer?.id) { mutableStateOf(false) }
+    var handoverBusy by remember { mutableStateOf(false) }
+    var handoverError by remember { mutableStateOf<String?>(null) }
+    if (handingOver && customer != null && viewer != null) {
+        HandoverDialog(
+            customer, viewer, handoverBusy, handoverError,
+            onDismiss = { handingOver = false; handoverError = null },
+            onConfirm = { ids ->
+                scope.launch {
+                    handoverBusy = true
+                    handoverError = null
+                    try {
+                        val result = customers.handOver(customer, ids)
+                        result.fold(
+                            { handingOver = false; failed = false; message = "Customer handed over." },
+                            { handoverError = it.message ?: "Could not hand over." },
+                        )
+                    } finally {
+                        handoverBusy = false
+                    }
+                }
+            },
+        )
+    }
     Column(Modifier.fillMaxSize()) {
         ScreenTopBar("Customer details", onBack) { IconAction(R.drawable.ic_refresh, "Refresh details", reload) }
         Column(
@@ -117,7 +143,10 @@ internal fun CustomerDetailsScreen(
                 customer.state?.let { DetailField("State", it) }
                 customer.country?.let { DetailField("Country", it) }
                 if (customer.employees.isNotEmpty()) {
-                    DetailField("Handled by", customer.employees.joinToString(", ") { it.name.ifEmpty { "Employee" } })
+                    DetailField("Handled by", handlerNames(customer.employees, viewer?.id))
+                }
+                if (viewer != null) {
+                    OutlinedButton(onClick = { handoverError = null; handingOver = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Hand over") }
                 }
             }
         }
@@ -190,9 +219,11 @@ internal fun openPersonalWhatsApp(context: Context, e164: String): Boolean {
 internal fun AddCustomerScreen(
     customers: CustomersRepository,
     scope: CoroutineScope,
+    manager: EmployeeProfile?,
     onBack: () -> Unit,
     open: (id: String, name: String, phone: String, message: String) -> Unit,
 ) {
+    var assignTo by rememberSaveable { mutableStateOf<String?>(null) }
     var name by rememberSaveable { mutableStateOf("") }
     var phone by rememberSaveable { mutableStateOf("") }
     var notes by rememberSaveable { mutableStateOf("") }
@@ -230,8 +261,12 @@ internal fun AddCustomerScreen(
                 label = { Text("Notes (optional)") }, enabled = !saving, minLines = 3, maxLines = 8,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
             )
+            AssignToPicker(manager, assignTo, !saving) { assignTo = it }
             error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
-            SupportingText("The customer is added to your list only. The phone number can't be changed afterwards.")
+            SupportingText(
+                (if (manager.asManager()?.team?.isNotEmpty() == true) "The customer is added to the person you choose only." else "The customer is added to your list only.") +
+                    " The phone number can't be changed afterwards."
+            )
         }
         androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.background) {
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -241,9 +276,9 @@ internal fun AddCustomerScreen(
                         scope.launch {
                             saving = true
                             try {
-                                when (val outcome = customers.addCustomer(name, phone, notes)) {
+                                when (val outcome = customers.addCustomer(name, phone, notes, assignTo)) {
                                     is AddCustomerOutcome.Created -> open(outcome.customer.id, outcome.customer.name, outcome.customer.phone, "Customer added.")
-                                    is AddCustomerOutcome.Existing -> open(outcome.customerId, outcome.name, outcome.phone, "This number is already in your customers.")
+                                    is AddCustomerOutcome.Existing -> open(outcome.customerId, outcome.name, outcome.phone, existingCustomerMessage(outcome.handlers, manager.asManager()?.id))
                                     AddCustomerOutcome.OtherHandler -> error = OTHER_HANDLER_MESSAGE
                                     is AddCustomerOutcome.Failed -> error = outcome.message
                                 }

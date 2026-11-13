@@ -25,7 +25,11 @@ import { ApiError } from "../../http/errors";
 import { requireFeature } from "../../settings/gate";
 import { BULK_BODY_LIMIT, bulkCreateCustomers } from "./bulk";
 import { createWhatsAppReadRepository } from "../../data/whatsapp-reads";
+import { isManager, type EmployeeScope } from "../../data/scope";
 import { deviceAccess, type DeviceBindings, type EmployeeAccess } from "../identity";
+import {
+  employeeScope, narrowEmployees, notAManager, outOfScope, requireManagerScope, takeQueryValue, withScopeLabel,
+} from "../identity/scope";
 import type { AttachmentOwner } from "../../data/whatsapp-attachments";
 import { whatsappSendInput } from "../../data/whatsapp-send";
 import {
@@ -115,29 +119,40 @@ function changedFields(before: Customer, after: Customer): string[] {
 
 const targetOf = (customer: { id: string; name: string }) => ({ type: "customer" as const, id: customer.id, label: customer.name });
 
+/** What a request may see: the customers it can reach and how customer items are labelled for it. */
+interface ReadAccess {
+  scope?: CustomerScope;
+  decorate<T extends { employees: { id: string }[] }>(item: T): T;
+}
+
 /** The shared handlers only differ in who may see which customer. */
 function customerReadRoutes<B extends AppBindings>(
-  resolveScope: (context: Context<B>) => CustomerScope | undefined,
+  resolve: (context: Context<B>) => Promise<ReadAccess>,
   parseList: (url: string) => ListQuery,
+  /** The query of the message list; employee-facing routes remove their `employeeId` filter first. */
+  messageQuery: (url: string) => Record<string, string> = queryValues,
 ) {
   const routes = new Hono<B>();
   routes.get("/customers", async (context) => {
+    const access = await resolve(context);
     const page = await createCustomerRepository(context.env.DB).listCustomers(
-      withCursor(parseList(context.req.url)), resolveScope(context),
+      withCursor(parseList(context.req.url)), access.scope,
     );
-    return context.json({ ...pageBody(context.get("requestId"), page), items: page.items });
+    return context.json({ ...pageBody(context.get("requestId"), page), items: page.items.map((item) => access.decorate(item)) });
   });
   routes.get("/customers/:customerId", async (context) => {
+    const access = await resolve(context);
     const found = await createCustomerRepository(context.env.DB).getCustomer(
-      customerId.parse(context.req.param("customerId")), resolveScope(context),
+      customerId.parse(context.req.param("customerId")), access.scope,
     );
     if (!found) throw new HTTPException(404, { message: "Customer not found" });
-    return context.json({ requestId: context.get("requestId"), customer: found });
+    return context.json({ requestId: context.get("requestId"), customer: access.decorate(found) });
   });
   routes.get("/customers/:customerId/messages", async (context) => {
+    const access = await resolve(context);
     const page = await createCustomerRepository(context.env.DB).listMessages(
       customerId.parse(context.req.param("customerId")),
-      withCursor(pageQuery.parse(queryValues(context.req.url))), resolveScope(context),
+      withCursor(pageQuery.parse(messageQuery(context.req.url))), access.scope,
     );
     if (!page) throw new HTTPException(404, { message: "Customer not found" });
     return context.json({ ...pageBody(context.get("requestId"), page), items: page.items });
@@ -154,15 +169,15 @@ function errorBody(requestId: string, code: string, message: string) {
 }
 
 /**
- * Shared by the admin and device routes; `employeeId` is the device's employee, or null for an administrator.
- * `owner` decides which staged attachments the sender may use.
+ * Shared by the admin and device routes; `sender` is the device's employee and the customers they may write to, or
+ * null for an administrator. `owner` decides which staged attachments the sender may use.
  */
 async function sendMessage<B extends AppBindings>(
-  context: Context<B>, customerKey: string, employeeId: string | null, owner: AttachmentOwner, apiBase?: string,
+  context: Context<B>, customerKey: string, sender: { employeeId: string; scope: CustomerScope } | null, owner: AttachmentOwner, apiBase?: string,
 ) {
   const requestId = context.get("requestId");
-  const scope = employeeId === null ? undefined : { employeeId };
-  const found = await createCustomerRepository(context.env.DB).getCustomer(customerId.parse(customerKey), scope);
+  const employeeId = sender?.employeeId ?? null;
+  const found = await createCustomerRepository(context.env.DB).getCustomer(customerId.parse(customerKey), sender?.scope);
   if (!found) throw new HTTPException(404, { message: "Customer not found" });
   const input = whatsappSendInput.parse(await context.req.json());
   const who = requestActor(context);
@@ -216,7 +231,7 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
     routes.use(path, noStoreAdmin, authorize, requireFeature(path.startsWith("/whatsapp") ? "whatsapp" : "customers"));
   }
   routes.route("/", customerReadRoutes<AppBindings>(
-    () => undefined, (url) => adminListQuery.parse(queryValues(url)),
+    async () => ({ decorate: (item) => item }), (url) => adminListQuery.parse(queryValues(url)),
   ));
   routes.post("/customers/bulk", bodyLimit({
     maxSize: BULK_BODY_LIMIT, onError: () => { throw new ApiError(413, "request_too_large", "The request is too large; send fewer customers at a time"); },
@@ -330,9 +345,22 @@ export function createAdminCustomerRoutes(authorize: MiddlewareHandler<AppBindin
   return routes;
 }
 
+/** Resolves what the signed-in employee may read, narrowed by the optional `employeeId=<id|me|team>` filter (managers only). */
+async function employeeReadAccess(context: Context<DeviceBindings>, apiBase: string): Promise<ReadAccess & { employee: EmployeeScope }> {
+  const employee = await employeeScope(context);
+  const filter = new URL(context.req.url).searchParams.get("employeeId") || undefined;
+  return {
+    employee,
+    scope: { employeeIds: narrowEmployees(employee, filter), apiBase },
+    decorate: (item) => withScopeLabel(employee, item),
+  };
+}
+
+const withoutEmployeeFilter = (url: string) => takeQueryValue(queryValues(url), "employeeId").rest;
+
 /**
- * Mount at /v1/device (or /v1/web). The credential identifies the employee, who sees only assigned customers;
- * anything else is a 404, never a 403.
+ * Mount at /v1/device (or /v1/web). The credential identifies the employee, who sees only customers they handle (a
+ * manager: also customers their active reports handle); anything else is a 404, never a 403.
  */
 export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess) {
   const routes = new Hono<DeviceBindings>();
@@ -345,19 +373,32 @@ export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess
   }
   // Registered before the generic `/customers/:customerId` read so `lookup` is not taken for an id.
   routes.get("/customers/lookup", async (context) => {
+    const scope = await employeeScope(context);
     const result = await createCustomerRepository(context.env.DB).lookupByPhone(
-      { phone: "", ...queryValues(context.req.url) }, { employeeId: context.get("device").employeeId },
+      { phone: "", ...queryValues(context.req.url) }, { employeeIds: scope.employeeIds }, { handlers: isManager(scope) },
     );
     return context.json({ requestId: context.get("requestId"), ...result });
   });
   routes.post("/customers", async (context) => {
-    const { employeeId } = context.get("device");
+    const scope = await employeeScope(context);
+    const employeeId = scope.selfId;
     const repository = createCustomerRepository(context.env.DB);
-    const body = await context.req.json();
+    const raw: unknown = await context.req.json();
+    const fields = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : undefined;
+    const requested = fields?.employeeId;
+    if (fields) delete fields.employeeId;
+    const body = fields ?? raw;
+    // A manager may add a customer for a team member (or themselves, the default).
+    let assignee = employeeId;
+    if (requested !== undefined) {
+      if (!isManager(scope)) throw notAManager();
+      if (typeof requested !== "string" || !scope.employeeIds.includes(requested)) throw outOfScope();
+      assignee = requested;
+    }
     const { phone } = deviceCustomerCreateInput.parse(body);
-    // Another employee's customer is reported as a bare conflict; only the caller's own is identified.
+    // Another employee's customer is reported as a bare conflict; only one in the caller's scope is identified.
     const conflict = async () => {
-      const found = await repository.lookupByPhone({ phone: phone.phone }, { employeeId });
+      const found = await repository.lookupByPhone({ phone: phone.phone }, { employeeIds: scope.employeeIds });
       if (!found.exists) return null;
       const requestId = context.get("requestId");
       const existingId = found.customer?.id;
@@ -370,24 +411,26 @@ export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess
     const existing = await conflict();
     if (existing) return existing;
     try {
-      const created = await repository.createOwnCustomer(employeeId, body);
+      const created = await repository.createOwnCustomer(employeeId, body as z.input<typeof deviceCustomerCreateInput>, assignee);
+      if (assignee !== employeeId) await defer(context, notifyAssigned(context.env, created, [assignee]));
       await recordActivity(context, {
         ...requestActor(context), category: "customer", action: "created", target: targetOf(created),
         details: { source: access.apiBase === "/v1/web" ? "employee_web" : "employee_app", assigned: 1 },
       });
-      return context.json({ requestId: context.get("requestId"), customer: created }, 201);
+      return context.json({ requestId: context.get("requestId"), customer: withScopeLabel(scope, created) }, 201);
     } catch (error) {
       // Lost a race with another creator of the same number.
       if (error instanceof CustomerPhoneExistsError) {
         const raced = await conflict();
         if (raced) return raced;
       }
+      if (error instanceof CustomerAssignmentError) throw outOfScope();
       throw error;
     }
   });
   routes.patch("/customers/:customerId", async (context) => {
-    const { employeeId } = context.get("device");
-    const scope = { employeeId };
+    const employee = await employeeScope(context);
+    const scope = { employeeIds: employee.employeeIds };
     const repository = createCustomerRepository(context.env.DB);
     const id = customerId.parse(context.req.param("customerId"));
     const current = await repository.getCustomer(id, scope);
@@ -398,7 +441,7 @@ export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess
       throw new ApiError(400, "phone_not_editable", "The phone number of a customer cannot be changed");
     }
     if (changes.name === undefined && changes.notes === undefined) {
-      return context.json({ requestId: context.get("requestId"), customer: current });
+      return context.json({ requestId: context.get("requestId"), customer: withScopeLabel(employee, current) });
     }
     const updated = await repository.updateCustomer(id, changes, scope);
     if (!updated) throw new HTTPException(404, { message: "Customer not found" });
@@ -406,38 +449,77 @@ export function createDeviceCustomerRoutes(access: EmployeeAccess = deviceAccess
     if (fields.length > 0) {
       await recordActivity(context, { ...requestActor(context), category: "customer", action: "updated", target: targetOf(updated), details: { fields } });
     }
-    return context.json({ requestId: context.get("requestId"), customer: updated });
+    return context.json({ requestId: context.get("requestId"), customer: withScopeLabel(employee, updated) });
+  });
+  // A manager hands customers over inside their team: the handler set within the scope becomes `employeeIds`;
+  // handlers outside the scope are preserved.
+  routes.put("/customers/:customerId/handlers", bodyLimit({ maxSize: 16384 }), async (context) => {
+    const manager = await requireManagerScope(context);
+    const repository = createCustomerRepository(context.env.DB);
+    const id = customerId.parse(context.req.param("customerId"));
+    const current = await repository.getCustomer(id, { employeeIds: manager.employeeIds });
+    if (!current) throw new HTTPException(404, { message: "Customer not found" });
+    const wanted = [...new Set(customerEmployeesInput.parse(await context.req.json()).employeeIds)];
+    if (wanted.some((employeeId) => !manager.employeeIds.includes(employeeId))) throw outOfScope();
+    const outside = current.employees.filter((employee) => !manager.employeeIds.includes(employee.id));
+    if (wanted.length + outside.length === 0) {
+      throw new ApiError(409, "handler_required", "A customer needs at least one handler");
+    }
+    let updated: Customer | null;
+    try {
+      updated = await repository.setScopedHandlers(id, manager.employeeIds, wanted);
+    } catch (error) {
+      if (error instanceof CustomerAssignmentError) throw outOfScope();
+      throw error;
+    }
+    if (!updated) throw new HTTPException(404, { message: "Customer not found" });
+    const before = new Set(current.employees.map((employee) => employee.id));
+    const now = new Set(updated.employees.map((employee) => employee.id));
+    const added = updated.employees.filter((employee) => !before.has(employee.id));
+    const removed = current.employees.filter((employee) => !now.has(employee.id));
+    // Only newly assigned colleagues are told, never the manager who did it.
+    await defer(context, notifyAssigned(context.env, updated, added.map((employee) => employee.id).filter((employeeId) => employeeId !== manager.selfId)));
+    if (added.length > 0 || removed.length > 0) {
+      await recordActivity(context, {
+        ...requestActor(context), category: "customer", action: "customers_handed_over", target: targetOf(updated),
+        details: { added: added.length, removed: removed.length, to: added.map((employee) => employee.name), from: removed.map((employee) => employee.name) },
+      });
+    }
+    return context.json({ requestId: context.get("requestId"), customer: withScopeLabel(manager, updated) });
   });
   routes.route("/", customerReadRoutes<DeviceBindings>(
-    (context) => ({ employeeId: context.get("device").employeeId, apiBase: access.apiBase }),
-    (url) => deviceListQuery.parse(queryValues(url)),
+    (context) => employeeReadAccess(context, access.apiBase),
+    (url) => deviceListQuery.parse(withoutEmployeeFilter(url)),
+    withoutEmployeeFilter,
   ));
   routes.get("/whatsapp/chats", async (context) => {
+    const read = await employeeReadAccess(context, access.apiBase);
     const page = await createCustomerRepository(context.env.DB).listChats(
-      withCursor(deviceListQuery.parse(queryValues(context.req.url))),
-      { employeeId: context.get("device").employeeId },
-      { type: "employee", id: context.get("device").employeeId },
+      withCursor(deviceListQuery.parse(withoutEmployeeFilter(context.req.url))),
+      read.scope, { type: "employee", id: read.employee.selfId },
     );
-    return context.json({ ...pageBody(context.get("requestId"), page), items: page.items });
+    return context.json({ ...pageBody(context.get("requestId"), page), items: page.items.map((chat) => read.decorate(chat)) });
   });
   routes.get("/whatsapp/status", (context) =>
     context.json({ requestId: context.get("requestId"), canSend: whatsappCanSend(context.env) }));
   routes.get("/whatsapp/version", async (context) =>
     context.json({ requestId: context.get("requestId"), version: await createWhatsAppReadRepository(context.env.DB).feedVersion() }));
   routes.get("/whatsapp/unread", async (context) => {
-    const { employeeId } = context.get("device");
+    const read = await employeeReadAccess(context, access.apiBase);
     return context.json({ requestId: context.get("requestId"),
-      ...(await createWhatsAppReadRepository(context.env.DB).totals({ type: "employee", id: employeeId }, employeeId)) });
+      ...(await createWhatsAppReadRepository(context.env.DB).totals({ type: "employee", id: read.employee.selfId }, read.scope?.employeeIds)) });
   });
   routes.post("/whatsapp/chats/:customerId/read", async (context) => {
-    const { employeeId } = context.get("device");
+    const scope = await employeeScope(context);
     const id = customerId.parse(context.req.param("customerId"));
-    if (!(await createCustomerRepository(context.env.DB).getCustomer(id, { employeeId }))) throw new HTTPException(404, { message: "Customer not found" });
-    await createWhatsAppReadRepository(context.env.DB).markRead({ type: "employee", id: employeeId }, id);
+    if (!(await createCustomerRepository(context.env.DB).getCustomer(id, { employeeIds: scope.employeeIds }))) throw new HTTPException(404, { message: "Customer not found" });
+    await createWhatsAppReadRepository(context.env.DB).markRead({ type: "employee", id: scope.selfId }, id);
     return context.json({ requestId: context.get("requestId"), customerId: id, unreadCount: 0 });
   });
-  routes.post("/customers/:customerId/messages", (context) =>
-    sendMessage(context, context.req.param("customerId"), context.get("device").employeeId,
-      { type: "device", id: context.get("device").id }, access.apiBase));
+  routes.post("/customers/:customerId/messages", async (context) => {
+    const scope = await employeeScope(context);
+    return sendMessage(context, context.req.param("customerId"), { employeeId: scope.selfId, scope: { employeeIds: scope.employeeIds, apiBase: access.apiBase } },
+      { type: "device", id: context.get("device").id }, access.apiBase);
+  });
   return routes;
 }

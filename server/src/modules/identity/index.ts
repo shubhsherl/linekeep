@@ -8,18 +8,20 @@ import {
   createIdentityRepository,
   directoryCursor,
   EmployeeEmailExistsError,
+  EmployeeHierarchyError,
   EmployeePhoneExistsError,
   phoneNumbersInput,
   type Device,
   type IdentityRepository,
 } from "../../data/identity";
 import { id, nonnegativeInteger, utcTimestamp } from "../../data/values";
+import type { EmployeeScope } from "../../data/scope";
 import type { Env } from "../../env";
 import { ApiError } from "../../http/errors";
 import { enrollmentQr } from "./enrollment-qr";
 
 export type DeviceBindings = AppBindings & {
-  Variables: AppBindings["Variables"] & { device: Device };
+  Variables: AppBindings["Variables"] & { device: Device; employeeScope?: EmployeeScope };
 };
 
 const repositories = new WeakMap<
@@ -69,6 +71,7 @@ export interface EmployeeAccess {
 export const deviceAccess: EmployeeAccess = { authorize: requireDevice, apiBase: "/v1/device" };
 
 function employeeEmailExists(error: unknown): unknown {
+  if (error instanceof EmployeeHierarchyError) return new ApiError(error.status, error.code, error.message);
   if (error instanceof EmployeeEmailExistsError) {
     return new ApiError(409, "employee_email_exists", "Another employee already uses this email");
   }
@@ -102,11 +105,18 @@ const employeeInput = z.object({
   name: z.string().trim().min(1).max(200),
   phoneNumber: z.string().trim().min(1).max(64).optional(),
   email: employeeEmail,
+  role: z.enum(["employee", "manager"]).optional(),
+  managerId: id.nullable().optional(),
+  notifyTeamMessages: z.boolean().optional(),
 });
 const employeePatchInput = z.strictObject({
   name: z.string().trim().min(1).max(200).optional(),
   phoneNumber: z.string().trim().min(1).max(64).nullable().optional(),
   email: employeeEmail,
+  role: z.enum(["employee", "manager"]).optional(),
+  managerId: id.nullable().optional(),
+  notifyTeamMessages: z.boolean().optional(),
+  moveTeamTo: id.nullable().optional(),
 });
 
 const directoryQuery = z.strictObject({
@@ -261,6 +271,7 @@ export function createAdminIdentityRoutes(
     const input = employeePatchInput.parse(await context.req.json());
     const repository = identityRepository(context.env);
     const before = await repository.getEmployee(context.req.param("employeeId"));
+    const reportsBefore = before?.role === "manager" ? await repository.listReports(before.id) : [];
     const employee = await repository
       .updateEmployee(context.req.param("employeeId"), input)
       .catch((error: unknown) => { throw employeeEmailExists(error); });
@@ -271,12 +282,39 @@ export function createAdminIdentityRoutes(
       ...(before && before.name !== employee.name ? ["name"] : []),
       ...(before && before.phoneNumber !== employee.phoneNumber ? ["phone"] : []),
       ...(before && before.email !== employee.email ? ["email"] : []),
+      ...(before && before.notifyTeamMessages !== employee.notifyTeamMessages ? ["notifyTeamMessages"] : []),
     ];
+    const who = requestActor(context);
+    const target = { type: "employee" as const, id: employee.id, label: employee.name };
     if (fields.length > 0) {
+      await recordActivity(context, { ...who, category: "admin", action: "employee_updated", target, details: { fields } });
+    }
+    if (before && before.role !== employee.role) {
+      await recordActivity(context, { ...who, category: "admin", action: "role_changed", target, details: { from: before.role, to: employee.role } });
+    }
+    if (before && before.managerId !== employee.managerId) {
       await recordActivity(context, {
-        ...requestActor(context), category: "admin", action: "employee_updated",
-        target: { type: "employee", id: employee.id, label: employee.name }, details: { fields },
+        ...who, category: "admin", action: "manager_changed", target,
+        details: { from: before.managerName ?? "none", to: employee.managerName ?? "none" },
       });
+    }
+    if (before && before.role === "manager" && employee.role === "employee") {
+      // The reports of a demoted manager either moved to another manager or were detached.
+      const destination = input.moveTeamTo ? await repository.getEmployee(input.moveTeamTo) : null;
+      const moved = reportsBefore.filter((report) => report.active && destination);
+      for (const report of moved) {
+        await recordActivity(context, {
+          ...who, category: "admin", action: "manager_changed", target: { type: "employee", id: report.id, label: report.name },
+          details: { from: before.name, to: destination?.name ?? "none" },
+        });
+      }
+      const detached = reportsBefore.filter((report) => !destination || !report.active);
+      if (detached.length > 0) {
+        await recordActivity(context, {
+          ...who, category: "admin", action: "team_detached", target,
+          details: { count: detached.length, employees: detached.map((report) => report.name), reason: "demoted" },
+        });
+      }
     }
     return context.json({ requestId: context.get("requestId"), employee });
   });
@@ -403,10 +441,18 @@ export function createAdminIdentityRoutes(
     const employee = await identityRepository(context.env)
       .createEmployee(input)
       .catch((error: unknown) => { throw employeeEmailExists(error); });
-    await recordActivity(context, {
-      ...requestActor(context), category: "admin", action: "employee_created",
-      target: { type: "employee", id: employee.id, label: employee.name },
-    });
+    const who = requestActor(context);
+    const target = { type: "employee" as const, id: employee.id, label: employee.name };
+    await recordActivity(context, { ...who, category: "admin", action: "employee_created", target });
+    if (employee.role === "manager") {
+      await recordActivity(context, { ...who, category: "admin", action: "role_changed", target, details: { from: "employee", to: "manager" } });
+    }
+    if (employee.managerId) {
+      await recordActivity(context, {
+        ...who, category: "admin", action: "manager_changed", target,
+        details: { from: "none", to: employee.managerName ?? "none" },
+      });
+    }
     return context.json(
       {
         requestId: context.get("requestId"),

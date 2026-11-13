@@ -240,7 +240,8 @@ test("devices see only customers assigned to their current employee, including a
     await expectError(await aliceGet(`/v1/device/customers/${id}/messages`, "POST", { clientMessageId: crypto.randomUUID(), text: "hi" }), 404, "NOT_FOUND");
   }
   assert.deepEqual((await (await aliceGet("/v1/device/whatsapp/chats")).json()).items.map((c) => c.customer.id), [mine.id]);
-  await expectError(await aliceGet("/v1/device/customers?employeeId=x"), 400, "INVALID_REQUEST");
+  // The employee filter is for managers; an employee that sends it is told so.
+  await expectError(await aliceGet("/v1/device/customers?employeeId=x"), 400, "not_a_manager");
 
   // Access follows the device's current employee, not the one who enrolled it.
   await f.identity.reassignDevice(f.aliceDevice.device.id, f.bob.id);

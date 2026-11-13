@@ -192,6 +192,8 @@ internal fun CustomersTab(customers: CustomersRepository, scope: CoroutineScope,
     var adding by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val state by customers.customers.state.collectAsStateWithLifecycle()
+    val viewer = customers.profile.collectAsStateWithLifecycle().value.asManager()
+    val filter by customers.customersScope.collectAsStateWithLifecycle()
     // A list that failed because the phone was not enrolled yet reloads as soon as it is.
     val connected by customers.connection.collectAsStateWithLifecycle(initialValue = null)
     LaunchedEffect(connected) { if (connected != null) customers.onConnected() }
@@ -202,7 +204,7 @@ internal fun CustomersTab(customers: CustomersRepository, scope: CoroutineScope,
     }
     if (adding) {
         BackHandler { adding = false }
-        AddCustomerScreen(customers, scope, onBack = { adding = false }) { id, name, phone, message ->
+        AddCustomerScreen(customers, scope, viewer, onBack = { adding = false }) { id, name, phone, message ->
             // The form reports from the repository's IO scope; toasts and navigation need the main thread.
             scope.launch(Dispatchers.Main) {
                 adding = false
@@ -229,25 +231,34 @@ internal fun CustomersTab(customers: CustomersRepository, scope: CoroutineScope,
                 Icon(painterResource(R.drawable.ic_chat_add), contentDescription = "Add customer", modifier = Modifier.size(24.dp))
             }
         }
+        ScopeFilterBar(viewer, filter, { next -> scope.launch { customers.setCustomersScope(next) } }, Modifier.padding(top = 4.dp))
         Box(Modifier.weight(1f)) {
             PagedColumn(
                 state = state,
-                emptyText = if (state.query.isEmpty()) "No customers are assigned to you yet. Use + to add one." else "No customers match this search.",
+                emptyText = when {
+                    state.query.isNotEmpty() -> "No customers match this search."
+                    viewer != null -> "No customers here yet. Use + to add one."
+                    else -> "No customers are assigned to you yet. Use + to add one."
+                },
                 rowKey = { it.id },
                 refresh = { scope.launch { customers.customers.refresh() } },
                 loadMore = { scope.launch { customers.customers.loadMore() } },
             ) { customer ->
-                CustomerRow(customer) { detailsId = customer.id }
+                CustomerRow(customer, viewer?.id) { detailsId = customer.id }
             }
         }
     }
 }
 
 @Composable
-private fun CustomerRow(customer: Customer, onClick: () -> Unit) {
+private fun CustomerRow(customer: Customer, viewerId: String?, onClick: () -> Unit) {
     ListSurface(onClick) {
-        Text(customer.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(customer.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (viewerId != null && isTeamCustomer(customer.scope, customer.employees, viewerId)) TeamTag()
+        }
         Text(customer.phone, style = MaterialTheme.typography.bodyMedium)
+        if (viewerId != null && customer.employees.isNotEmpty()) SupportingText("Handled by " + handlerNames(customer.employees, viewerId))
         val place = listOfNotNull(customer.district, customer.state).joinToString(", ")
         if (place.isNotEmpty()) SupportingText(place)
         customer.source?.let { SupportingText("Source: $it") }
@@ -259,6 +270,8 @@ private fun CustomerRow(customer: Customer, onClick: () -> Unit) {
 internal fun ChatsTab(customers: CustomersRepository, scope: CoroutineScope, open: (id: String, name: String, phone: String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     val state by customers.chats.state.collectAsStateWithLifecycle()
+    val viewer = customers.profile.collectAsStateWithLifecycle().value.asManager()
+    val filter by customers.chatsScope.collectAsStateWithLifecycle()
     val connected by customers.connection.collectAsStateWithLifecycle(initialValue = null)
     LaunchedEffect(connected) { if (connected != null) customers.onConnected() }
     LaunchedEffect(query) {
@@ -267,6 +280,7 @@ internal fun ChatsTab(customers: CustomersRepository, scope: CoroutineScope, ope
     }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) { SearchField(query, "Search chats") { query = it } }
+        ScopeFilterBar(viewer, filter, { next -> scope.launch { customers.setChatsScope(next) } }, Modifier.padding(top = 4.dp))
         Box(Modifier.weight(1f)) {
             PagedColumn(
                 state = state,
@@ -275,7 +289,7 @@ internal fun ChatsTab(customers: CustomersRepository, scope: CoroutineScope, ope
                 refresh = { scope.launch { customers.chats.refresh() } },
                 loadMore = { scope.launch { customers.chats.loadMore() } },
             ) { chat ->
-                ChatRow(chat) { open(chat.customerId, chat.customerName, chat.customerPhone) }
+                ChatRow(chat, viewer?.id) { open(chat.customerId, chat.customerName, chat.customerPhone) }
             }
         }
     }
@@ -297,11 +311,12 @@ internal fun UnreadBadge(count: Int, description: String, modifier: Modifier = M
 }
 
 @Composable
-private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
+private fun ChatRow(chat: ChatSummary, viewerId: String?, onClick: () -> Unit) {
     val unread = chat.unreadCount > 0
     ListSurface(onClick) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(chat.customerName, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = if (unread) FontWeight.Bold else FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (viewerId != null && isTeamCustomer(null, chat.employees, viewerId)) TeamTag()
             formatTime(listTimeFormat, chat.lastSentAt)?.let { SupportingText(it) }
         }
         val preview = chat.lastText.ifBlank { typeLabel(chat.lastMessageType).orEmpty() }
@@ -315,5 +330,6 @@ private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
             if (unread) UnreadBadge(chat.unreadCount, "${chat.unreadCount} unread messages")
         }
         SupportingText(chat.customerPhone)
+        if (viewerId != null && chat.employees.isNotEmpty()) SupportingText("Handled by " + handlerNames(chat.employees, viewerId))
     }
 }

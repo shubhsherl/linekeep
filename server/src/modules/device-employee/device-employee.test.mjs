@@ -325,9 +325,13 @@ test("profile returns only the caller's own name and configured contact number",
   const alice = await f.call("alice", "/v1/device/profile");
   assert.equal(alice.status, 200);
   const body = await alice.json();
-  assert.deepEqual(body.employee, { id: f.people.alice.employee.id, name: "Alice Synthetic", phoneNumber: "+919800000077" });
+  assert.deepEqual(body.employee, {
+    id: f.people.alice.employee.id, name: "Alice Synthetic", phoneNumber: "+919800000077", role: "employee", managerId: null, team: [],
+  });
   const bob = await (await f.call("bob", "/v1/device/profile")).json();
-  assert.deepEqual(bob.employee, { id: f.people.bob.employee.id, name: "Bob Synthetic", phoneNumber: null });
+  assert.deepEqual(bob.employee, {
+    id: f.people.bob.employee.id, name: "Bob Synthetic", phoneNumber: null, role: "employee", managerId: null, team: [],
+  });
   assert.ok(!JSON.stringify(bob).includes("Alice"));
   const anonymous = await createApp().request("http://127.0.0.1/v1/device/profile", {},
     { DB: f.DB, TOKEN_HASH_SECRET: tokenSecret, ENVIRONMENT: "development" });

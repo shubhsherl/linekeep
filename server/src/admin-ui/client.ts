@@ -109,6 +109,7 @@ export const clientJavaScript = String.raw`(() => {
   let directoryVersion = 0;
   let directoryController;
   let directoryReady = false;
+  let createManagerFields = null;
   function rememberEmployee(employee) {
     if (!employee || typeof employee.id !== 'string' || typeof employee.name !== 'string') return;
     employees.set(employee.id, employee);
@@ -136,6 +137,7 @@ export const clientJavaScript = String.raw`(() => {
       }
       select.value = selected;
     }
+    if (createManagerFields) createManagerFields.refresh();
     renderAnalyticsEmployeeChoices();
     updateActivityEmployees();
     updateInvitationAvailability();
@@ -640,6 +642,79 @@ export const clientJavaScript = String.raw`(() => {
     updateInvitationAvailability();
     invitationList.load(true);
   }
+  const managerErrors = {
+    invalid_manager: 'Choose an active manager. Nobody can report to themselves or to someone who is not a manager.',
+    manager_cannot_report: 'A manager cannot report to another manager. Set the role to Employee first, or choose No manager.',
+    team_full: 'That manager already has 50 reports. Choose another manager.',
+    manager_has_team: 'This manager still has active reports. Choose where to move them first.'
+  };
+  function employeeErrorMessage(failure) {
+    const code = failure && typeof failure.code === 'string' ? failure.code.toLowerCase() : '';
+    return Object.prototype.hasOwnProperty.call(managerErrors, code) ? managerErrors[code] : errorMessage(failure);
+  }
+  function activeManagers(excludeId) {
+    return Array.from(employees.values()).filter((candidate) => candidate.active && candidate.role === 'manager' && candidate.id !== excludeId);
+  }
+  function activeReports(managerId) {
+    return Array.from(employees.values()).filter((candidate) => candidate.active && candidate.managerId === managerId);
+  }
+  function fillManagerSelect(select, selected, excludeId, fallbackName) {
+    const none = element('option', 'No manager');
+    none.value = '';
+    const choices = [none];
+    let found = false;
+    for (const candidate of activeManagers(excludeId)) {
+      const option = element('option', candidate.name);
+      option.value = candidate.id;
+      choices.push(option);
+      if (candidate.id === selected) found = true;
+    }
+    if (selected && !found) {
+      const option = element('option', (fallbackName || selected) + ' (unavailable)');
+      option.value = selected;
+      choices.push(option);
+    }
+    select.replaceChildren(...choices);
+    select.value = selected || '';
+  }
+  // Role, Reports to and the notify checkbox shared by the create and edit forms. employee is null when creating.
+  function managerFields(employee) {
+    const roleLabel = element('label', 'Role');
+    const role = element('select');
+    role.name = 'role';
+    for (const [value, text] of [['employee', 'Employee'], ['manager', 'Manager']]) {
+      const option = element('option', text);
+      option.value = value;
+      role.append(option);
+    }
+    role.value = employee && employee.role === 'manager' ? 'manager' : 'employee';
+    roleLabel.append(role);
+    const managerLabel = element('label', 'Reports to');
+    const manager = element('select');
+    manager.name = 'managerId';
+    managerLabel.append(manager);
+    const notifyLabel = element('label', undefined, 'checkbox-filter');
+    const notify = element('input');
+    notify.type = 'checkbox';
+    notify.name = 'notifyTeamMessages';
+    notify.checked = Boolean(employee && employee.notifyTeamMessages);
+    notifyLabel.append(notify, element('span', 'Notify manager of team messages'));
+    const notifyHint = element('p', 'Send this manager a push when a customer handled by their team writes.', 'hint');
+    let wanted = employee && employee.managerId ? employee.managerId : '';
+    function refresh() { fillManagerSelect(manager, wanted, employee ? employee.id : '', employee ? employee.managerName : ''); }
+    function sync() {
+      const isManager = role.value === 'manager';
+      managerLabel.hidden = isManager;
+      manager.disabled = isManager;
+      notifyLabel.hidden = notifyHint.hidden = !isManager;
+    }
+    function reset() { wanted = ''; role.value = 'employee'; notify.checked = false; refresh(); sync(); }
+    manager.addEventListener('change', () => { wanted = manager.value; });
+    role.addEventListener('change', sync);
+    refresh();
+    sync();
+    return { role, manager, notify, refresh, sync, reset, nodes: [roleLabel, managerLabel, notifyLabel, notifyHint] };
+  }
   function renderEmployee(employee) {
     const card = element('article', undefined, 'management-card');
     card.dataset.employeeId = employee.id;
@@ -649,6 +724,7 @@ export const clientJavaScript = String.raw`(() => {
       ...(employee.phoneNumber ? [element('p', 'Phone number: ' + employee.phoneNumber)] : []),
       element('p', 'Web sign-in email: ' + (employee.email || 'none') + ' · Web sessions: ' + (Number(employee.webSessions) || 0)),
       element('p', (employee.active ? 'Active' : 'Inactive') + ' · Created ' + dateText(employee.createdAt)));
+    details.append(element('p', 'Role: ' + (employee.role === 'manager' ? 'Manager · ' + (employee.notifyTeamMessages ? 'notified when a team customer writes' : 'not notified of team messages') : 'Employee' + (employee.managerName ? ' · reports to ' + employee.managerName : ''))));
     if (employee.lastActiveAt !== undefined) details.append(element('p', 'Last active: ' + (employee.lastActiveAt ? istFull(employee.lastActiveAt) : 'never')));
     const actions = element('div', undefined, 'actions');
     const edit = button('Edit details', () => {
@@ -681,6 +757,40 @@ export const clientJavaScript = String.raw`(() => {
       emailInput.autocomplete = 'off';
       emailInput.placeholder = 'name@example.com';
       emailLabel.append(emailInput);
+      const team = managerFields(employee);
+      const demotePanel = element('div', undefined, 'demote-panel');
+      demotePanel.hidden = true;
+      demotePanel.setAttribute('role', 'group');
+      demotePanel.setAttribute('aria-label', 'Move the team of ' + employee.name + ' before demoting');
+      const demoteText = element('p');
+      const demoteLabel = element('label', 'Move the team to');
+      const demoteTarget = element('select');
+      demoteTarget.name = 'moveTeamTo';
+      demoteLabel.append(demoteTarget);
+      const demoteActions = element('div', undefined, 'actions');
+      const demoteConfirm = element('button', 'Demote and move team');
+      demoteConfirm.type = 'button';
+      demoteConfirm.addEventListener('click', () => { if (!fields.disabled) saveEmployee(demoteTarget.value || null); });
+      const demoteCancel = button('Keep as manager', () => { team.role.value = 'manager'; team.sync(); demotePanel.hidden = true; team.role.focus(); });
+      demoteActions.append(demoteConfirm, demoteCancel);
+      demotePanel.append(demoteText, demoteLabel, demoteActions);
+      function openDemotePanel() {
+        const count = activeReports(employee.id).length;
+        demoteText.textContent = count ? 'This manager has ' + count + ' active ' + plural(count, 'report', 'reports') + '.' : 'This manager still has active reports.';
+        const nobody = element('option', 'Nobody (clear)');
+        nobody.value = '';
+        const choices = [nobody];
+        for (const candidate of activeManagers(employee.id)) {
+          const option = element('option', candidate.name);
+          option.value = candidate.id;
+          choices.push(option);
+        }
+        demoteTarget.replaceChildren(...choices);
+        demoteTarget.value = '';
+        demotePanel.hidden = false;
+        demoteTarget.focus();
+      }
+      team.role.addEventListener('change', () => { if (employee.role === 'manager' && team.role.value === 'employee' && activeReports(employee.id).length) openDemotePanel(); else demotePanel.hidden = true; });
       const status = element('p');
       status.setAttribute('role', 'status');
       const error = element('p', '', 'error-text');
@@ -690,21 +800,25 @@ export const clientJavaScript = String.raw`(() => {
       save.type = 'submit';
       const cancel = button('Cancel', () => { form.remove(); actions.hidden = false; edit.focus(); });
       controls.append(save, cancel);
-      fields.append(label, element('p', 'Correcting a name updates this same employee on historical recordings. If a phone is changing hands, cancel and reassign the device to another employee instead.', 'hint'), phoneLabel, element('p', 'Used for WhatsApp sign-in on the web app, and to fill WhatsApp template messages (for example, who the customer should call). Another active employee cannot have the same number.', 'hint'), emailLabel, element('p', 'The address this employee signs in with on the web app. Changing or clearing it signs the employee out of the web app everywhere.', 'hint'), controls);
+      fields.append(label, element('p', 'Correcting a name updates this same employee on historical recordings. If a phone is changing hands, cancel and reassign the device to another employee instead.', 'hint'), phoneLabel, element('p', 'Used for WhatsApp sign-in on the web app, and to fill WhatsApp template messages (for example, who the customer should call). Another active employee cannot have the same number.', 'hint'), emailLabel, element('p', 'The address this employee signs in with on the web app. Changing or clearing it signs the employee out of the web app everywhere.', 'hint'), ...team.nodes, demotePanel, controls);
       form.append(fields, status, error);
       card.append(form);
       input.focus();
       input.select();
-      form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        if (fields.disabled) return;
+      async function saveEmployee(moveTeamTo) {
         const name = input.value.trim();
-        if (!name || name.length > 200) { error.textContent = 'Enter a name between 1 and 200 characters.'; input.focus(); return; }
         fields.disabled = true;
         status.textContent = 'Saving details…';
         error.textContent = '';
+        const body = { name, phoneNumber: phoneInput.value.trim() || null, email: emailInput.value.trim() || null };
+        const nextRole = team.role.value;
+        if ((nextRole === 'manager') !== (employee.role === 'manager')) body.role = nextRole;
+        if (nextRole === 'employee') {
+          if (team.manager.value !== (employee.managerId || '')) body.managerId = team.manager.value || null;
+        } else if (team.notify.checked !== Boolean(employee.notifyTeamMessages)) body.notifyTeamMessages = team.notify.checked;
+        if (moveTeamTo !== undefined && body.role === 'employee') body.moveTeamTo = moveTeamTo;
         try {
-          const data = await api('/employees/' + encodeURIComponent(employee.id), { method: 'PATCH', body: JSON.stringify({ name, phoneNumber: phoneInput.value.trim() || null, email: emailInput.value.trim() || null }) });
+          const data = await api('/employees/' + encodeURIComponent(employee.id), { method: 'PATCH', body: JSON.stringify(body) });
           const updated = data.employee.lastActiveAt === undefined ? { ...data.employee, lastActiveAt: employee.lastActiveAt } : data.employee;
           rememberEmployee(updated);
           updateEmployees();
@@ -714,8 +828,21 @@ export const clientJavaScript = String.raw`(() => {
           message('employee-status', 'Saved details for ' + data.employee.name + '.');
           deviceList.load();
           if (byId('invitation-employee').value === employee.id && invitationExpiresAt) clearInvitation('The name changed. The displayed code was cleared; it remains usable until redeemed, revoked or expired.');
-        } catch (failure) { error.textContent = errorMessage(failure); status.textContent = ''; }
+          if (['role', 'managerId', 'moveTeamTo', 'notifyTeamMessages'].some((key) => key in body)) refreshEmployeeViews(employee.id);
+        } catch (failure) {
+          status.textContent = '';
+          if (failure && typeof failure.code === 'string' && failure.code.toLowerCase() === 'manager_has_team') { team.role.value = 'employee'; team.sync(); openDemotePanel(); error.textContent = employeeErrorMessage(failure); }
+          else error.textContent = employeeErrorMessage(failure);
+        }
         finally { fields.disabled = false; }
+      }
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        if (fields.disabled) return;
+        const name = input.value.trim();
+        if (!name || name.length > 200) { error.textContent = 'Enter a name between 1 and 200 characters.'; input.focus(); return; }
+        if (employee.role === 'manager' && team.role.value === 'employee' && activeReports(employee.id).length) { error.textContent = ''; openDemotePanel(); return; }
+        saveEmployee(undefined);
       });
     });
     edit.setAttribute('aria-label', 'Edit details for ' + employee.name);
@@ -761,6 +888,23 @@ export const clientJavaScript = String.raw`(() => {
       if (employee.lastActiveAt) lastActive.title = istFull(employee.lastActiveAt);
       identity.append(lastActive);
     }
+    const roleChips = element('p', undefined, 'actions');
+    const isManager = employee.role === 'manager';
+    if (isManager) roleChips.append(element('span', 'Manager', 'badge complete'));
+    if (!isManager && employee.managerId) {
+      const boss = employee.managerName || (employees.get(employee.managerId) || {}).name || 'a manager';
+      roleChips.append(element('span', 'Reports to ' + boss, 'badge'));
+    }
+    if (roleChips.childElementCount) identity.append(roleChips);
+    if (isManager) {
+      const reports = activeReports(employee.id);
+      const size = Number.isInteger(employee.teamSize) ? employee.teamSize : reports.length;
+      const teamDetails = element('details', undefined, 'row-details team-details');
+      teamDetails.append(element('summary', 'Team: ' + size));
+      if (reports.length) teamDetails.append(element('p', reports.map((report) => report.name).join(', ')));
+      else teamDetails.append(element('p', size ? 'The team list is still loading. Refresh the directory.' : 'No active reports yet. Set “Reports to” on an employee to add them.'));
+      identity.append(teamDetails);
+    }
     if (warnings.length) {
       const chips = element('p', undefined, 'actions');
       for (const text of warnings) chips.append(element('span', text, 'badge pending'));
@@ -770,6 +914,15 @@ export const clientJavaScript = String.raw`(() => {
     top.append(identity, actions);
     card.append(top, details);
     return card;
+  }
+  async function refreshEmployeeViews(focusId) {
+    await loadDirectory();
+    await employeeList.load();
+    const list = byId('employees-list');
+    if (list.contains(document.activeElement)) return;
+    for (const card of list.querySelectorAll('[data-employee-id]')) {
+      if (card.dataset.employeeId === focusId) { const first = card.querySelector('button'); if (first) first.focus(); }
+    }
   }
   function renderDevice(device) {
     const card = element('article', undefined, 'management-card');
@@ -849,6 +1002,9 @@ export const clientJavaScript = String.raw`(() => {
   byId('devices-employee').addEventListener('change', () => deviceList.load(true));
   byId('invitation-employee').addEventListener('change', () => selectInvitationEmployee(byId('invitation-employee').value));
   byId('employees-refresh').addEventListener('click', loadDirectory);
+  const createTeam = managerFields(null);
+  createManagerFields = createTeam;
+  byId('employee-form').querySelector('button[type=submit]').before(...createTeam.nodes);
   byId('employee-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -863,16 +1019,23 @@ export const clientJavaScript = String.raw`(() => {
     fields.disabled = true;
     message('employee-status', 'Creating employee…');
     try {
-      const data = await api('/employees', { method: 'POST', body: JSON.stringify({ name, ...(phoneNumber ? { phoneNumber } : {}), ...(email ? { email } : {}) }) });
+      const body = { name, ...(phoneNumber ? { phoneNumber } : {}), ...(email ? { email } : {}) };
+      if (createTeam.role.value === 'manager') {
+        body.role = 'manager';
+        if (createTeam.notify.checked) body.notifyTeamMessages = true;
+      } else if (createTeam.manager.value) body.managerId = createTeam.manager.value;
+      const data = await api('/employees', { method: 'POST', body: JSON.stringify(body) });
       if (!data || !data.employee || typeof data.employee.id !== 'string' || typeof data.employee.name !== 'string') throw new Error('The employee response could not be read. Refresh the directory before creating a duplicate.');
       rememberEmployee(data.employee);
       updateEmployees();
       selectInvitationEmployee(data.employee.id);
       form.reset();
+      createTeam.reset();
+      if (body.role || body.managerId) await loadDirectory();
       message('employee-status', 'Created ' + data.employee.name + '. Employee ID: ' + data.employee.id + '. Selected for a new device invitation.');
       employeeList.load(true);
       byId('invitation-employee').focus();
-    } catch (error) { message('employee-status', ''); message('employee-error', errorMessage(error)); }
+    } catch (error) { message('employee-status', ''); message('employee-error', employeeErrorMessage(error)); }
     finally { fields.disabled = false; }
   });
 
@@ -7216,6 +7379,14 @@ export const clientJavaScript = String.raw`(() => {
       case 'customer/assigned': return ['assigned ', target(), ' to ' + (names.length ? names.join(', ') : 'an employee')];
       case 'customer/unassigned': return ['unassigned ', target(), ' from ' + (names.length ? names.join(', ') : 'an employee')];
       case 'customer/archived': return ['archived customer ', target()];
+      case 'customer/customers_handed_over': {
+        const added = actNames(d.to);
+        const removed = actNames(d.from);
+        const parts = [];
+        if (added.length || actNum(d.added)) parts.push('added ' + (added.length ? added.join(', ') : actUnit(actNum(d.added), 'employee', 'employees')));
+        if (removed.length || actNum(d.removed)) parts.push('removed ' + (removed.length ? removed.join(', ') : actUnit(actNum(d.removed), 'employee', 'employees')));
+        return ['handed over ', target(), parts.length ? ' (' + parts.join('; ') + ')' : ''];
+      }
       case 'whatsapp/message_sent': return ['sent ' + actSendKind(d) + ' to ', target()];
       case 'whatsapp/message_failed': return ['tried to send ' + actSendKind(d) + ' to ', target(), ' but WhatsApp rejected it'];
       case 'whatsapp/attachment_uploaded': {
@@ -7231,6 +7402,19 @@ export const clientJavaScript = String.raw`(() => {
       case 'call/recording_deleted': return ['deleted a call recording'].concat(withCustomer);
       case 'admin/employee_created': return ['added employee ', target()];
       case 'admin/employee_updated': return ['edited employee ', target(), fieldNote];
+      case 'admin/role_changed': return actText(d.to) === 'manager' ? ['made ', target(), ' a manager'] : actText(d.to) === 'employee' ? ['made ', target(), ' an employee instead of a manager'] : ['changed the role of ', target()];
+      case 'admin/manager_changed': {
+        const from = actText(d.from);
+        const to = actText(d.to);
+        if (from && to) return ['moved ', target(), ' from the team of ' + from + ' to the team of ' + to];
+        if (to) return ['made ', target(), ' report to ' + to];
+        if (from) return ['removed ', target(), ' from the team of ' + from];
+        return ['changed the manager of ', target()];
+      }
+      case 'admin/team_detached': {
+        const why = actText(d.reason) ? ' (' + actHuman(d.reason).toLowerCase() + ')' : '';
+        return ['removed ' + actUnit(actNum(d.count), 'employee', 'employees') + (names.length ? ' (' + names.join(', ') + ')' : '') + ' from the team of ', target(), why];
+      }
       case 'admin/settings_saved': {
         const section = actLookup(ACT_SECTIONS, d.section) || (actText(d.section) ? actHuman(d.section).toLowerCase() : '');
         const keys = actNames(d.keys);

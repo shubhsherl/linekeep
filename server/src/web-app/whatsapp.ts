@@ -189,7 +189,9 @@ function waPreview(chat) {
 // ---- Handler profile and quick replies (shared by the composer and the template picker) --------------------------------
 const waShared = { profile: null, quick: null, quickAt: 0, templates: null, templatesAt: 0, canSend: null };
 lifecycle.signedOut.push(() => { waShared.profile = null; waShared.quick = null; waShared.quickAt = 0; waShared.templates = null; waShared.templatesAt = 0; waShared.canSend = null; });
-async function waHandler() {
+// For a manager the placeholders name the customer's handler on the team (the manager when they handle it themselves),
+// matching the person the customer will call back. Everyone else is always their own handler.
+async function waHandler(customer) {
   if (!waShared.profile) {
     try {
       const data = await api('/profile');
@@ -199,7 +201,7 @@ async function waHandler() {
       waShared.profile = { name: String(session.employee.name || '').trim(), phone: String(session.employee.phoneNumber || '').trim() };
     }
   }
-  return waShared.profile;
+  return pickCustomerHandler(session.employee, waShared.profile, customer);
 }
 async function waQuickMessages(force) {
   if (!force && waShared.quick && Date.now() - waShared.quickAt < 60000) return waShared.quick;
@@ -331,7 +333,7 @@ function waOpenTemplatePicker(context, opener) {
       listStatus.hidden = false;
       listStatus.textContent = 'Loading templates…';
       try {
-        const [templates, handler] = await Promise.all([waTemplates(force), waHandler()]);
+        const [templates, handler] = await Promise.all([waTemplates(force), waHandler(context.customer)]);
         state.templates = templates;
         state.handler = handler;
         listStatus.hidden = true;
@@ -546,6 +548,12 @@ views.whatsapp = (() => {
       bottom.append(badge);
     }
     main.append(top, bottom);
+    if (isManager(session.employee)) {
+      const owners = element('span', undefined, 'wa-chat-handlers');
+      owners.append(element('span', handlerNames(chat.employees) || 'No handler', 'wa-chat-owner-names'));
+      if (chat.scope === 'team') owners.append(element('span', 'Team', 'badge badge-team'));
+      main.append(owners);
+    }
     link.append(main);
     item.append(link);
     return item;
@@ -571,7 +579,7 @@ views.whatsapp = (() => {
     const controller = new AbortController();
     chats.controller = controller;
     if (!silent) { chats.loading = true; chats.error = ''; ui.chatError.hidden = true; ui.chatRetry.hidden = true; ui.chatStatus.textContent = 'Loading chats…'; }
-    const params = new URLSearchParams({ limit: '30' });
+    const params = applyScope(new URLSearchParams({ limit: '30' }), session.scope, session.employee);
     if (chats.query) params.set('q', chats.query);
     if (more && chats.nextCursor) params.set('cursor', chats.nextCursor);
     try {
@@ -665,6 +673,10 @@ views.whatsapp = (() => {
     const customer = conv.customer;
     ui.headName.textContent = customer ? customer.name : conv.title || 'Chat';
     ui.headPhone.textContent = customer ? customer.phone : '';
+    const manager = isManager(session.employee) && Boolean(customer);
+    ui.headHandlers.hidden = !manager;
+    ui.handlersBtn.hidden = !manager;
+    if (manager) ui.headHandlers.textContent = 'Handled by ' + (handlerNames(customer.employees) || 'nobody') + (customerScopeTag(customer, session.employee) ? ' · Team' : '');
     clearNode(ui.headAvatar);
     if (customer) ui.headAvatar.append(avatarNode(customer.name, customer.id));
     ui.dial.hidden = !customer;
@@ -898,7 +910,7 @@ views.whatsapp = (() => {
     }
   }
   async function useQuick(item) {
-    const handler = await waHandler();
+    const handler = await waHandler(conv.customer);
     const filled = fillQuickPlaceholders(item.text, { name: conv.customer ? conv.customer.name : '', handler_name: handler.name, handler_phone: handler.phone });
     const current = ui.input.value;
     ui.input.value = current && !current.endsWith('\n') ? current + '\n' + filled.text : current + filled.text;
@@ -911,7 +923,7 @@ views.whatsapp = (() => {
   async function openTemplates(opener) {
     if (!conv || !conv.customer) return;
     const target = conv;
-    const message = await waOpenTemplatePicker({ customerId: target.id, customerName: target.customer.name }, opener);
+    const message = await waOpenTemplatePicker({ customerId: target.id, customerName: target.customer.name, customer: target.customer }, opener);
     if (!message || conv !== target) return;
     target.messages = mergeMessages(target.messages, [message]);
     renderMessages(true);
@@ -1002,14 +1014,25 @@ views.whatsapp = (() => {
     const headName = element('h2', undefined, 'wa-head-name');
     headName.tabIndex = -1;
     const headPhone = element('p', undefined, 'wa-head-phone');
-    headText.append(headName, headPhone);
+    const headHandlers = element('p', undefined, 'wa-head-phone wa-head-handlers');
+    headHandlers.hidden = true;
+    headText.append(headName, headPhone, headHandlers);
     const dial = element('a', undefined, 'icon-btn');
     dial.append(icon('phone'));
     dial.setAttribute('aria-label', 'Dial');
     dial.title = 'Dial';
     const details = iconButton('personAdd', 'Customer details');
     details.addEventListener('click', () => { if (conv && conv.customer) openCustomer(conv.id, details); });
-    head.append(back, headAvatar, headText, dial, details);
+    // Managers only: change who handles this customer, within their team.
+    const handlersBtn = textButton('Handled by', 'secondary wa-small', () => {
+      if (!conv || !conv.customer) return;
+      openHandover(conv.customer, handlersBtn, (updated) => {
+        if (conv && conv.id === updated.id) { conv.customer = updated; renderHeader(); renderComposer(); }
+        loadChats(false, true);
+      });
+    });
+    handlersBtn.hidden = true;
+    head.append(back, headAvatar, headText, handlersBtn, dial, details);
     const convError = element('p', undefined, 'notice error');
     convError.setAttribute('role', 'alert');
     convError.hidden = true;
@@ -1068,7 +1091,7 @@ views.whatsapp = (() => {
     convPane.append(head, convError, messages, newPill, composer);
     layout.append(listPane, placeholder, convPane);
     root.append(layout);
-    ui = { layout, listPane, placeholder, convPane, chatList, chatStatus, chatError, chatRetry, chatEmpty, chatMore, messages, olderButton, newPill, banner, composerRow, unavailable, attachChip, attachBtn, quick, quickBtn, templateBtn, templateInline, input, sendBtn, composeNote, headName, headPhone, headAvatar, dial, details, convError };
+    ui = { layout, listPane, placeholder, convPane, chatList, chatStatus, chatError, chatRetry, chatEmpty, chatMore, messages, olderButton, newPill, banner, composerRow, unavailable, attachChip, attachBtn, quick, quickBtn, templateBtn, templateInline, input, sendBtn, composeNote, headName, headPhone, headHandlers, handlersBtn, headAvatar, dial, details, convError };
     composerRow.addEventListener('submit', (event) => { event.preventDefault(); sendCurrent(); });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendCurrent(); }
@@ -1103,6 +1126,12 @@ views.whatsapp = (() => {
     return results.every((ok) => ok !== false);
   }
   lifecycle.liveChange.push(() => liveRefresh());
+  // The scope switch (or a changed team) reloads the list; the open chat stays open and its header is redrawn.
+  lifecycle.scopeChanged.push(() => {
+    if (!ui) return;
+    if (conv) renderHeader();
+    loadChats(false, false);
+  });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) maybeMarkRead(); });
   return { mount, show, hide };
 })();
@@ -1131,6 +1160,8 @@ export const whatsappStyles = `
 .wa-head-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
 .wa-head-name:focus { outline: none; }
 .wa-head-phone { margin: 0; color: var(--wa-sub); font-size: 12px; font-variant-numeric: tabular-nums; }
+.wa-chat-handlers { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--wa-sub); font-size: 11px; }
+.wa-chat-owner-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wa-back { display: none; }
 .wa-conv > .notice { margin: 8px; }
 .wa-messages { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-height: 0; padding: 12px 6%; overflow-y: auto; }

@@ -33,27 +33,36 @@ type Row = {
 // Completed, undeleted audio linked to a call: the same definition as the administrator feed and analytics.
 const completedLink = `x.call_log_id IS NOT NULL AND x.upload_status = 'complete' AND x.deleted_at IS NULL`;
 
-/** Read-only call history of one employee. Every query is bound to that employee's id in SQL. */
+const inIds = (ids: string[]) => (ids.length ? ids.map(() => "?").join(", ") : "NULL");
+
+/**
+ * Read-only call history of an employee, or of a manager's team. Every query is bound to the employee ids in
+ * SQL; they come from the resolved scope, never from the request.
+ */
 export function createEmployeeCallRepository(db: D1Database) {
   return {
-    /** The employee's own completed recording of one call-log entry, or null (unknown call, someone else's, none, deleted). */
-    async recordingFor(employeeId: string, callLogId: string): Promise<{ objectKey: string; contentType: string; displayName: string } | null> {
+    /** A completed recording of one call-log entry made by one of these employees, or null (unknown call, someone else's, none, deleted). */
+    async recordingFor(employeeIds: string[], callLogId: string): Promise<{ objectKey: string; contentType: string; displayName: string } | null> {
       const row = await db.prepare(
         `SELECT x.object_key, x.content_type, x.display_name FROM calls x
         JOIN call_logs h ON h.id = x.call_log_id
-        WHERE x.call_log_id = ? AND h.employee_id = ? AND x.employee_id = ? AND h.deleted_at IS NULL AND ${completedLink}
+        WHERE x.call_log_id = ? AND h.employee_id IN (${inIds(employeeIds)}) AND x.employee_id = h.employee_id AND h.deleted_at IS NULL AND ${completedLink}
         ORDER BY x.created_at DESC, x.id DESC LIMIT 1`,
-      ).bind(callLogId, employeeId, employeeId).first<{ object_key: string; content_type: string; display_name: string }>();
+      ).bind(callLogId, ...employeeIds).first<{ object_key: string; content_type: string; display_name: string }>();
       return row ? { objectKey: row.object_key, contentType: row.content_type, displayName: row.display_name } : null;
     },
 
-    async list(employeeId: string, input: z.input<typeof listInput> = {}): Promise<{
+    /**
+     * Calls made by `employeeIds`. `customerEmployeeIds` (default: the same) decides which customers are named on
+     * the items: those with a handler among them.
+     */
+    async list(employeeIds: string[], input: z.input<typeof listInput> = {}, customerEmployeeIds: string[] = employeeIds): Promise<{
       items: EmployeeCallItem[];
       nextCursor: CallHistoryCursor | null;
     }> {
       const value = listInput.parse(input);
-      const conditions = ["h.employee_id = ?", "h.deleted_at IS NULL"];
-      const bindings: (string | number)[] = [employeeId];
+      const conditions = [`h.employee_id IN (${inIds(employeeIds)})`, "h.deleted_at IS NULL"];
+      const bindings: (string | number)[] = [...employeeIds];
       if (value.phoneKey !== undefined) { conditions.push("h.phone_key = ?"); bindings.push(value.phoneKey); }
       if (value.number !== undefined) {
         conditions.push("h.remote_number LIKE ? ESCAPE '\\'");
@@ -79,7 +88,7 @@ export function createEmployeeCallRepository(db: D1Database) {
       const hasMore = rows.results.length > value.limit;
       const page = hasMore ? rows.results.slice(0, value.limit) : rows.results;
       const customers = await ownCustomersByPhoneKey(
-        db, employeeId, page.map((row) => callPhoneKey(row.remote_number ?? undefined)),
+        db, customerEmployeeIds, page.map((row) => callPhoneKey(row.remote_number ?? undefined)),
       );
       const items = page.map((row): EmployeeCallItem => {
         const key = callPhoneKey(row.remote_number ?? undefined);
@@ -101,9 +110,9 @@ export function createEmployeeCallRepository(db: D1Database) {
   };
 }
 
-/** Live customers assigned to this employee, keyed by `phone_key`; other employees' customers are not matched. */
+/** Live customers handled by these employees, keyed by `phone_key`; other employees' customers are not matched. */
 async function ownCustomersByPhoneKey(
-  db: D1Database, employeeId: string, keys: (string | null)[],
+  db: D1Database, employeeIds: string[], keys: (string | null)[],
 ): Promise<Map<string, { id: string; name: string }>> {
   const unique = [...new Set(keys.filter((key): key is string => key !== null && /^\d{8,10}$/.test(key)))].slice(0, 90);
   const result = new Map<string, { id: string; name: string }>();
@@ -111,8 +120,8 @@ async function ownCustomersByPhoneKey(
   const rows = await db.prepare(
     `SELECT c.id, c.name, c.phone_key FROM customers c WHERE c.archived_at IS NULL
       AND c.phone_key IN (${unique.map(() => "?").join(",")})
-      AND EXISTS (SELECT 1 FROM customer_employees s WHERE s.customer_id = c.id AND s.employee_id = ?)`,
-  ).bind(...unique, employeeId).all<{ id: string; name: string; phone_key: string }>();
+      AND EXISTS (SELECT 1 FROM customer_employees s WHERE s.customer_id = c.id AND s.employee_id IN (${inIds(employeeIds)}))`,
+  ).bind(...unique, ...employeeIds).all<{ id: string; name: string; phone_key: string }>();
   for (const row of rows.results) result.set(row.phone_key, { id: row.id, name: row.name });
   return result;
 }

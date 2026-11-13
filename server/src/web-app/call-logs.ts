@@ -7,8 +7,9 @@ export const callLogsClient = String.raw`
 function createCallLogsPanel(container) {
   const TYPES = ['incoming', 'outgoing', 'missed', 'rejected', 'blocked', 'voicemail', 'answered_externally', 'unknown'];
   const TYPE_NAMES = { incoming: 'Incoming', outgoing: 'Outgoing', missed: 'Missed', rejected: 'Rejected', blocked: 'Blocked', voicemail: 'Voicemail', answered_externally: 'Answered externally', unknown: 'Unknown' };
-  const COLUMNS = ['Time', 'Caller', 'Number', 'Type', 'Duration', 'SIM', 'Recording'];
-  const FILTER_KEYS = ['type', 'number', 'from', 'to', 'rec'];
+  const MANAGER = isManager(session.employee);
+  const COLUMNS = MANAGER ? ['Time', 'Employee', 'Caller', 'Number', 'Type', 'Duration', 'SIM', 'Recording'] : ['Time', 'Caller', 'Number', 'Type', 'Duration', 'SIM', 'Recording'];
+  const FILTER_KEYS = ['type', 'number', 'from', 'to', 'rec', 'employee'];
   const PAGE_SIZE = 50;
   const STALE_MS = 60000;
 
@@ -27,8 +28,14 @@ function createCallLogsPanel(container) {
   let playbackController = null;
 
   function pad2(value) { return String(value).padStart(2, '0'); }
-  function emptyFilters() { return { type: '', number: '', from: '', to: '', rec: false }; }
-  function hasFilters() { return Boolean(filters.type || filters.number || filters.from || filters.to || filters.rec); }
+  function emptyFilters() { return { type: '', number: '', from: '', to: '', rec: false, employee: '' }; }
+  function hasFilters() { return Boolean(filters.type || filters.number || filters.from || filters.to || filters.rec || filters.employee); }
+  // The manager and the active reports: who the Employee filter can name. Empty for everyone else.
+  function memberIds() { return scopeMembers(session.employee).map((member) => member.id); }
+  function fillEmployeeOptions() {
+    ui.employee.replaceChildren(new Option('Everyone in this view', ''));
+    for (const member of scopeMembers(session.employee)) ui.employee.append(new Option(member.self ? member.name + ' (you)' : member.name, member.id));
+  }
   function lengthText(seconds) {
     const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
     const hours = Math.floor(total / 3600);
@@ -54,6 +61,7 @@ function createCallLogsPanel(container) {
     result.to = isoOrEmpty(query.to);
     if (result.from && result.to && result.from > result.to) result.to = '';
     result.rec = query.rec === '1' || query.rec === 'true';
+    if (MANAGER) result.employee = memberIds().includes(query.employee) ? query.employee : '';
     return result;
   }
   function writeHash() {
@@ -63,15 +71,18 @@ function createCallLogsPanel(container) {
     if (filters.from) params.set('from', filters.from);
     if (filters.to) params.set('to', filters.to);
     if (filters.rec) params.set('rec', '1');
+    if (filters.employee) params.set('employee', filters.employee);
     const text = params.toString().replaceAll('%3A', ':').replaceAll('%2C', ',');
     setHash('analytics/calls' + (text ? '?' + text : ''));
   }
   function syncForm() {
+    if (ui.employee) fillEmployeeOptions();
     ui.type.value = filters.type;
     ui.number.value = filters.number;
     ui.from.value = localInput(filters.from);
     ui.to.value = localInput(filters.to);
     ui.rec.checked = filters.rec;
+    if (ui.employee) ui.employee.value = filters.employee;
   }
   function filterProblem(text, focusNode) {
     ui.filterError.textContent = text;
@@ -94,7 +105,8 @@ function createCallLogsPanel(container) {
       callerName: typeof raw.callerName === 'string' ? raw.callerName : '',
       simLabel: typeof raw.simLabel === 'string' ? raw.simLabel : '',
       hasRecording: raw.hasRecording === true,
-      customer
+      customer,
+      employee: raw.employee && typeof raw.employee.id === 'string' && typeof raw.employee.name === 'string' ? { id: raw.employee.id, name: raw.employee.name } : null
     };
   }
   function readPage(raw) {
@@ -118,6 +130,7 @@ function createCallLogsPanel(container) {
   function buildRow(call) {
     const row = element('tr', undefined, 'cl-row');
     plainCell(row, 'Time', dateText(call.startedAt), 'cl-time');
+    if (MANAGER) plainCell(row, 'Employee', call.employee ? call.employee.name : '', 'cl-emp');
     const caller = bodyCell(row, 'Caller', 'cl-caller');
     if (call.customer) {
       const link = element('button', call.customer.name, 'cl-link');
@@ -190,6 +203,9 @@ function createCallLogsPanel(container) {
     const cursor = more ? nextCursor : null;
     const hadFocus = more && document.activeElement === ui.more;
     const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+    // A chosen employee wins over the header scope; otherwise the header scope decides (managers only).
+    if (filters.employee) params.set('employeeId', filters.employee);
+    else applyScope(params, session.scope, session.employee);
     if (filters.type) params.set('callType', filters.type);
     if (filters.number) params.set('number', filters.number);
     if (filters.from) params.set('from', filters.from);
@@ -252,8 +268,8 @@ function createCallLogsPanel(container) {
     filterProblem('');
     const next = emptyFilters();
     next.type = TYPES.includes(ui.type.value) ? ui.type.value : '';
-    next.number = ui.number.value.trim();
     next.rec = ui.rec.checked;
+    if (MANAGER && memberIds().includes(ui.employee.value)) next.employee = ui.employee.value;
     for (const name of ['from', 'to']) {
       const input = ui[name];
       if (!input.value) continue;
@@ -343,7 +359,7 @@ function createCallLogsPanel(container) {
   function startPlayback(call, row, playButton) {
     closePlayer();
     player = { call, row, playButton, expiresAt: 0, loading: false, position: 0, retried: false };
-    ui.playerTitle.textContent = 'Recording · ' + callerLabel(call) + ' · ' + dateText(call.startedAt);
+    ui.playerTitle.textContent = 'Recording · ' + callerLabel(call) + ' · ' + dateText(call.startedAt) + (call.employee ? ' · ' + call.employee.name : '');
     row.after(ui.playerRow);
     ui.playerTitle.focus({ preventScroll: true });
     ui.playerRow.scrollIntoView({ block: 'nearest' });
@@ -445,6 +461,13 @@ function createCallLogsPanel(container) {
     clear.type = 'button';
     clear.addEventListener('click', clearFilters);
     actions.append(apply, clear);
+    if (MANAGER) {
+      const employeeLabel = element('label', 'Employee');
+      ui.employee = document.createElement('select');
+      employeeLabel.append(ui.employee);
+      fillEmployeeOptions();
+      grid.append(employeeLabel);
+    }
     grid.append(typeLabel, numberLabel, fromLabel, toLabel, recLabel, actions);
     ui.filterError = element('p', undefined, 'error-text');
     ui.filterError.setAttribute('role', 'alert');
@@ -485,7 +508,7 @@ function createCallLogsPanel(container) {
     ui.tableWrap = element('div', undefined, 'cl-table-wrap');
     ui.tableWrap.hidden = true;
     const table = element('table', undefined, 'cl-table');
-    table.append(element('caption', 'Your calls, newest first', 'sr-only'));
+    table.append(element('caption', MANAGER ? 'Calls of you and your team, newest first' : 'Your calls, newest first', 'sr-only'));
     const headRow = element('tr');
     for (const label of COLUMNS) {
       const th = element('th', label);
@@ -534,6 +557,13 @@ function createCallLogsPanel(container) {
     hide() {
       closePlayer();
       cancelLoad();
+    },
+    // The header scope switch (or the team) changed: the list restarts, right away when this panel is on screen.
+    scopeChanged(visible) {
+      const valid = new Set(memberIds());
+      if (filters.employee && !valid.has(filters.employee)) filters.employee = '';
+      loadedAt = 0;
+      if (visible) { syncForm(); writeHash(); loadPage(false); }
     }
   };
 }

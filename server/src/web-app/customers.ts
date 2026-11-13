@@ -196,8 +196,109 @@ function renderDrawer(token, customer, title, body, notice) {
   callList.append(element('li', 'Loading…', 'muted'));
   calls.append(callList);
 
-  body.append(status, actions, windowNote, form, calls);
+  body.append(status, actions, windowNote, ...(isManager(session.employee) ? [handlersSection(token, customer, title, body)] : []), form, calls);
   loadDrawerCalls(token, customer, callList);
+}
+// ---- Handled by and hand over (managers only; the server checks the scope again) --------------------------------------------
+function handlersSection(token, customer, title, body) {
+  const section = element('section', undefined, 'drawer-section');
+  section.append(element('h3', 'Handled by'));
+  const line = element('p', undefined, 'drawer-handlers');
+  line.append(element('span', handlerNames(customer.employees) || 'Nobody'));
+  if (customerScopeTag(customer, session.employee)) line.append(document.createTextNode(' '), element('span', 'Team', 'badge badge-team'));
+  section.append(line);
+  const button = textButton('Hand over', 'secondary', () => {
+    openHandover(customer, button, (updated) => {
+      if (token !== customerDrawer.token) return;
+      customerDrawer.state.customer = updated;
+      customerNotifyChanged(updated);
+      if (customersApi.reload) customersApi.reload(true);
+      renderDrawer(token, updated, title, body, 'Handlers updated.');
+    });
+  });
+  section.append(button);
+  return section;
+}
+// Tick the employees of your scope who should handle the customer. Handlers outside it stay (the server never touches them).
+function openHandover(customer, opener, onSaved) {
+  const dialog = element('dialog', undefined, 'js-dialog');
+  dialog.setAttribute('aria-labelledby', 'handover-title');
+  const form = element('form');
+  form.noValidate = true;
+  const title = element('h2', 'Hand over customer');
+  title.id = 'handover-title';
+  const who = element('p', customer.name + ' · ' + customer.phone, 'hint');
+  const current = new Set((Array.isArray(customer.employees) ? customer.employees : []).map((person) => person.id));
+  const group = element('fieldset', undefined, 'handover-choices');
+  group.append(element('legend', 'Handled by'));
+  const boxes = [];
+  for (const member of scopeMembers(session.employee)) {
+    const label = element('label', undefined, 'radio-row');
+    const box = element('input');
+    box.type = 'checkbox';
+    box.value = member.id;
+    box.checked = current.has(member.id);
+    boxes.push(box);
+    label.append(box, element('span', member.self ? member.name + ' (you)' : member.name));
+    group.append(label);
+  }
+  const outside = handoverPlan(session.employee, customer, []).outside;
+  const outsideNote = element('p', outside.length ? handlerNames(outside) + (outside.length === 1 ? ' also handles' : ' also handle') + ' this customer from outside your team and will stay as ' + (outside.length === 1 ? 'a handler.' : 'handlers.') : '', 'hint');
+  outsideNote.hidden = !outside.length;
+  const error = element('p', undefined, 'error-text');
+  error.setAttribute('role', 'alert');
+  error.hidden = true;
+  const cancel = textButton('Cancel', 'secondary', () => dialog.close());
+  const save = element('button', 'Save');
+  save.type = 'submit';
+  const actions = element('div', undefined, 'actions');
+  actions.append(cancel, save);
+  const fields = element('div', undefined, 'dialog-fields');
+  fields.append(who, group, outsideNote, error);
+  form.append(title, fields, actions);
+  dialog.append(form);
+  function plan() { return handoverPlan(session.employee, customer, boxes.filter((box) => box.checked).map((box) => box.value)); }
+  function sync() {
+    const current = plan();
+    save.disabled = !current.changed || Boolean(current.problem);
+    setStatus(error, current.problem, true);
+  }
+  for (const box of boxes) box.addEventListener('change', sync);
+  sync();
+  let saving = false;
+  dialog.addEventListener('cancel', (event) => { if (saving) event.preventDefault(); });
+  dialog.addEventListener('close', () => {
+    dialog.remove();
+    if (opener && opener.isConnected) opener.focus();
+  });
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const chosen = plan();
+    if (saving || !chosen.changed || chosen.problem) return;
+    saving = true;
+    save.disabled = true;
+    cancel.disabled = true;
+    save.textContent = 'Saving…';
+    setStatus(error, '', false);
+    try {
+      const data = await api('/customers/' + encodeURIComponent(customer.id) + '/handlers', { method: 'PUT', body: { employeeIds: chosen.employeeIds } });
+      const updated = readCustomer(data.customer);
+      dialog.close();
+      onSaved(updated);
+      announce('Handlers updated.');
+    } catch (failure) {
+      if (failure.status === 401) return;
+      setStatus(error, failure.code === 'handler_required' ? 'The customer needs at least one handler.' : failure.status === 404 ? 'This customer is no longer available.' : failure.code === 'employee_out_of_scope' ? 'You can only choose people on your team.' : errorMessage(failure), true);
+    } finally {
+      saving = false;
+      cancel.disabled = false;
+      save.textContent = 'Save';
+      if (dialog.isConnected) sync();
+    }
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+  if (boxes.length) boxes[0].focus();
 }
 function dialogCloseThen(work) {
   const dialog = customerDrawer.dialog;
@@ -266,8 +367,21 @@ function openAddCustomer(opener) {
   const actions = element('div', undefined, 'actions');
   actions.append(cancel, submit);
   const fields = element('div', undefined, 'dialog-fields');
-  fields.append(fieldLabel('Name', name), fieldLabel('Phone number', phone), phoneHint, fieldLabel('Notes (optional)', notes), info, error);
+  fields.append(fieldLabel('Name', name), fieldLabel('Phone number', phone), phoneHint, fieldLabel('Notes (optional)', notes));
+  // Managers can add a customer for someone on their team; everyone else adds to their own list.
+  let assign = null;
+  if (isManager(session.employee)) {
+    assign = element('select');
+    for (const member of scopeMembers(session.employee)) assign.append(new Option(member.self ? member.name + ' (you)' : member.name, member.id));
+    assign.value = session.employee.id;
+    const assignLabel = fieldLabel('Assign to', assign);
+    fields.append(assignLabel);
+    const syncInfo = () => { info.textContent = assign.value === session.employee.id ? "The customer is added to your list only. The phone number can't be changed afterwards." : 'The customer is added to the selected employee only. The phone number can\'t be changed afterwards.'; };
+    assign.addEventListener('change', syncInfo);
+  }
+  fields.append(info, error);
   form.append(title, fields, actions);
+  function assignTo() { return assign && assign.value !== session.employee.id ? assign.value : ''; }
   dialog.append(form);
   phone.addEventListener('input', () => {
     const normalized = normalizePhone(phone.value);
@@ -292,7 +406,7 @@ function openAddCustomer(opener) {
     submit.textContent = 'Checking…';
     setStatus(error, '', false);
     try {
-      const outcome = await addCustomerFlow(name.value, phone.value, notes.value);
+      const outcome = await addCustomerFlow(name.value, phone.value, notes.value, assignTo());
       if (outcome.problem) { setStatus(error, outcome.problem, true); return; }
       dialog.close();
       openCustomer(outcome.customerId, opener, { notice: outcome.notice });
@@ -312,19 +426,20 @@ function openAddCustomer(opener) {
   name.focus();
 }
 // Looks the number up first, exactly like the Android app: yours -> open it, someone else's -> a bare message, free -> create.
-async function addCustomerFlow(name, phone, notes) {
+async function addCustomerFlow(name, phone, notes, assignTo) {
   const normalized = normalizePhone(phone).phone;
   const found = await api('/customers/lookup?phone=' + encodeURIComponent(normalized));
   const decision = decideAfterLookup(found);
-  if (decision.action === 'open') return { customerId: decision.customerId, notice: 'This number is already in your customers.' };
+  const already = isManager(session.employee) ? 'This number is already one of your team customers' + (found && Array.isArray(found.handlers) && found.handlers.length ? ' (handled by ' + handlerNames(found.handlers) + ').' : '.') : 'This number is already in your customers.';
+  if (decision.action === 'open') return { customerId: decision.customerId, notice: already };
   if (decision.action === 'other') return { problem: OTHER_HANDLER_MESSAGE };
   try {
-    const created = await api('/customers', { method: 'POST', body: createCustomerBody(name, phone, notes) });
+    const created = await api('/customers', { method: 'POST', body: createCustomerBody(name, phone, notes, assignTo) });
     return { customerId: readCustomer(created.customer).id, notice: 'Customer added.' };
   } catch (failure) {
     if (failure.code === 'customer_exists') {
       const existing = failure.customerId || '';
-      return existing ? { customerId: existing, notice: 'This number is already in your customers.' } : { problem: OTHER_HANDLER_MESSAGE };
+      return existing ? { customerId: existing, notice: already } : { problem: OTHER_HANDLER_MESSAGE };
     }
     throw failure;
   }
@@ -343,6 +458,14 @@ views.customers = (() => {
     if (customer.lastCallAt) parts.push('Call ' + listTimeText(customer.lastCallAt));
     return parts.join(' · ');
   }
+  // Managers see who handles a customer, and a Team tag when only their reports do.
+  function handlerLine(customer) {
+    const line = element('span', undefined, 'cr-handlers');
+    const names = handlerNames(customer.employees);
+    line.append(element('span', names || 'No handler', 'cr-handler-names'));
+    if (customerScopeTag(customer, session.employee)) line.append(element('span', 'Team', 'badge badge-team'));
+    return line;
+  }
   function renderRow(customer) {
     const item = element('li', undefined, 'customer-item');
     item.dataset.customerId = customer.id;
@@ -351,6 +474,7 @@ views.customers = (() => {
     link.append(avatarNode(customer.name, customer.id));
     const main = element('span', undefined, 'cr-main');
     main.append(element('strong', customer.name, 'cr-name'), element('span', customer.phone, 'cr-phone'));
+    if (isManager(session.employee)) main.append(handlerLine(customer));
     const meta = element('span', undefined, 'cr-meta');
     const text = activityText(customer);
     if (text) meta.append(element('span', text));
@@ -367,7 +491,7 @@ views.customers = (() => {
     ui.list.replaceChildren(...nodes);
     ui.more.hidden = !state.nextCursor;
     ui.empty.hidden = state.items.length > 0 || state.loading || Boolean(state.error);
-    ui.empty.textContent = state.query ? 'No customers match your search.' : 'You have no customers yet. Add your first customer to get started.';
+    ui.empty.textContent = state.query ? 'No customers match your search.' : isManager(session.employee) ? 'No customers here yet. Add a customer, or choose a different view above.' : 'You have no customers yet. Add your first customer to get started.';
     ui.list.setAttribute('aria-busy', String(state.loading));
   }
   async function load(reset, silent) {
@@ -382,7 +506,7 @@ views.customers = (() => {
     state.error = '';
     if (!silent) { ui.status.textContent = 'Loading customers…'; ui.error.hidden = true; ui.retry.hidden = true; }
     renderList();
-    const params = new URLSearchParams({ limit: '30' });
+    const params = applyScope(new URLSearchParams({ limit: '30' }), session.scope, session.employee);
     if (state.query) params.set('q', state.query);
     if (!reset && state.nextCursor) params.set('cursor', state.nextCursor);
     try {
@@ -463,6 +587,7 @@ views.customers = (() => {
   };
 })();
 lifecycle.liveChange.push(() => views.customers.refreshQuietly());
+lifecycle.scopeChanged.push(() => { if (customersApi.reload) customersApi.reload(false); });
 `;
 
 export const customersStyles = `
@@ -496,5 +621,10 @@ dialog.drawer[open] { display: flex; }
 .dialog-fields { display: grid; gap: 12px; margin-top: 12px; }
 .drawer-status:empty { display: none; }
 .drawer-status { color: var(--accent); font-size: 13px; }
+.cr-handlers { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; }
+.cr-handler-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge-team { background: #e3ecfb; color: #25477e; }
+.drawer-handlers { margin: 0 0 8px; }
+.handover-choices { display: grid; gap: 6px; }
 @media (max-width: 760px) { .cr-meta { display: none; } }
 `;

@@ -117,6 +117,7 @@ internal fun ConversationScreen(
     BackHandler(enabled = detailsOpen || templatesOpen) { detailsOpen = false; templatesOpen = false }
     LaunchedEffect(customerId) { scope.launch { customers.openConversation(customerId, null) } }
     val profile by customers.profile.collectAsStateWithLifecycle()
+    val viewer = profile.asManager()
     LaunchedEffect(customerId) { customers.ensureProfile() }
     // Once per open after the messages load, and again when a newer incoming message arrives while the screen is shown.
     val media = rememberMediaController(customers, scope)
@@ -221,6 +222,10 @@ internal fun ConversationScreen(
                     Column(Modifier.weight(1f)) {
                         Text(name, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (phone.isNotEmpty()) Text(phone, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        val handlers = customer?.employees.orEmpty()
+                        if (viewer != null && handlers.isNotEmpty()) {
+                            Text("Handled by " + handlerNames(handlers, viewer.id), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
                 IconAction(R.drawable.ic_refresh, "Refresh", { scope.launch { customers.refreshConversation() } })
@@ -264,7 +269,7 @@ internal fun ConversationScreen(
     }
     if (quickOpen) {
         QuickReplySheet(
-            customers, remember(name, profile) { customers.handlerContext(name) }, onDismiss = { quickOpen = false },
+            customers, remember(name, profile, customer) { customers.handlerContext(name, customer) }, onDismiss = { quickOpen = false },
             onPick = { filled ->
                 quickOpen = false
                 draft = (if (draft.isBlank()) filled.text else draft.trimEnd() + "\n" + filled.text).take(MAX_MESSAGE_CHARACTERS)

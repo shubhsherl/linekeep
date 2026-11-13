@@ -96,6 +96,13 @@ dialog .actions { justify-content: flex-end; margin-top: 18px; }
 main { width: min(1360px, calc(100% - 32px)); margin: 0 auto; padding: 16px 0 32px; }
 main:focus { outline: none; }
 .view-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-bottom: 12px; }
+.role-badge { padding: 1px 6px; border-radius: 4px; background: #e3ecfb; color: #25477e; font-size: 11px; font-weight: 700; }
+.scope-control { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.scope-control + .user-menu { margin-left: 0; }
+.scope-segment { min-height: 30px; padding: 2px 10px; }
+.scope-segment[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--white); }
+.scope-segment[aria-pressed=true]:hover:not(:disabled) { background: var(--accent-hover); }
+.scope-select { width: auto; min-height: 30px; max-width: 170px; }
 
 @media (max-width: 760px) {
   .topbar-row { flex-wrap: wrap; gap: 4px 12px; padding: 6px 0; }

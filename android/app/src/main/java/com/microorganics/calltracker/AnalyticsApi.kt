@@ -11,15 +11,17 @@ import javax.net.ssl.HttpsURLConnection
  */
 internal class AnalyticsApi(private val server: () -> String?) {
 
-    fun analytics(enrollment: Enrollment, range: DateRange): CallAnalytics {
-        val body = get("/v1/device/analytics", enrollment.token, "from" to range.from.toString(), "to" to range.to.toString())
+    /** Managers pass [employeeIds] (comma-separated, null = the whole scope) and [byEmployee] to get the per-employee breakdown. */
+    fun analytics(enrollment: Enrollment, range: DateRange, employeeIds: String? = null, byEmployee: Boolean = false): CallAnalytics {
+        val body = get("/v1/device/analytics", enrollment.token, "from" to range.from.toString(), "to" to range.to.toString(),
+            "employeeIds" to employeeIds, "groupBy" to if (byEmployee) "employee" else null)
         return parseAnalytics(body) ?: throw IOException("Malformed analytics response")
     }
 
-    fun callHistory(enrollment: Enrollment, numberTerm: String?, callType: String?, cursor: String?, limit: Int = PAGE_SIZE): Page<CallLogItem> =
+    fun callHistory(enrollment: Enrollment, numberTerm: String?, callType: String?, cursor: String?, employeeId: String? = null, limit: Int = PAGE_SIZE): Page<CallLogItem> =
         parsePage(
             get("/v1/device/call-history", enrollment.token,
-                "number" to numberTerm, "callType" to callType, "cursor" to cursor, "limit" to limit.toString()),
+                "number" to numberTerm, "callType" to callType, "cursor" to cursor, "limit" to limit.toString(), "employeeId" to employeeId),
             ::parseCallLog,
         )
 

@@ -26,10 +26,12 @@ function validateNewCustomer(name, phone, notes) {
   if (String(notes).length > 4000) return 'Notes can be up to 4000 characters.';
   return '';
 }
-function createCustomerBody(name, phone, notes) {
+// assignTo: an employee id a manager is creating the customer for; omitted for the manager's own customers.
+function createCustomerBody(name, phone, notes, assignTo) {
   const body = { name: String(name).trim(), phone: normalizePhone(phone).phone };
   const text = String(notes).trim();
   if (text) body.notes = text;
+  if (assignTo) body.employeeId = assignTo;
   return body;
 }
 // Only changed fields are sent and never the phone. null when nothing changed.
@@ -335,6 +337,134 @@ function mediaSendBody(clientMessageId, attachmentId, caption) {
   const text = String(caption || '').trim();
   if (text) body.caption = text;
   return body;
+}
+
+// ---- Manager scope ---------------------------------------------------------------------------------------------------------
+// A manager sees themselves and their active reports. Everything here is presentation: the server enforces the scope in SQL.
+function isManager(employee) { return Boolean(employee) && employee.role === 'manager'; }
+function cleanPerson(raw) {
+  if (!raw || typeof raw.id !== 'string' || !raw.id || typeof raw.name !== 'string') return null;
+  return { id: raw.id, name: raw.name, phoneNumber: typeof raw.phoneNumber === 'string' && raw.phoneNumber ? raw.phoneNumber : null };
+}
+// Active reports of a manager (empty for everyone else), without duplicates or the manager themselves.
+function teamOf(employee) {
+  if (!isManager(employee) || !Array.isArray(employee.team)) return [];
+  const seen = new Set([employee.id]);
+  const team = [];
+  for (const raw of employee.team) {
+    const person = cleanPerson(raw);
+    if (person && !seen.has(person.id)) { seen.add(person.id); team.push(person); }
+  }
+  return team;
+}
+// The manager first, then the reports: everyone a manager may choose in a scope picker.
+function scopeMembers(employee) {
+  if (!isManager(employee)) return [];
+  return [{ id: employee.id, name: employee.name, self: true }].concat(teamOf(employee).map((person) => ({ id: person.id, name: person.name, self: false })));
+}
+const SCOPE_ALL = { mode: 'all', employeeId: '' };
+// mode: all (the manager and the team) | mine (only the manager) | team (the reports) | one (a single report).
+// An invalid choice, such as a report who has left the team, falls back to everything in scope.
+function normalizeScope(scope, employee) {
+  if (!isManager(employee) || !scope) return SCOPE_ALL;
+  const team = teamOf(employee);
+  if (scope.mode === 'mine') return { mode: 'mine', employeeId: '' };
+  if (scope.mode === 'team') return team.length ? { mode: 'team', employeeId: '' } : SCOPE_ALL;
+  if (scope.mode === 'one') {
+    if (scope.employeeId === employee.id) return { mode: 'mine', employeeId: '' };
+    return team.some((person) => person.id === scope.employeeId) ? { mode: 'one', employeeId: scope.employeeId } : SCOPE_ALL;
+  }
+  return SCOPE_ALL;
+}
+// The employeeId query value for customers, chats and call history; '' means whole scope (omit the parameter).
+function scopeEmployeeParam(scope, employee) {
+  const valid = normalizeScope(scope, employee);
+  if (valid.mode === 'mine') return 'me';
+  if (valid.mode === 'team') return 'team';
+  if (valid.mode === 'one') return valid.employeeId;
+  return '';
+}
+// Adds the scope to a URLSearchParams; a no-op for people who are not managers.
+function applyScope(params, scope, employee) {
+  const value = scopeEmployeeParam(scope, employee);
+  if (value) params.set('employeeId', value);
+  return params;
+}
+function scopeLabel(scope, employee) {
+  const valid = normalizeScope(scope, employee);
+  if (valid.mode === 'mine') return 'only you';
+  if (valid.mode === 'team') return 'your team';
+  if (valid.mode === 'one') { const person = teamOf(employee).find((item) => item.id === valid.employeeId); return person ? person.name : 'your team'; }
+  return 'you and your team';
+}
+// Ids the scope covers (manager and/or reports) in a stable order.
+function scopeIds(scope, employee) {
+  if (!isManager(employee)) return [];
+  const valid = normalizeScope(scope, employee);
+  const team = teamOf(employee).map((person) => person.id);
+  if (valid.mode === 'mine') return [employee.id];
+  if (valid.mode === 'team') return team;
+  if (valid.mode === 'one') return [valid.employeeId];
+  return [employee.id].concat(team);
+}
+// employeeIds for analytics: the picked employees inside the scope, or null (omit it) when the whole scope is wanted.
+function analyticsEmployeeIds(scope, employee, picked) {
+  if (!isManager(employee)) return null;
+  const base = scopeIds(scope, employee);
+  const wanted = Array.isArray(picked) ? base.filter((id) => picked.includes(id)) : [];
+  const chosen = wanted.length ? wanted : base;
+  const everyone = scopeIds(SCOPE_ALL, employee);
+  return chosen.length === everyone.length && everyone.every((id) => chosen.includes(id)) ? null : chosen;
+}
+// The 'By employee' rows: only rows with an id and a name, numbers clamped, busiest first.
+const EMPLOYEE_ROW_KEYS = ['total', 'connected', 'notConnected', 'uniqueContacts', 'talkSeconds', 'avgConnectedSeconds', 'incoming', 'incomingSeconds', 'outgoing', 'outgoingSeconds', 'missed', 'rejected', 'other', 'withRecording'];
+function readEmployeeRows(raw) {
+  if (!Array.isArray(raw)) return [];
+  const rows = [];
+  for (const item of raw) {
+    if (!item || typeof item.id !== 'string' || typeof item.name !== 'string') continue;
+    const row = { id: item.id, name: item.name };
+    for (const key of EMPLOYEE_ROW_KEYS) row[key] = typeof item[key] === 'number' && Number.isFinite(item[key]) && item[key] > 0 ? Math.floor(item[key]) : 0;
+    rows.push(row);
+  }
+  return rows.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+}
+function handlerNames(employees) {
+  if (!Array.isArray(employees)) return '';
+  return employees.map((person) => (person && typeof person.name === 'string' ? person.name.trim() : '')).filter(Boolean).join(', ');
+}
+// 'team' when a manager can see the customer only through their reports; '' otherwise (own customers and non-managers).
+function customerScopeTag(customer, employee) {
+  return isManager(employee) && customer && customer.scope === 'team' ? 'team' : '';
+}
+// Hand over: the manager ticks employees of their scope. Handlers outside the scope are never touched by the server.
+// ticked: ids chosen in the dialog. Returns what to send and what changes.
+function handoverPlan(employee, customer, ticked) {
+  const members = scopeMembers(employee);
+  const inScope = new Set(members.map((member) => member.id));
+  const current = Array.isArray(customer && customer.employees) ? customer.employees.filter((person) => person && typeof person.id === 'string') : [];
+  const outside = current.filter((person) => !inScope.has(person.id));
+  const before = current.filter((person) => inScope.has(person.id)).map((person) => person.id);
+  const picked = Array.isArray(ticked) ? ticked : [];
+  const employeeIds = members.map((member) => member.id).filter((id) => picked.includes(id));
+  const added = employeeIds.filter((id) => !before.includes(id));
+  const removed = before.filter((id) => !employeeIds.includes(id));
+  let problem = '';
+  if (!employeeIds.length && !outside.length) problem = 'Choose at least one employee, or the customer would have no handler.';
+  return { employeeIds, outside, added, removed, changed: added.length > 0 || removed.length > 0, problem };
+}
+// Who a {{handler_name}} / {{handler_phone}} placeholder names for a customer: the manager when they handle it themselves,
+// otherwise the customer's first handler in the team who has a phone number, otherwise the manager.
+function pickCustomerHandler(employee, own, customer) {
+  if (!isManager(employee) || !customer || !Array.isArray(customer.employees)) return own;
+  const handlers = customer.employees.filter((person) => person && typeof person.id === 'string');
+  if (!handlers.length || handlers.some((person) => person.id === employee.id)) return own;
+  const team = teamOf(employee);
+  for (const handler of handlers) {
+    const report = team.find((person) => person.id === handler.id);
+    if (report && report.phoneNumber) return { name: String(report.name || '').trim(), phone: report.phoneNumber };
+  }
+  return own;
 }
 
 // ---- Attachments -------------------------------------------------------------------------------------------------------------

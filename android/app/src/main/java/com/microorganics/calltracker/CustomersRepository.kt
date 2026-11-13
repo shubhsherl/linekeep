@@ -41,6 +41,9 @@ internal sealed interface SendOutcome {
     data class Failed(val message: String) : SendOutcome
 }
 
+/** How long a loaded profile (role, team) is trusted before the app comes back to the foreground and asks again. */
+internal const val PROFILE_MAX_AGE_MS = 10 * 60_000L
+
 internal fun isAccessLost(error: Exception) = error is NotConnected || (error is ApiFailure && error.status == 401)
 
 /** Short, data-free text for the UI. Server bodies and customer values never appear in it. */
@@ -55,6 +58,9 @@ internal fun customersFailureMessage(error: Exception): String = when {
     hasCode(error, "file_too_large") || (error is ApiFailure && error.status == 413) -> "This file is larger than ${formatSize(MAX_ATTACHMENT_BYTES)}."
     hasCode(error, PHONE_NOT_EDITABLE_CODE) -> "The phone number can't be changed."
     hasCode(error, CUSTOMER_EXISTS_CODE) -> OTHER_HANDLER_MESSAGE
+    hasCode(error, HANDLER_REQUIRED_CODE) -> "A customer needs at least one person. Keep someone ticked."
+    hasCode(error, EMPLOYEE_OUT_OF_SCOPE_CODE) -> "That person is not on your team any more. Refresh and try again."
+    hasCode(error, NOT_A_MANAGER_CODE) -> "Only managers can do this."
     error is ApiFailure && error.status == 502 -> "WhatsApp could not complete this. Try again in a moment."
     error is ApiFailure && error.status == 404 -> "This customer is not assigned to you any more."
     error is ApiFailure && (error.status == 429 || error.status >= 500) -> "Linekeep is busy right now. Try again in a moment."
@@ -199,11 +205,20 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     /** The conversation currently open on screen, or null. */
     val openConversationId: String? get() = selectedId
 
+    private val mutableCustomersScope = MutableStateFlow<ScopeFilter>(ScopeFilter.All)
+    private val mutableChatsScope = MutableStateFlow<ScopeFilter>(ScopeFilter.All)
+    /** A manager's filter of the Customers list; always [ScopeFilter.All] for anyone else. */
+    val customersScope: StateFlow<ScopeFilter> = mutableCustomersScope.asStateFlow()
+    /** A manager's filter of the WhatsApp chat list; always [ScopeFilter.All] for anyone else. */
+    val chatsScope: StateFlow<ScopeFilter> = mutableChatsScope.asStateFlow()
+
     val customers = PagedList<Customer>({ it.id }) { query, cursor ->
-        enrollments.authorized { api.customers(it, query, cursor) }
+        val employee = scopeParam(mutableCustomersScope.value, mutableProfile.value)
+        enrollments.authorized { api.customers(it, query, cursor, employee) }
     }
     val chats = PagedList<ChatSummary>({ it.customerId }) { query, cursor ->
-        enrollments.authorized { api.chats(it, query, cursor) }
+        val employee = scopeParam(mutableChatsScope.value, mutableProfile.value)
+        enrollments.authorized { api.chats(it, query, cursor, employee) }
     }
     val messages = PagedList<WhatsAppMessage>({ it.id }) { _, cursor ->
         val customerId = selectedId ?: throw CancellationException("No conversation is open")
@@ -245,6 +260,9 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
         lastVersion = null
         chatsStale = false
         mutableProfile.value = null
+        profileLoadedAt = 0L
+        mutableCustomersScope.value = ScopeFilter.All
+        mutableChatsScope.value = ScopeFilter.All
         quickCache.clear()
         templateCache.clear()
         closeConversation()
@@ -254,6 +272,22 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
     suspend fun openCustomers(query: String) {
         resetIfOwnerChanged()
         if (query.trim() != customers.state.value.query) customers.search(query) else customers.ensureLoaded()
+    }
+
+    suspend fun setCustomersScope(filter: ScopeFilter) {
+        resetIfOwnerChanged()
+        val next = normalizeFilter(filter, mutableProfile.value)
+        if (mutableCustomersScope.value == next) return
+        mutableCustomersScope.value = next
+        customers.refresh()
+    }
+
+    suspend fun setChatsScope(filter: ScopeFilter) {
+        resetIfOwnerChanged()
+        val next = normalizeFilter(filter, mutableProfile.value)
+        if (mutableChatsScope.value == next) return
+        mutableChatsScope.value = next
+        chats.refresh()
     }
 
     suspend fun openChats(query: String) {
@@ -433,32 +467,61 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
         resetIfOwnerChanged()
         if (customers.state.value.let { it.items.isEmpty() && it.error != null }) customers.refresh()
         if (chats.state.value.let { it.items.isEmpty() && it.error != null }) chats.refresh()
+        refreshProfileIfStale()
     }
 
     private val mutableProfile = MutableStateFlow<EmployeeProfile?>(null)
     /** This employee's profile, fetched once per process and kept in memory only; null until loaded. */
     val profile: StateFlow<EmployeeProfile?> = mutableProfile.asStateFlow()
 
+    @Volatile private var profileLoadedAt = 0L
+
     /** Loads the profile if it isn't known yet. A failure is ignored: the SIM number and enrolled name are the fallback. */
     suspend fun ensureProfile() {
         if (mutableProfile.value != null) return
+        loadProfile()
+    }
+
+    /**
+     * Refetches the profile when it is older than [PROFILE_MAX_AGE_MS], so a role or team change made by the administrator
+     * reaches the app without a restart. Called when the app comes to the foreground; it is not polled.
+     */
+    suspend fun refreshProfileIfStale() {
+        resetIfOwnerChanged()
+        if (mutableProfile.value != null && System.currentTimeMillis() - profileLoadedAt < PROFILE_MAX_AGE_MS) return
+        loadProfile()
+    }
+
+    private suspend fun loadProfile() {
         try {
             val loaded = enrollments.authorized { api.profile(it) }
+            val before = mutableProfile.value
             mutableProfile.value = loaded
+            profileLoadedAt = System.currentTimeMillis()
+            if (before != null && scopeSignature(before) != scopeSignature(loaded)) onScopeChanged(loaded)
         } catch (error: Exception) {
             if (error is CancellationException) throw error
         }
     }
 
-    /** Name and number of this employee for {{handler_*}} placeholders and template variables. */
-    fun handlerContext(customerName: String): FillContext {
+    /** The manager's role or team changed: filters that no longer apply are dropped and loaded lists are fetched again. */
+    private suspend fun onScopeChanged(profile: EmployeeProfile) {
+        mutableCustomersScope.value = normalizeFilter(mutableCustomersScope.value, profile)
+        mutableChatsScope.value = normalizeFilter(mutableChatsScope.value, profile)
+        coroutineScope {
+            if (customers.state.value.loaded) launch { customers.refresh() }
+            if (chats.state.value.loaded) launch { chats.refresh() }
+        }
+    }
+
+    /**
+     * Name and number for {{handler_*}} placeholders and template variables: this employee, or, for a manager, the first
+     * in-scope handler of [customer] (the open conversation's customer by default).
+     */
+    fun handlerContext(customerName: String, customer: Customer? = mutableCustomer.value): FillContext {
         val status = enrollments.status.value
-        val loaded = mutableProfile.value
-        return FillContext(
-            customerName = customerName,
-            handlerName = resolveHandlerName(loaded, status.employeeName),
-            handlerPhone = resolveHandlerPhone(loaded, status.sim.numbers),
-        )
+        val (name, phone) = resolveHandlerIdentity(mutableProfile.value, status.employeeName, status.sim.numbers, customer?.employees.orEmpty())
+        return FillContext(customerName = customerName, handlerName = name, handlerPhone = phone)
     }
 
     private val quickCache = Cached<List<QuickMessage>> { enrollments.authorized { api.quickMessages(it) } }
@@ -543,9 +606,10 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
 
     /**
      * Checks the number first, then creates the customer. A number that is already the caller's opens that customer;
-     * one that belongs to someone else reveals nothing about it.
+     * one that belongs to someone else reveals nothing about it. A manager may pick [assignTo] from the team; it is ignored
+     * (never sent) for anyone else and for oneself.
      */
-    suspend fun addCustomer(name: String, phone: String, notes: String): AddCustomerOutcome {
+    suspend fun addCustomer(name: String, phone: String, notes: String, assignTo: String? = null): AddCustomerOutcome {
         validateNewCustomer(name, phone, notes)?.let { return AddCustomerOutcome.Failed(it) }
         val normalized = requireNotNull(normalizePhone(phone))
         resetIfOwnerChanged()
@@ -553,11 +617,13 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
             val lookup = enrollments.authorized { api.lookupCustomer(it, normalized) }
             when (val decision = decideAfterLookup(lookup)) {
                 DuplicateDecision.BelongsToOther -> return AddCustomerOutcome.OtherHandler
-                is DuplicateDecision.OpenExisting -> return AddCustomerOutcome.Existing(decision.customerId, decision.name, normalized)
+                is DuplicateDecision.OpenExisting -> return AddCustomerOutcome.Existing(decision.customerId, decision.name, normalized, lookup.handlers)
                 DuplicateDecision.Create -> Unit
             }
-            val created = enrollments.authorized { api.createCustomer(it, createCustomerBody(name, phone, notes)) }
-            if (customers.state.value.query.isEmpty()) customers.prepend(created)
+            val created = enrollments.authorized {
+                api.createCustomer(it, createCustomerBody(name, phone, notes, assigneeToSend(assignTo, mutableProfile.value)))
+            }
+            if (customers.state.value.query.isEmpty() && mutableCustomersScope.value == ScopeFilter.All) customers.prepend(created)
             return AddCustomerOutcome.Created(created)
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -567,6 +633,35 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
                 return if (id != null) AddCustomerOutcome.Existing(id, name.trim(), normalized) else AddCustomerOutcome.OtherHandler
             }
             return AddCustomerOutcome.Failed(customersFailureMessage(error))
+        }
+    }
+
+    /**
+     * Manager only: makes [employeeIds] (members of the manager's scope) the in-scope handlers of [original]. Handlers outside
+     * the scope stay. The stored customer replaces the loaded copies; a customer that left the manager's scope is fetched away.
+     */
+    suspend fun handOver(original: Customer, employeeIds: List<String>): Result<Customer> {
+        return try {
+            val saved = enrollments.authorized { api.setHandlers(it, original.id, employeeIds) }
+            val profile = mutableProfile.value
+            val merged = original.copy(
+                employees = saved.employees,
+                scope = saved.scope ?: scopeAfterHandlersChanged(saved.employees, profile),
+                whatsappWindow = saved.whatsappWindow ?: original.whatsappWindow,
+            )
+            customers.update(merged.id) { merged }
+            chats.update(merged.id) { it.copy(employees = merged.employees) }
+            if (selectedId == merged.id) mutableCustomer.value = merged
+            if (scopeAfterHandlersChanged(merged.employees, profile) == null) {
+                coroutineScope {
+                    if (customers.state.value.loaded) launch { customers.refresh() }
+                    if (chats.state.value.loaded) launch { chats.refresh() }
+                }
+            }
+            Result.success(merged)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            Result.failure(IllegalStateException(customersFailureMessage(error)))
         }
     }
 
@@ -591,7 +686,7 @@ internal class CustomersRepository(private val enrollments: EnrollmentRepository
 internal sealed interface AddCustomerOutcome {
     data class Created(val customer: Customer) : AddCustomerOutcome
     /** The number is already one of this employee's customers. */
-    data class Existing(val customerId: String, val name: String, val phone: String) : AddCustomerOutcome
+    data class Existing(val customerId: String, val name: String, val phone: String, val handlers: List<EmployeeRef> = emptyList()) : AddCustomerOutcome
     data object OtherHandler : AddCustomerOutcome
     data class Failed(val message: String) : AddCustomerOutcome
 }

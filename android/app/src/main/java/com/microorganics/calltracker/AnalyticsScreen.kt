@@ -98,10 +98,13 @@ private fun changeLabel(change: KpiChange): String = when (change.movement) {
 
 /** The employee's own call analytics: range chips, summary cards and two simple charts. */
 @Composable
-internal fun AnalyticsTab(repository: AnalyticsRepository, scope: CoroutineScope) {
+internal fun AnalyticsTab(repository: AnalyticsRepository, scope: CoroutineScope, profile: EmployeeProfile? = null) {
     val state by repository.analytics.collectAsStateWithLifecycle()
+    val selectedEmployees by repository.employees.collectAsStateWithLifecycle()
+    val manager = profile.asManager()
     var pickingCustom by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { scope.launch { repository.openAnalytics() } }
+    // Runs again when the profile (role, team) arrives or changes: a manager's numbers cover the whole scope.
+    LaunchedEffect(scopeSignature(profile)) { scope.launch { repository.openAnalytics() } }
     if (pickingCustom) {
         CustomRangeDialog(
             today = repository.today(),
@@ -116,7 +119,7 @@ internal fun AnalyticsTab(repository: AnalyticsRepository, scope: CoroutineScope
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(Modifier.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Your calls", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(if (manager != null) "Calls" else "Your calls", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 val range = state.data?.range ?: state.selection.resolve(repository.today())
                 SupportingText(rangeText(range) + " · IST")
             }
@@ -135,6 +138,7 @@ internal fun AnalyticsTab(repository: AnalyticsRepository, scope: CoroutineScope
                 )
             }
         }
+        AnalyticsScopeBar(manager, selectedEmployees) { ids -> scope.launch { repository.selectEmployees(ids) } }
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
         state.error?.let { message ->
             Surface(Modifier.padding(horizontal = 16.dp).fillMaxWidth(), shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.errorContainer) {
@@ -151,7 +155,7 @@ internal fun AnalyticsTab(repository: AnalyticsRepository, scope: CoroutineScope
                 Text("No calls in this range", style = MaterialTheme.typography.titleMedium)
                 SupportingText("Calls synced from this phone appear here. Pick another range or sync from Settings.")
             }
-            else -> AnalyticsContent(data)
+            else -> AnalyticsContent(data, manager?.id)
         }
     }
 }
@@ -160,7 +164,7 @@ private fun rangeText(range: DateRange): String =
     if (range.from == range.to) longDate().format(range.from) else "${shortDate().format(range.from)} – ${longDate().format(range.to)}"
 
 @Composable
-private fun AnalyticsContent(data: CallAnalytics) {
+private fun AnalyticsContent(data: CallAnalytics, viewerId: String?) {
     Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         kpis(data.totals, data.previous).chunked(2).forEach { pair ->
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -169,6 +173,7 @@ private fun AnalyticsContent(data: CallAnalytics) {
             }
         }
         if (data.previous != null) SupportingText("Changes compare with the previous ${data.range.days} day${if (data.range.days == 1L) "" else "s"}.")
+        if (viewerId != null && data.byEmployee.isNotEmpty()) ChartCard("By employee") { EmployeeRows(data.byEmployee, viewerId) }
         val breakdown = typeBreakdown(data.byType)
         if (breakdown.isNotEmpty()) ChartCard("Calls by type") { TypeBars(breakdown) }
         if (data.range.days > 1 && data.byDay.isNotEmpty()) {
@@ -240,6 +245,21 @@ private fun ChartCard(title: String, content: @Composable () -> Unit) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             content()
+        }
+    }
+}
+
+/** Compact manager list: who made how many calls, how many connected, and the talk time. */
+@Composable
+private fun EmployeeRows(rows: List<EmployeeCalls>, viewerId: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEach { row ->
+            val name = if (row.id == viewerId) "You" else row.name.ifEmpty { "Employee" }
+            val summary = "${row.total} calls · ${row.connected} connected · ${formatDuration(row.talkSeconds)}"
+            Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}) {
+                Text(name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

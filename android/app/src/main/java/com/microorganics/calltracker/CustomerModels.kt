@@ -25,6 +25,8 @@ internal data class Customer(
     val lastCallAt: Long? = null,
     /** Null when the server did not say; see [isReplyWindowOpen]. */
     val whatsappWindow: WhatsAppWindow? = null,
+    /** `own` when the viewing manager handles the customer, `team` when only their reports do; null for everyone else. */
+    val scope: String? = null,
 )
 
 internal enum class MessageDirection { IN, OUT }
@@ -83,12 +85,12 @@ internal fun JSONObject.optionalTime(name: String): Long? {
     }
 }
 
-private fun JSONObject.employees(name: String): List<EmployeeRef> {
+internal fun JSONObject.employees(name: String): List<EmployeeRef> {
     val array = optJSONArray(name) ?: return emptyList()
     return array.objects().mapNotNull { it.employee() }
 }
 
-private fun JSONObject.employee(): EmployeeRef? {
+internal fun JSONObject.employee(): EmployeeRef? {
     val id = optionalString("id") ?: return null
     return EmployeeRef(id, optionalString("name").orEmpty())
 }
@@ -108,6 +110,7 @@ internal fun parseCustomer(json: JSONObject): Customer? {
         messageCount = json.optInt("messageCount", 0),
         lastMessageAt = json.optionalTime("lastMessageAt"), lastCallAt = json.optionalTime("lastCallAt"),
         whatsappWindow = parseWindow(json.optJSONObject("whatsappWindow")),
+        scope = json.optionalString("scope")?.takeIf { it == "own" || it == "team" },
     )
 }
 

@@ -149,8 +149,9 @@ internal class DeviceApi(private val server: () -> String?) {
         }
     }
 
-    fun customers(enrollment: Enrollment, query: String?, cursor: String?, limit: Int = PAGE_SIZE): Page<Customer> =
-        parsePage(get("/v1/device/customers" + queryString("q" to query, "cursor" to cursor, "limit" to limit.toString()), enrollment.token), ::parseCustomer)
+    /** [employeeId] (`me`, `team` or an id) narrows a manager's list; it is sent only by managers. */
+    fun customers(enrollment: Enrollment, query: String?, cursor: String?, employeeId: String? = null, limit: Int = PAGE_SIZE): Page<Customer> =
+        parsePage(get("/v1/device/customers" + queryString("q" to query, "cursor" to cursor, "limit" to limit.toString(), "employeeId" to employeeId), enrollment.token), ::parseCustomer)
 
     fun customer(enrollment: Enrollment, customerId: String): Customer? =
         get("/v1/device/customers/${android.net.Uri.encode(customerId)}", enrollment.token).optJSONObject("customer")?.let(::parseCustomer)
@@ -158,8 +159,8 @@ internal class DeviceApi(private val server: () -> String?) {
     fun customerMessages(enrollment: Enrollment, customerId: String, cursor: String?, limit: Int = PAGE_SIZE): Page<WhatsAppMessage> =
         parsePage(get("/v1/device/customers/${android.net.Uri.encode(customerId)}/messages" + queryString("cursor" to cursor, "limit" to limit.toString()), enrollment.token), ::parseMessage)
 
-    fun chats(enrollment: Enrollment, query: String?, cursor: String?, limit: Int = PAGE_SIZE): Page<ChatSummary> =
-        parsePage(get("/v1/device/whatsapp/chats" + queryString("q" to query, "cursor" to cursor, "limit" to limit.toString()), enrollment.token), ::parseChat)
+    fun chats(enrollment: Enrollment, query: String?, cursor: String?, employeeId: String? = null, limit: Int = PAGE_SIZE): Page<ChatSummary> =
+        parsePage(get("/v1/device/whatsapp/chats" + queryString("q" to query, "cursor" to cursor, "limit" to limit.toString(), "employeeId" to employeeId), enrollment.token), ::parseChat)
 
     /** Marks the chat read for this employee only. A 404 (unknown or unassigned customer) surfaces as [ApiFailure]. */
     fun markChatRead(enrollment: Enrollment, customerId: String) {
@@ -199,7 +200,15 @@ internal class DeviceApi(private val server: () -> String?) {
         request("PATCH", "/v1/device/customers/${android.net.Uri.encode(customerId)}", body, enrollment.token).optJSONObject("customer")?.let(::parseCustomer)
             ?: throw IOException("Malformed customer response")
 
-    /** This employee's own name and configured phone number. */
+    /**
+     * Manager only: sets which members of the manager's scope handle the customer ([employeeIds] are in-scope ids only; the
+     * server keeps handlers outside the scope). Returns the stored customer.
+     */
+    fun setHandlers(enrollment: Enrollment, customerId: String, employeeIds: List<String>): Customer =
+        request("PUT", "/v1/device/customers/${android.net.Uri.encode(customerId)}/handlers", handoverBody(employeeIds), enrollment.token)
+            .optJSONObject("customer")?.let(::parseCustomer) ?: throw IOException("Malformed customer response")
+
+    /** This employee's own name, configured phone number, role and (for a manager) team. */
     fun profile(enrollment: Enrollment): EmployeeProfile =
         parseProfile(get("/v1/device/profile", enrollment.token)) ?: throw IOException("Malformed profile response")
 

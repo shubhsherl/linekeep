@@ -176,6 +176,10 @@ Employees can also use Linekeep on a computer at `https://<worker>/app`, signed 
 
 For WhatsApp codes you can tick **Send a full sentence instead of just the code** under the chosen variable (for example "Your Linekeep sign-in code is {{code}}. It is valid for 10 minutes. Do not share it with anyone."); the preview shows the whole message with a sample code.
 
+### Managers and teams
+
+To give someone oversight of a team, open **Employees**, set their **Role** to **Manager**, then set **Reports to** on each person who should report to them. Managers see their own and their team's customers, chats, calls and analytics in the app and the browser, and can hand customers over inside the team. They do not get any admin screens. Before demoting a manager, choose where their team goes.
+
 ## 6. Enroll a phone
 
 1. Open Linekeep and tap **Scan QR code** on Home, then scan the QR code from the admin. Confirm the server name shown.

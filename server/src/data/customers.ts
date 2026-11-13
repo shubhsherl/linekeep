@@ -100,8 +100,11 @@ const chatInput = z.strictObject({
 });
 
 export type CustomerCursor = z.infer<typeof callHistoryCursor>;
-/** Restricts reads to customers assigned to this employee (device or web access). `apiBase` prefixes media URLs. */
-export interface CustomerScope { employeeId: string; apiBase?: string }
+/**
+ * Restricts reads to customers with at least one handler among `employeeIds` (an employee: themselves; a manager:
+ * themselves and their active reports). `apiBase` prefixes media URLs.
+ */
+export interface CustomerScope { employeeIds: string[]; apiBase?: string }
 
 export interface Customer {
   id: string;
@@ -196,6 +199,14 @@ const customerSelect = `SELECT c.id, c.name, c.phone, c.email, c.notes, c.source
   (SELECT json_object('id', x.id, 'name', x.name) FROM employees x WHERE x.id = c.created_by_employee_id) AS created_by,
   (SELECT max(i.sent_at) FROM whatsapp_messages i WHERE i.customer_id = c.id AND i.direction = 'in') AS last_inbound_at
   FROM customers c`;
+/** Customers with a handler among these employees; an empty set matches nothing. */
+function handledBy(employeeIds: string[]): { sql: string; binds: string[] } {
+  if (employeeIds.length === 0) return { sql: "0", binds: [] };
+  return {
+    sql: `EXISTS (SELECT 1 FROM customer_employees s WHERE s.customer_id = c.id AND s.employee_id IN (${employeeIds.map(() => "?").join(", ")}))`,
+    binds: employeeIds,
+  };
+}
 const assigned = (binding: string) =>
   `EXISTS (SELECT 1 FROM customer_employees s WHERE s.customer_id = c.id AND s.employee_id = ${binding})`;
 
@@ -282,19 +293,21 @@ function paged<T>(
 
 export function createCustomerRepository(db: D1Database, clock: Clock = () => new Date()) {
   async function find(customerId: string, scope?: CustomerScope): Promise<Customer | null> {
+    const handled = scope ? handledBy(scope.employeeIds) : undefined;
     const row = await db.prepare(
       `${customerSelect} WHERE c.id = ? AND c.archived_at IS NULL
-        ${scope ? `AND ${assigned("?")}` : ""}`,
-    ).bind(boundedId.parse(customerId), ...(scope ? [scope.employeeId] : []))
+        ${handled ? `AND ${handled.sql}` : ""}`,
+    ).bind(boundedId.parse(customerId), ...(handled?.binds ?? []))
       .first<CustomerRow>();
     return row ? customer(row) : null;
   }
 
   async function visible(customerId: string, scope?: CustomerScope): Promise<boolean> {
+    const handled = scope ? handledBy(scope.employeeIds) : undefined;
     const row = await db.prepare(
       `SELECT 1 AS found FROM customers c WHERE c.id = ? AND c.archived_at IS NULL
-        ${scope ? `AND ${assigned("?")}` : ""}`,
-    ).bind(boundedId.parse(customerId), ...(scope ? [scope.employeeId] : []))
+        ${handled ? `AND ${handled.sql}` : ""}`,
+    ).bind(boundedId.parse(customerId), ...(handled?.binds ?? []))
       .first<{ found: number }>();
     return row !== null;
   }
@@ -357,10 +370,15 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
       return insert(value, [...new Set(value.employeeIds ?? [])], null);
     },
 
-    /** An employee adding a customer from the app: assigned to them alone, source "App", created-by recorded. */
-    async createOwnCustomer(employeeId: string, input: z.input<typeof deviceCustomerCreateInput>): Promise<Customer> {
+    /**
+     * An employee adding a customer from the app: assigned to them alone (or, for a manager, to the team member
+     * `assigneeId`), source "App", created-by is the creator.
+     */
+    async createOwnCustomer(
+      employeeId: string, input: z.input<typeof deviceCustomerCreateInput>, assigneeId: string = employeeId,
+    ): Promise<Customer> {
       const value = deviceCustomerCreateInput.parse(input);
-      return insert({ ...value, source: "App" }, [boundedId.parse(employeeId)], employeeId);
+      return insert({ ...value, source: "App" }, [boundedId.parse(assigneeId)], boundedId.parse(employeeId));
     },
 
     /**
@@ -368,16 +386,25 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
      * whether it is this employee's. Names of customers that belong to someone else are never read.
      */
     async lookupByPhone(
-      input: z.input<typeof customerLookupInput>, scope: CustomerScope,
-    ): Promise<{ phone: string; exists: boolean; mine: boolean; customer?: { id: string; name: string } }> {
+      input: z.input<typeof customerLookupInput>, scope: CustomerScope, options: { handlers?: boolean } = {},
+    ): Promise<{
+      phone: string; exists: boolean; mine: boolean; customer?: { id: string; name: string }; handlers?: { id: string; name: string }[];
+    }> {
       const { phone } = customerLookupInput.parse(input);
+      const handled = handledBy(scope.employeeIds);
       const row = await db.prepare(
-        `SELECT c.id, c.name, ${assigned("?")} AS mine FROM customers c
+        `SELECT c.id, c.name, ${handled.sql} AS mine FROM customers c
           WHERE c.phone_key = ? AND c.archived_at IS NULL`,
-      ).bind(boundedId.parse(scope.employeeId), phone.phoneKey).first<{ id: string; name: string; mine: number }>();
+      ).bind(...handled.binds, phone.phoneKey).first<{ id: string; name: string; mine: number }>();
       if (!row) return { phone: phone.phone, exists: false, mine: false };
       if (!row.mine) return { phone: phone.phone, exists: true, mine: false };
-      return { phone: phone.phone, exists: true, mine: true, customer: { id: row.id, name: row.name } };
+      const base = { phone: phone.phone, exists: true, mine: true, customer: { id: row.id, name: row.name } };
+      if (!options.handlers) return base;
+      const handlers = await db.prepare(
+        `SELECT e.id, e.name FROM customer_employees ce JOIN employees e ON e.id = ce.employee_id
+          WHERE ce.customer_id = ? ORDER BY e.name, e.id`,
+      ).bind(row.id).all<{ id: string; name: string }>();
+      return { ...base, handlers: handlers.results };
     },
 
     getCustomer: find,
@@ -401,8 +428,9 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
       const conditions = ["c.archived_at IS NULL"];
       const bindings: (string | number)[] = [];
       if (scope) {
-        conditions.push(assigned("?"));
-        bindings.push(scope.employeeId);
+        const handled = handledBy(scope.employeeIds);
+        conditions.push(handled.sql);
+        bindings.push(...handled.binds);
       }
       if (value.q !== undefined) conditions.push(searchCondition(value.q, bindings));
       if (value.employeeId !== undefined) {
@@ -459,10 +487,11 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
         sets.push("country = COALESCE(?, 'India')");
         bindings.push(value.country);
       }
+      const handled = scope ? handledBy(scope.employeeIds) : undefined;
       const updated = await guardUnique(() => db.prepare(
         `UPDATE customers AS c SET ${sets.join(", ")}, updated_at = ?
-          WHERE c.id = ? AND c.archived_at IS NULL ${scope ? `AND ${assigned("?")}` : ""} RETURNING id`,
-      ).bind(...bindings, timestamp(clock), boundedId.parse(customerId), ...(scope ? [scope.employeeId] : []))
+          WHERE c.id = ? AND c.archived_at IS NULL ${handled ? `AND ${handled.sql}` : ""} RETURNING id`,
+      ).bind(...bindings, timestamp(clock), boundedId.parse(customerId), ...(handled?.binds ?? []))
         .first<{ id: string }>());
       return updated ? find(customerId, scope) : null;
     },
@@ -479,6 +508,27 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
             ${requested.length ? `AND employee_id NOT IN (${requested.map(() => "?").join(", ")})` : ""}`,
         ).bind(customerId, ...requested),
         ...requested.map((employeeId) => assignStatement(customerId, employeeId, now)),
+        db.prepare("UPDATE customers SET updated_at = ? WHERE id = ?").bind(now, customerId),
+      ]);
+      return find(customerId);
+    },
+
+    /**
+     * A manager's change of the handlers: within `scopeIds` the handler set becomes exactly `requested` (a subset of
+     * `scopeIds`); handlers outside `scopeIds` are never touched. Returns null for an unknown or archived customer.
+     */
+    async setScopedHandlers(customerId: string, scopeIds: string[], requested: string[]): Promise<Customer | null> {
+      const wanted = [...new Set(customerEmployeesInput.parse({ employeeIds: requested }).employeeIds)];
+      if (!wanted.every((employeeId) => scopeIds.includes(employeeId))) throw new CustomerAssignmentError();
+      if (!(await visible(customerId, { employeeIds: scopeIds }))) return null;
+      await assertAssignable(customerId, wanted);
+      const now = timestamp(clock);
+      const removed = scopeIds.filter((employeeId) => !wanted.includes(employeeId));
+      await db.batch([
+        ...(removed.length ? [db.prepare(
+          `DELETE FROM customer_employees WHERE customer_id = ? AND employee_id IN (${removed.map(() => "?").join(", ")})`,
+        ).bind(customerId, ...removed)] : []),
+        ...wanted.map((employeeId) => assignStatement(customerId, employeeId, now)),
         db.prepare("UPDATE customers SET updated_at = ? WHERE id = ?").bind(now, customerId),
       ]);
       return find(customerId);
@@ -584,8 +634,9 @@ export function createCustomerRepository(db: D1Database, clock: Clock = () => ne
       const conditions = ["c.archived_at IS NULL"];
       const bindings: (string | number)[] = [];
       if (scope) {
-        conditions.push(assigned("?"));
-        bindings.push(scope.employeeId);
+        const handled = handledBy(scope.employeeIds);
+        conditions.push(handled.sql);
+        bindings.push(...handled.binds);
       }
       if (value.q !== undefined) conditions.push(searchCondition(value.q, bindings));
       if (value.employeeId !== undefined) {

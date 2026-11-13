@@ -138,6 +138,9 @@ const metricColumns = `COUNT(*) AS total,
   COALESCE(SUM(has_recording), 0) AS withRecording,
   ${callTypes.map((type) => `COUNT(CASE WHEN call_type = '${type}' THEN 1 END) AS ${type}`).join(", ")}`;
 
+/** All-zero metrics: an included employee with no calls. */
+export const emptyMetrics = (): AnalyticsMetrics => metrics(undefined);
+
 function metrics(row: MetricRow | undefined): AnalyticsMetrics {
   const value = row ?? ({} as Partial<MetricRow>);
   const n = (key: keyof MetricRow) => Number(value[key] ?? 0);
