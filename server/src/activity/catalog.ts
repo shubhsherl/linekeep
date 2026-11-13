@@ -39,7 +39,7 @@ export const activityCatalog = {
   customer: {
     created: ["source", "assigned"],
     updated: ["fields"],
-    assigned: ["employees"],
+    assigned: ["employees", "auto", "source"],
     unassigned: ["employees"],
     archived: [],
     customers_handed_over: ["added", "removed", "to", "from"],

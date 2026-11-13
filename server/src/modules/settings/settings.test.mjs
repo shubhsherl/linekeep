@@ -60,7 +60,7 @@ test("a fresh install has everything off and unset", async (t) => {
   const body = await f.get();
   assert.deepEqual(body.settings.features, { customers: false, whatsapp: false });
   assert.deepEqual(body.settings.whatsapp, {
-    phoneNumberId: null, wabaId: null, appId: null, graphVersion: "v23.0",
+    phoneNumberId: null, wabaId: null, appId: null, graphVersion: "v23.0", defaultHandler: null,
     token: { set: false, source: "none", hint: null }, appSecret: { set: false, source: "none", hint: null }, verifyToken: { set: false, source: "none", hint: null },
   });
   assert.deepEqual(body.settings.email, {

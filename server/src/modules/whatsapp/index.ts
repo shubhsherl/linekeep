@@ -49,7 +49,10 @@ export function createWhatsAppWebhookRoutes() {
       if (stored?.inserted) {
         const customer = { type: "customer" as const, id: stored.customerId };
         if (stored.customerCreated) {
-          events.push({ actor: { type: "customer", id: stored.customerId }, channel: "system", category: "customer", action: "created", target: customer, details: { source: "whatsapp_inbound" } });
+          events.push({ actor: { type: "customer", id: stored.customerId }, channel: "system", category: "customer", action: "created", target: customer, details: { source: "whatsapp_inbound", ...(stored.assignedTo ? { assigned: 1 } : {}) } });
+          if (stored.assignedTo) {
+            events.push({ actor: { type: "system" }, channel: "system", category: "customer", action: "assigned", target: customer, details: { employees: [stored.assignedTo.name], auto: true, source: "default_handler" } });
+          }
         }
         // The message type only: never its text, the sender's number or the media.
         events.push({ actor: { type: "customer", id: stored.customerId }, channel: "system", category: "whatsapp", action: "message_received", target: customer, details: { type: message.type } });

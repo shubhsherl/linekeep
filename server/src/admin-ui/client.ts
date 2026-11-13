@@ -5,6 +5,8 @@ export const clientJavaScript = String.raw`(() => {
   const byId = (id) => document.getElementById(id);
   const audio = byId('audio');
   const employees = new Map();
+  // var: updateEmployees can run before the settings code below has been evaluated.
+  var defaultHandlerShown = false;
   const callTypeNames = { incoming: 'Incoming', outgoing: 'Outgoing', missed: 'Missed', rejected: 'Rejected', blocked: 'Blocked', voicemail: 'Voicemail', answered_externally: 'Answered externally', unknown: 'Unknown' };
   const statusNames = { pending: 'Pending', failed: 'Failed', complete: 'Complete', deleted: 'Deleted' };
   const matchNames = { filename: 'Filename match', media_metadata: 'Media metadata', call_log: 'Call log match', unmatched: 'Unmatched metadata' };
@@ -138,6 +140,7 @@ export const clientJavaScript = String.raw`(() => {
       select.value = selected;
     }
     if (createManagerFields) createManagerFields.refresh();
+    if (defaultHandlerShown) renderDefaultHandler();
     renderAnalyticsEmployeeChoices();
     updateActivityEmployees();
     updateInvitationAvailability();
@@ -6416,6 +6419,7 @@ export const clientJavaScript = String.raw`(() => {
     byId('config-nav-whatsapp').hidden = !whatsappAvailable();
     byId('tplimg-panel').hidden = !whatsappAvailable();
     byId('tplcache-panel').hidden = !whatsappAvailable();
+    byId('dhandler-panel').hidden = !whatsappAvailable();
     if (!whatsappAvailable() && !byId('config-section-whatsapp').hidden) selectConfigSection('features', false);
     if (activeTab && !tabAvailable(activeTab)) { location.hash = 'call-history'; showTab(); }
     if (activityOpened && activityLinks !== features.customers) activityLog.load(true);
@@ -6734,8 +6738,55 @@ export const clientJavaScript = String.raw`(() => {
   function settingsSection(name) {
     return settingsState.data && settingsState.data.settings ? settingsState.data.settings[name] || {} : {};
   }
+  // Default handler card: the select lists active employees (managers marked); an inactive saved one stays visible with a warning.
+  const dhandler = { saved: '' };
+  function renderDefaultHandler() {
+    const select = byId('dhandler-select');
+    const saved = settingsSection('whatsapp').defaultHandler;
+    const savedId = saved && typeof saved.id === 'string' ? saved.id : '';
+    const keep = select.dataset.touched === 'yes' ? select.value : savedId;
+    dhandler.saved = savedId;
+    const none = element('option', 'No default (leave unassigned)');
+    none.value = '';
+    const options = [none];
+    const people = Array.from(employees.values()).filter((employee) => employee.active || employee.id === savedId)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const employee of people) {
+      const option = element('option', employee.name + (employee.role === 'manager' ? ' (manager)' : '') + (employee.active ? '' : ' (inactive)'));
+      option.value = employee.id;
+      options.push(option);
+    }
+    if (savedId && !people.some((employee) => employee.id === savedId)) {
+      const option = element('option', (saved && typeof saved.name === 'string' ? saved.name : 'Unknown employee') + (saved && saved.active === false ? ' (inactive)' : ''));
+      option.value = savedId;
+      options.push(option);
+    }
+    select.replaceChildren(...options);
+    select.value = Array.from(select.options).some((option) => option.value === keep) ? keep : savedId;
+    byId('dhandler-warning').hidden = !(saved && saved.active === false);
+  }
+  byId('dhandler-select').addEventListener('change', () => { byId('dhandler-select').dataset.touched = 'yes'; });
+  byId('dhandler-save').addEventListener('click', async () => {
+    const button = byId('dhandler-save');
+    const select = byId('dhandler-select');
+    button.disabled = true;
+    message('dhandler-error', '');
+    message('dhandler-status', 'Saving…');
+    try {
+      await putSettings('whatsapp', { defaultHandlerId: select.value || null });
+      delete select.dataset.touched;
+      renderDefaultHandler();
+      message('dhandler-status', 'Saved.');
+    } catch (error) {
+      message('dhandler-status', '');
+      message('dhandler-error', error.code === 'invalid_employee' ? 'Choose an active employee.' : 'Could not save the default handler. ' + errorMessage(error));
+    } finally {
+      button.disabled = false;
+    }
+  });
   function renderSettings(only) {
     renderImportBanner();
+    if (!only || only === 'whatsapp') { defaultHandlerShown = true; renderDefaultHandler(); }
     const pages = { features: renderFeaturesPage, whatsapp: renderWhatsappPage, email: renderEmailPage, push: renderPushPage, employeeWeb: renderWebPage, activity: renderActivityLogPage };
     for (const [name, render] of Object.entries(pages)) if (!only || only === name) render();
   }
@@ -7252,13 +7303,13 @@ export const clientJavaScript = String.raw`(() => {
   const ACT_ACTORS = { employee: 'Employee', admin: 'Administrator', system: 'System', customer: 'Customer' };
   const ACT_CATEGORY_NAMES = { signin: 'Sign-in', device: 'Devices', customer: 'Customers', whatsapp: 'WhatsApp', call: 'Calls', admin: 'Admin changes' };
   const ACT_TARGET_FALLBACK = { customer: 'a customer', employee: 'an employee', device: 'a phone', call: 'a call', template: 'a template' };
-  const ACT_SOURCES = { employee_app: 'from the app', employee_web: 'on the web', admin: 'from the admin', bulk_import: 'bulk import', whatsapp_inbound: 'from an inbound WhatsApp message' };
+  const ACT_SOURCES = { employee_app: 'from the app', employee_web: 'on the web', admin: 'from the admin', bulk_import: 'bulk import', whatsapp_inbound: 'from an inbound WhatsApp message', default_handler: 'default handler' };
   const ACT_MEDIA = { image: 'a photo', video: 'a video', audio: 'an audio message', document: 'a file', sticker: 'a sticker' };
   const ACT_KINDS = { image: 'photo', video: 'video', audio: 'audio', document: 'file' };
   const ACT_SECTIONS = { features: 'features', whatsapp: 'WhatsApp Business', email: 'daily email report', push: 'push notification', employeeWeb: 'employee web access', activity: 'activity log', app: 'Android app' };
   const ACT_CHANGES = { created: 'created', updated: 'updated', deleted: 'deleted', reordered: 'reordered' };
   const ACT_LABELS = { bytes: 'Size', ip: 'IP address', toEmployee: 'Moved to', callId: 'Call ID', androidVersion: 'Android version', appVersion: 'App version', templateName: 'Template' };
-  const ACT_VALUES = { email: 'Email', whatsapp: 'WhatsApp', wrong_code: 'Wrong code', employee_app: 'Employee app', employee_web: 'Employee web app', admin: 'Admin', bulk_import: 'Bulk import', whatsapp_inbound: 'Inbound WhatsApp message' };
+  const ACT_VALUES = { email: 'Email', whatsapp: 'WhatsApp', wrong_code: 'Wrong code', employee_app: 'Employee app', employee_web: 'Employee web app', admin: 'Admin', bulk_import: 'Bulk import', whatsapp_inbound: 'Inbound WhatsApp message', default_handler: 'Default handler' };
   const ACT_ENUM_KEYS = ['method', 'reason', 'source', 'type', 'kind', 'mediaKind', 'change', 'section'];
   const ACT_CATEGORIES = Object.keys(ACT_CATEGORY_NAMES);
   const ACT_DEFAULT_RETENTION = 90;
@@ -7376,7 +7427,7 @@ export const clientJavaScript = String.raw`(() => {
       case 'device/app_version_changed': return ['updated the app' + (actText(d.from) && actText(d.to) ? ' from ' + d.from + ' to ' + d.to : '')];
       case 'customer/created': { const how = actLookup(ACT_SOURCES, d.source); return ['added customer ', target(), how ? ' (' + how + ')' : '']; }
       case 'customer/updated': return ['edited details of ', target(), fieldNote];
-      case 'customer/assigned': return ['assigned ', target(), ' to ' + (names.length ? names.join(', ') : 'an employee')];
+      case 'customer/assigned': return ['assigned ', target(), ' to ' + (names.length ? names.join(', ') : 'an employee') + (d.auto === true ? ' automatically (default handler)' : '')];
       case 'customer/unassigned': return ['unassigned ', target(), ' from ' + (names.length ? names.join(', ') : 'an employee')];
       case 'customer/archived': return ['archived customer ', target()];
       case 'customer/customers_handed_over': {

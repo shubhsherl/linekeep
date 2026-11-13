@@ -11,7 +11,7 @@ import { mailProblems } from "../../reporting/mail";
 import { pushAccount } from "../../push/fcm";
 import { pushClientConfig } from "../../push/client-config";
 import { canEncrypt } from "../../settings/crypto";
-import { activityKeys, fieldByKey, featureKeys, MAX_ACTIVITY_RETENTION_DAYS, sections, type Section } from "../../settings/fields";
+import { activityKeys, defaultHandlerKey, fieldByKey, featureKeys, MAX_ACTIVITY_RETENTION_DAYS, sections, type Section } from "../../settings/fields";
 import { whatsappTemplateSetting } from "../../settings/employee-web";
 import { employeeWebChanges, type EmployeeWebInput } from "./employee-web";
 import {
@@ -30,6 +30,8 @@ const bodies = {
   whatsapp: z.strictObject({
     token: text, appSecret: text, phoneNumberId: text, wabaId: text, appId: text, graphVersion: text,
     verifyToken: z.union([z.string().max(12000), z.strictObject({ generate: z.literal(true) }), z.null()]).optional(),
+    // The employee new WhatsApp customers are assigned to; null clears it.
+    defaultHandlerId: nullable(z.string().min(1).max(256)),
   }),
   email: z.strictObject({
     enabled: nullable(z.boolean()), apiKey: text, domain: text, fromEmail: text, region: text, sendTime: text,
@@ -92,8 +94,17 @@ async function freshSnapshot(env: Env): Promise<SettingsSnapshot> {
   return loadSettings(env);
 }
 
-function view(deployment: Env, snapshot: SettingsSnapshot, only?: Section) {
-  const settings = describeSettings(deployment, snapshot);
+/** The saved default handler with its current name and whether they can still receive customers; null when unset or the employee is gone. */
+async function describeDefaultHandler(db: D1Database, snapshot: SettingsSnapshot): Promise<{ id: string; name: string; active: boolean } | null> {
+  const id = snapshot.values.get(defaultHandlerKey);
+  if (!id) return null;
+  const row = await db.prepare("SELECT id, name, active FROM employees WHERE id = ?").bind(id).first<{ id: string; name: string; active: number }>();
+  return row ? { id: row.id, name: row.name, active: row.active === 1 } : null;
+}
+
+async function view(deployment: Env, snapshot: SettingsSnapshot, only?: Section) {
+  const described = describeSettings(deployment, snapshot);
+  const settings = { ...described, whatsapp: { ...described.whatsapp, defaultHandler: await describeDefaultHandler(deployment.DB, snapshot) } };
   return {
     settings: only ? { [only]: settings[only] } : settings,
     deployment: { importable: importableFields(deployment, snapshot).map((field) => field.key) },
@@ -131,7 +142,7 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
 
   routes.get("/settings", async (context) => {
     const deployment = deploymentOf(context);
-    return context.json({ requestId: context.get("requestId"), ...view(deployment, await freshSnapshot(deployment)) });
+    return context.json({ requestId: context.get("requestId"), ...(await view(deployment, await freshSnapshot(deployment))) });
   });
 
   routes.post("/settings/import-deployment", async (context) => {
@@ -208,6 +219,17 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
       for (const [name, value] of Object.entries(input)) {
         if (value === undefined) continue;
         const key = `${section}.${name}`;
+        if (key === defaultHandlerKey) {
+          if (value === null) {
+            changes.push({ key, value: null });
+            continue;
+          }
+          // Any role may take new customers, but the employee must exist and be active.
+          const found = await deployment.DB.prepare("SELECT 1 AS ok FROM employees WHERE id = ? AND active = 1").bind(value as string).first();
+          if (!found) throw new ApiError(400, "invalid_employee", "Choose an active employee");
+          changes.push({ key, value: value as string });
+          continue;
+        }
         const field = fieldByKey.get(key)!;
         if (value === null) {
           changes.push({ key, value: null });
@@ -242,7 +264,7 @@ export function createAdminSettingsRoutes(authorize: MiddlewareHandler<AppBindin
     }
     return context.json({
       requestId: context.get("requestId"),
-      ...view(deployment, await freshSnapshot(deployment), section),
+      ...(await view(deployment, await freshSnapshot(deployment), section)),
       ...(generatedVerifyToken ? { generatedVerifyToken } : {}),
     });
   });

@@ -88,6 +88,9 @@ export function activityRetentionDays(values: ReadonlyMap<string, string>): numb
   return Math.min(days, MAX_ACTIVITY_RETENTION_DAYS);
 }
 
+/** The employee new WhatsApp customers are assigned to (an employee id); absent means they stay unassigned. */
+export const defaultHandlerKey = "whatsapp.defaultHandlerId";
+
 export const featureKeys = { customers: "feature.customers", whatsapp: "feature.whatsapp" } as const;
 export type FeatureName = keyof typeof featureKeys;
 export interface Features { customers: boolean; whatsapp: boolean }

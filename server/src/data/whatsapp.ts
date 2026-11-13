@@ -1,4 +1,5 @@
-import { createCustomerRepository, CustomerPhoneExistsError, normalizePhone, message, type MessageRow, type WhatsAppMessage } from "./customers";
+import { defaultHandlerKey } from "../settings/fields";
+import { createCustomerRepository, CustomerAssignmentError, CustomerPhoneExistsError, normalizePhone, message, type MessageRow, type WhatsAppMessage } from "./customers";
 import { type Clock, timestamp } from "./values";
 
 /** Order in which a message's delivery state may advance; a late `sent` never undoes `read`. */
@@ -89,19 +90,32 @@ export function createWhatsAppRepository(db: D1Database, clock: Clock = () => ne
      * Stores a customer's message, creating an unassigned customer for an unknown number.
      * Meta redelivers webhooks, so the provider id makes this idempotent.
      */
-    async receive(input: { externalId: string; from: string; name?: string; type: string; body?: string; sentAt: string; to: string | null; media?: { id: string; mimeType?: string; fileName?: string } }): Promise<{ customerId: string; messageId: string; inserted: boolean; customerCreated: boolean } | null> {
+    async receive(input: { externalId: string; from: string; name?: string; type: string; body?: string; sentAt: string; to: string | null; media?: { id: string; mimeType?: string; fileName?: string } }): Promise<{ customerId: string; messageId: string; inserted: boolean; customerCreated: boolean; assignedTo: { id: string; name: string } | null } | null> {
       const normalized = normalizePhone(input.from);
       if (!normalized) return null;
       const find = () => db.prepare("SELECT id FROM customers WHERE phone_key = ? AND archived_at IS NULL")
         .bind(normalized.phoneKey).first<{ id: string }>();
       let customerId = (await find())?.id;
       let customerCreated = false;
+      let assignedTo: { id: string; name: string } | null = null;
       if (!customerId) {
+        // A new number goes to the default handler when one is set and active. The customer and the assignment are
+        // one D1 batch, so a lost race for the number leaves nothing behind; an inactive or missing employee
+        // never fails the message, the customer is simply created unassigned.
+        const handlerId = (await db.prepare("SELECT value FROM app_settings WHERE key = ?").bind(defaultHandlerKey).first<{ value: string }>())?.value;
+        const draft = { name: input.name ?? normalized.phone, phone: normalized.phone, source: "whatsapp" };
         try {
-          customerId = (await customers.createCustomer({
-            name: input.name ?? normalized.phone, phone: normalized.phone, source: "whatsapp",
-          })).id;
+          let created;
+          try {
+            created = await customers.createCustomer(handlerId ? { ...draft, employeeIds: [handlerId] } : draft);
+          } catch (error) {
+            if (!(error instanceof CustomerAssignmentError)) throw error;
+            created = await customers.createCustomer(draft);
+          }
+          customerId = created.id;
           customerCreated = true;
+          // The assignment is read back: an employee deactivated between the check and the batch is skipped by the batch itself.
+          assignedTo = created.employees.find((employee) => employee.id === handlerId) ?? null;
         } catch (error) {
           if (!(error instanceof CustomerPhoneExistsError)) throw error;
           customerId = (await find())?.id;
@@ -117,7 +131,7 @@ export function createWhatsAppRepository(db: D1Database, clock: Clock = () => ne
       ).bind(messageId, customerId, input.externalId, input.type, input.body ?? null,
         normalized.phone, input.to, input.sentAt, timestamp(clock),
         input.media?.id ?? null, input.media?.mimeType ?? null, input.media?.fileName ?? null).run();
-      return { customerId, messageId, inserted: result.meta.changes > 0, customerCreated };
+      return { customerId, messageId, inserted: result.meta.changes > 0, customerCreated, assignedTo };
     },
   };
 }

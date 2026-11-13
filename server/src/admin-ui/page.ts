@@ -347,6 +347,13 @@ export const adminHtml = `<!doctype html>
           <section id="config-section-whatsapp-business" class="cfg-section" aria-labelledby="config-whatsapp-business-heading" hidden>
             <h2 id="config-whatsapp-business-heading" class="cfg-section-title" tabindex="-1">WhatsApp Business</h2>
             <div id="settings-whatsapp-body" class="cfg-body"></div>
+            <section id="dhandler-panel" class="panel cfg-block" aria-labelledby="dhandler-heading">
+              <div class="section-heading"><h3 id="dhandler-heading" tabindex="-1">Default handler for new customers</h3><span id="dhandler-warning" class="badge pending" role="status" hidden>This employee is inactive, new customers will stay unassigned</span></div>
+              <p class="muted">New numbers that message your business are assigned to this person automatically. Existing customers are not changed.</p>
+              <div class="actions"><label for="dhandler-select" class="sr-only">Default handler</label><select id="dhandler-select"></select><button id="dhandler-save" type="button">Save</button></div>
+              <p id="dhandler-status" class="cfg-status" role="status" aria-live="polite"></p>
+              <p id="dhandler-error" class="error-text" role="alert" hidden></p>
+            </section>
             <section id="tplcache-panel" class="panel cfg-block" aria-labelledby="tplcache-heading">
               <div class="section-heading"><h3 id="tplcache-heading" tabindex="-1">Message templates</h3><button id="tplcache-refresh" class="secondary" type="button">Refresh templates</button></div>
               <p id="tplcache-info" class="muted" role="status" aria-live="polite">Loading…</p>
